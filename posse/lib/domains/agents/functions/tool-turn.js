@@ -3,6 +3,7 @@ import { parseLocalToolCall } from "../../providers/functions/posse-local/tool-p
 const SIMULATED_RESULT = /^(?:\{\s*"role"\s*:\s*"tool"|\{\s*"type"\s*:\s*"tool_result"|<tool_result\b)/i;
 const SIMULATED_RESULT_ANYWHERE = /(?:\{\s*"role"\s*:\s*"tool"|\{\s*"type"\s*:\s*"tool_result"|<tool_result\b)/i;
 const SIMULATED_REQUEST_ANYWHERE = /<(?:invoke|function_calls|tool_call)\b/i;
+const REQUEST_ENVELOPE = /^(?:\[\s*)?\{\s*"(?:name|tool)"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*"(?:arguments|content)"\s*:/;
 
 function leadingJsonObject(text) {
   if (!text.startsWith("{")) return null;
@@ -47,18 +48,22 @@ function embeddedToolCall(text) {
 }
 
 // CLI providers can emit a progress segment before their final JSON decision.
-// Accept only one complete trailing call, with plain commentary before it and
+// Accept a complete trailing decision, with plain commentary before it and
 // no other JSON/XML calls or simulated results. The caller still authorizes
 // the issued tool and its arguments; this parser never executes anything.
-function callAfterCommentary(text) {
+function callsAfterCommentary(text) {
   if (SIMULATED_RESULT_ANYWHERE.test(text) || SIMULATED_REQUEST_ANYWHERE.test(text)) return null;
-  const index = text.indexOf("{");
+  const index = text.search(/[\[{]/);
   if (index <= 0) return null;
   const prefix = text.slice(0,index);
   if (/[\[\]{}<>`]/.test(prefix)) return null;
-  const trailing = leadingJsonObject(text.slice(index));
-  if (!trailing || trailing.rest && trailing.rest !== trailing.body) return null;
-  return parseLocalToolCall(trailing.body);
+  const suffix = text.slice(index);
+  const exact = exactToolCalls(suffix);
+  if (exact) return exact;
+  const trailing = leadingJsonObject(suffix);
+  if (!trailing || trailing.rest && trailing.rest !== trailing.body && trailing.rest !== "}") return null;
+  const call = parseLocalToolCall(trailing.body);
+  return call ? [call] : null;
 }
 
 /** Accept one or more exact tool calls, or salvage a call before fabricated results. */
@@ -66,13 +71,17 @@ export function parseAgentToolTurn(output) {
   const text = String(output || "").trim();
   const exact = exactToolCalls(text);
   if (exact) return { calls: exact, malformed: false };
-  const afterCommentary = callAfterCommentary(text);
-  if (afterCommentary) return { calls: [afterCommentary], malformed: false };
+  const afterCommentary = callsAfterCommentary(text);
+  if (afterCommentary) return { calls: afterCommentary, malformed: false };
   const leading = leadingJsonObject(text);
   const firstCall = leading ? parseLocalToolCall(leading.body) : null;
+  // A complete call followed only by one redundant object terminator has
+  // unambiguous arguments. Normalize the envelope; the usual tool allowlist
+  // and argument validation still apply. Never salvage other trailing data.
+  if (firstCall && leading.rest === "}") return { calls: [firstCall], malformed: false };
   // Some CLI streams repeat the same decision in their final summary. One
   // identical retransmission is one request, never two executions.
   if (firstCall && leading.rest === leading.body) return { calls: [firstCall], malformed: false };
   if (firstCall && SIMULATED_RESULT.test(leading.rest)) return { calls: [firstCall], malformed: true };
-  return { calls: [], malformed: Boolean(firstCall || SIMULATED_RESULT_ANYWHERE.test(text) || SIMULATED_REQUEST_ANYWHERE.test(text) || embeddedToolCall(text)) };
+  return { calls: [], malformed: Boolean(firstCall || REQUEST_ENVELOPE.test(text) || SIMULATED_RESULT_ANYWHERE.test(text) || SIMULATED_REQUEST_ANYWHERE.test(text) || embeddedToolCall(text)) };
 }
