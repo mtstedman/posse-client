@@ -14,6 +14,8 @@ import { roleBrandColor } from "../../../ui/functions/display/helpers/brand.js";
 import { runHumanInputJob as runHumanInputJobFromModule } from "../../functions/execution/human-input-job.js";
 import { runPromoteJob as runPromoteJobFromModule } from "../../functions/execution/promote-job.js";
 import { runAtlasWarmJob as runAtlasWarmJobFromModule } from "../../functions/execution/atlas-warm-job.js";
+import { runLocalImageRenderJob as runLocalImageRenderJobFromModule } from "../../functions/execution/local-image-render-job.js";
+import { localImageRenderSpec } from "../../../providers/functions/posse-local/image-render-queue.js";
 import { runWaitingLanePreparationJob as runWaitingLanePreparationJobFromModule } from "../../functions/execution/waiting-lane-prepare-job.js";
 import { runLegacyDelegateJob as runLegacyDelegateJobFromModule } from "../../functions/execution/legacy-delegate-job.js";
 import { projectRelativeSiblingOwnership, runPreDevTypecheck } from "../../functions/helpers/pre-dev-typecheck.js";
@@ -162,6 +164,15 @@ export class WorkerExecutionCoordinator {
       // -- Short-circuit: promote is deterministic - no provider needed --
       if (job.job_type === "promote") {
         await runPromoteJobFromModule(worker, job, wrappedJob, {
+          leaseToken,
+          abortSignal: executeAbortController?.signal || null,
+        });
+        return;
+      }
+
+      // -- Short-circuit: a deferred local image render needs no agent --
+      if (localImageRenderSpec(job)) {
+        await runLocalImageRenderJobFromModule(worker, job, wrappedJob, {
           leaseToken,
           abortSignal: executeAbortController?.signal || null,
         });

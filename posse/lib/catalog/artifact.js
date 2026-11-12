@@ -19,6 +19,10 @@ export const IMAGE_GENERATION_MAX_CALLS_PER_JOB = 12;
 // One image generation request, and separately the download of its result,
 // may each run this long.
 export const IMAGE_GENERATION_TIMEOUT_MS = 600_000;
+// A local model on a CPU is far slower than an API. It has no download, so
+// one request may use most of the image tool's whole deadline (twice the
+// timeout above), less a margin to report the result.
+export const LOCAL_IMAGE_GENERATION_TIMEOUT_MS = 2 * IMAGE_GENERATION_TIMEOUT_MS - 60_000;
 
 // One external image converter run (sharp, ImageMagick, ffmpeg) may take this
 // long before the harness kills it.

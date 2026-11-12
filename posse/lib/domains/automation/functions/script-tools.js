@@ -19,7 +19,8 @@ const MEDIA_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,127}$/;
 // Providers that can produce each media kind: the local models of that kind,
 // plus the API providers Posse already holds image credentials for.
 export function mediaProviders(kind) {
-  return [SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER, ...(kind === "image" ? Object.keys(IMAGE_MODEL_CHOICES_INTERNAL) : [])];
+  return [SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER, ...(kind === "image"
+    ? Object.keys(IMAGE_MODEL_CHOICES_INTERNAL).filter(provider => provider !== SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER) : [])];
 }
 
 /** The local model of this kind that a model ID or CLI slug names. */

@@ -209,6 +209,11 @@ export const IMAGE_MODEL_CHOICES_INTERNAL = Object.freeze({
     "grok-imagine-image",
     "grok-imagine-image-2026-03-02",
   ]),
+  // Local models that make an image from a prompt alone. Selectable as the
+  // image provider once one is installed; no credentials, no spend.
+  "posse-local": Object.freeze([
+    "qwen-image-2512",
+  ]),
 });
 
 // Output formats each image-model family returns without a local conversion,
@@ -218,6 +223,7 @@ export const IMAGE_MODEL_NATIVE_FORMATS = Object.freeze([
   Object.freeze({ prefix: "gpt-image", formats: Object.freeze(["png", "jpeg", "webp"]) }),
   Object.freeze({ prefix: "dall-e", formats: Object.freeze(["png"]) }),
   Object.freeze({ prefix: "grok-imagine", formats: Object.freeze(["png"]) }),
+  Object.freeze({ prefix: "qwen-image", formats: Object.freeze(["png"]) }),
 ]);
 
 export const TIER_LABELS = Object.freeze({

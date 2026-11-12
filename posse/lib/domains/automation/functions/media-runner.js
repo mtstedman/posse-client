@@ -1,51 +1,25 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import { fileURLToPath } from "node:url";
-import { TEST_SUBPROCESS_ENV_KEYS } from "../../../catalog/process.js";
 import { SCRIPT_TOOL_MEDIA_FORMATS, SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER } from "../../../catalog/custom-tools.js";
-import { filterProcessEnv } from "../../../shared/platform/functions/process-env.js";
-import { SpawnedProcessTerminator } from "../../../shared/platform/classes/SpawnedProcessTerminator.js";
+import { POSSE_ENTRY, runLocalGenerationInScratch } from "../../../shared/native/functions/local-generation-child.js";
 import { scrubSecretText } from "../../../shared/telemetry/functions/logging/scrub-secret-text.js";
 import { demand } from "./policy.js";
 import { localMediaModel } from "./script-tools.js";
 
-const POSSE_ENTRY = fileURLToPath(new URL("../../../../orchestrator.js", import.meta.url));
-const STDERR_TAIL_BYTES = 4 * 1024;
 // Arguments that name the file or carry the prompt; the rest are model
 // settings (size, steps, seed, ...) passed through to a local model.
 const RESERVED_ARGUMENTS = ["prompt", "filename"];
 
-// The child is Posse's own CLI, not operator code, so it keeps Posse's own
-// settings (the key that authorizes the native runtime, model and binary
-// roots) on top of the plain process environment a script tool gets.
-function localGenerationEnv(sourceEnv = process.env) {
-  const env = filterProcessEnv(sourceEnv, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS });
-  for (const [key, value] of Object.entries(sourceEnv)) if (key.startsWith("POSSE_")) env[key] = value;
-  return env;
-}
-
-// Local models run through `posse local` in a child process: it owns model
-// discovery, capability checks and GPU selection, and a child can be stopped
-// on timeout or cancel without disturbing the owner. It works from a
-// scratch directory so nothing but the result lands in the output folder.
-// The child also writes its result in the scratch directory: a child stopped
-// mid-write (timeout, cancel) then leaves its temporary file there, not in
-// the output folder, and only a complete result is moved into place.
+// Local models run through `posse local` in a child process that works and
+// writes in a scratch directory: only a complete result is moved into the
+// output folder, so a stopped child leaves nothing behind there.
 export function createLocalGenerator({ entry = POSSE_ENTRY } = {}) {
   return async function generateLocal({ generate, prompt, parameters, file, format, timeoutMs, signal }) {
-    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "posse-media-"));
-    try {
-      const produced = path.join(scratch, `result.${format}`);
-      const outcome = await spawnLocalGeneration({ generate, prompt, parameters, file: produced, format, timeoutMs, signal, scratch, entry });
-      if (outcome.ok && fs.existsSync(produced)) moveIntoPlace(produced, file);
-      return outcome;
-    } finally {
-      fs.rmSync(scratch, { recursive: true, force: true });
-    }
+    const { slug } = localMediaModel(generate.kind, generate.model);
+    return await runLocalGenerationInScratch({ slug, format, prompt, parameters, timeoutMs, signal, entry },
+      produced => moveIntoPlace(produced, file));
   };
 }
 
@@ -55,46 +29,6 @@ function moveIntoPlace(from, to) {
     if (error?.code !== "EXDEV") throw error;
     fs.copyFileSync(from, to, fs.constants.COPYFILE_EXCL);
   }
-}
-
-async function spawnLocalGeneration({ generate, prompt, parameters, file, format, timeoutMs, signal, scratch, entry }) {
-  const model = localMediaModel(generate.kind, generate.model);
-  const args = [entry, "local", "--model", model.slug, "--format", format, "--output", file, "--quiet", "--non-interactive",
-    ...(Object.keys(parameters).length ? ["--parameters", JSON.stringify(parameters)] : [])];
-  return await new Promise((resolve, reject) => {
-    let child;
-    try {
-      child = spawn(process.execPath, args, {
-        cwd: scratch, env: localGenerationEnv(),
-        stdio: ["pipe", "ignore", "pipe"], detached: process.platform !== "win32", windowsHide: true, shell: false,
-      });
-    } catch (error) { reject(Object.assign(new Error(`Could not start local generation: ${error.message}`), { code: "script_unavailable" })); return; }
-    let stderr = Buffer.alloc(0), timedOut = false, aborted = false, settled = false, terminating = false;
-    const terminator = new SpawnedProcessTerminator(child, { processGroup: process.platform !== "win32" });
-    const finish = (code) => {
-      if (settled) return; settled = true;
-      clearTimeout(timer); signal?.removeEventListener("abort", onAbort); terminator.cancel();
-      if (aborted) { reject(signal.reason ?? Object.assign(new Error("Run canceled"), { code: "canceled" })); return; }
-      resolve({ ok: !timedOut && code === 0, timedOut, exitCode: timedOut ? null : code, detail: scrubSecretText(stderr.toString("utf8")).trim() });
-    };
-    const terminate = () => {
-      if (settled || terminating) return;
-      terminating = true;
-      void terminator.terminateAndWait().then(() => finish(null));
-    };
-    const timer = setTimeout(() => { timedOut = true; terminate(); }, timeoutMs);
-    const onAbort = () => { aborted = true; terminate(); };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    child.stderr.on("data", chunk => {
-      stderr = Buffer.concat([stderr, chunk]);
-      if (stderr.length > STDERR_TAIL_BYTES) stderr = stderr.subarray(stderr.length - STDERR_TAIL_BYTES);
-    });
-    child.stdin.on("error", () => {});
-    child.stdin.end(prompt);
-    child.once("error", error => { if (!settled) { settled = true; clearTimeout(timer); reject(Object.assign(new Error(`Could not start local generation: ${error.message}`), { code: "script_unavailable" })); } });
-    child.once("close", code => { terminator.noteClose(); if (!terminating) finish(code); });
-    if (signal?.aborted) onAbort();
-  });
 }
 
 // API image models run through the same executor the built-in image tool

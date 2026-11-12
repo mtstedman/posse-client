@@ -58,7 +58,15 @@ export function getSelectableProviders() {
 }
 
 export function getSelectableImageProviders() {
-  return IMAGE_PROVIDER_OPTIONS.filter((option) => isAdminProviderOption(option.value));
+  return IMAGE_PROVIDER_OPTIONS.filter((option) => {
+    // A provider that generates on this machine is offered once its image
+    // model is installed; it needs no credentials and no text-model opt-in.
+    const provider = providerRegistry.has(option.value) ? providerRegistry.get(option.value) : null;
+    if (typeof provider?.isImageReady === "function") {
+      try { return provider.isImageReady()?.ready === true; } catch { return false; }
+    }
+    return isAdminProviderOption(option.value);
+  });
 }
 
 export function getModelChoicesForEntry(entry) {

@@ -33,6 +33,7 @@ import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.
 import { EVENT_TYPES, EVENT_ACTORS, PROMOTE_SOURCE_PICK_RULES } from "../../../../catalog/event.js";
 import { LEASE_HOLDING_STATUSES } from "../../../../catalog/job.js";
 import { assertPromoteCopyPlan, copyPromoteFileSync } from "./promote-files.js";
+import { localImageRenderSpec } from "../../../providers/functions/posse-local/image-render-queue.js";
 
 export { assertPromoteCopyPlan, copyPromoteFileSync } from "./promote-files.js";
 
@@ -248,6 +249,7 @@ function findSourceArtificer(job, sourceDir, missingNames) {
 
 // A repair that has not finished: waiting to run, or holding a lease.
 const PENDING_REPAIR_STATUSES = new Set(["queued", ...LEASE_HOLDING_STATUSES]);
+const FAILED_RENDER_STATUSES = new Set(["failed", "dead_letter", "blocked"]);
 
 // File names an unfinished repair job in this WI is producing into the
 // source directory: the assessor's partial-deliverable repair, or an earlier
@@ -256,7 +258,11 @@ const PENDING_REPAIR_STATUSES = new Set(["queued", ...LEASE_HOLDING_STATUSES]);
 function pendingMissingFileRepairs(job, sourceDir) {
   const byName = new Map();
   for (const sibling of listJobsByWorkItem(job.work_item_id)) {
-    if (sibling.job_type !== "artificer" || !PENDING_REPAIR_STATUSES.has(sibling.status)) continue;
+    // A local render that failed left its placeholder behind: that file
+    // waits for the render to be retried, like one still being produced.
+    // (A canceled render accepts the placeholder.)
+    const failedRender = localImageRenderSpec(sibling) && FAILED_RENDER_STATUSES.has(sibling.status);
+    if (sibling.job_type !== "artificer" || !(PENDING_REPAIR_STATUSES.has(sibling.status) || failedRender)) continue;
     const payload = parseJobPayload(sibling);
     const names = [payload?._repair_image_names, payload?._repair_file_names].flatMap((list) => (Array.isArray(list) ? list : []));
     const outputRoot = String(payload?.output_root || "").trim();

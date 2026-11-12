@@ -378,7 +378,7 @@ export const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   agent_coordination_mode: "How agents report back when a job ends. Handoff has each agent file a closing handoff report; subagents also lets agents start small helpers that gather citations; off turns both off.",
   planner_dispatch_mode: "How new requests reach the planner, for every repository on this account. Router runs research and preflight first, as usual; planner lets the planner take the request directly and send out its own bounded research helpers.",
   // Providers
-  artifact_image_provider: "Provider that generates image artifacts. Only providers with a configured key can be selected.",
+  artifact_image_provider: "Provider that generates image artifacts. Only providers with a configured key can be selected; Local appears once a local image model is installed (posse local install qwen-image).",
   claude_run_budget_pct_session: "Share of your current Claude session window a single Posse run is expected to use. Shown as a budget bar; Posse does not stop jobs when it is reached.",
   codex_auth_mode: "How Posse signs in to Codex. OAuth uses your ChatGPT login; API uses an API key from the environment; auto tries OAuth only. OAuth and auto never fall back to an API key.",
   codex_run_budget_pct_session: "Share of your current Codex session window a single Posse run is expected to use. Shown as a budget bar; Posse does not stop jobs when it is reached.",

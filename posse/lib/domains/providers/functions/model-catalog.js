@@ -187,6 +187,10 @@ function remoteModelsForProvider(provider, kind) {
       ...model, aliases: (model.aliases || []).filter(alias => LOCAL_MODEL_IDS.includes(alias)),
     }));
   }
+  if (String(provider).trim().toLowerCase() === "posse-local") {
+    const shipped = IMAGE_MODEL_CHOICES_INTERNAL["posse-local"] || [];
+    return models.filter(model => shipped.includes(model.id)).map(model => ({ ...model, aliases: [] }));
+  }
   return models;
 }
 

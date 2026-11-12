@@ -10,7 +10,7 @@
 import { runtimeDbLooksBusyOrCorrupt, resolveEffectiveModelSetting, resolveEffectiveImageModelSetting } from "../../functions/admin/shared-helpers.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { listSettings, getSetting } from "../../../queue/functions/index.js";
-import { isProviderSelectable } from "../../../providers/functions/provider.js";
+import { isProviderSelectable, providerRegistry } from "../../../providers/functions/provider.js";
 import { jobReportStatus } from "../display/Display.js";
 import { FAILED_JOB_STATUSES } from "../../../../catalog/job.js";
 import { getAccountSetting } from "../../../settings/functions/account-settings.js";
@@ -134,7 +134,15 @@ export function getModelChoicesForEntry(entry) {
 }
 
 export function getSelectableImageProviders() {
-  return IMAGE_PROVIDER_OPTIONS.filter((option) => isProviderSelectable(option.value));
+  return IMAGE_PROVIDER_OPTIONS.filter((option) => {
+    // A provider that generates on this machine is offered once its image
+    // model is installed, whatever its text side needs.
+    const provider = providerRegistry.has(option.value) ? providerRegistry.get(option.value) : null;
+    if (typeof provider?.isImageReady === "function") {
+      try { return provider.isImageReady()?.ready === true; } catch { return false; }
+    }
+    return isProviderSelectable(option.value);
+  });
 }
 
 export function providerDashboardLabel(provider) {

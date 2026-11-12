@@ -9,6 +9,7 @@ import fs from "fs";
 import { performance } from "node:perf_hooks";
 import "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
+import { jobQueuedLocalImageRender } from "../../providers/functions/posse-local/image-render-queue.js";
 
 import { getJob, setAttemptSession, updateJobStatus, setJobResult, setJobError, setJobContext, logEvent, releaseLease, releaseLeaseWithoutAttemptPenalty, renewLease, refreshWorkItemStatus, updateJobPayload, updateJobProvider, getDependents, getDependencies, sessionLeaseTtlSec } from "../../queue/functions/index.js";
 
@@ -1424,6 +1425,9 @@ export class Worker {
   _shouldSkipAssessment(job) {
     // Skip assessment if the planner explicitly set skip_assessment: true
     if (parseJobPayload(job).skip_assessment) return true;
+    // Its images are placeholders a local model is still replacing: there is
+    // nothing to assess yet, and choosing a local model trades review for cost.
+    try { if (jobQueuedLocalImageRender(job)) return true; } catch { /* fall through to the usual rule */ }
     // Skip assessment if an explicit assess job depends on this one
     // (single authority rule — avoid double assessment)
     try {

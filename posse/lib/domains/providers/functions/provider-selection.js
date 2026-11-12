@@ -433,6 +433,15 @@ export async function repairMissingProviderDependencies({
  */
 export function isProviderReady(providerName, capability = null) {
   const canonicalName = canonicalProviderName(providerName);
+  // A provider that generates images on this machine answers for itself: it
+  // has no credentials, and needs neither a text model nor the text opt-in.
+  if (capability === "images" && providerRegistry.has(canonicalName)) {
+    const local = providerRegistry.get(canonicalName);
+    if (typeof local?.isImageReady === "function") {
+      try { return local.isImageReady() || { ready: false, reason: "local image generation is unavailable" }; }
+      catch (error) { return { ready: false, reason: String(error?.message || error) }; }
+    }
+  }
   if (!isProviderEnabledForAccount(canonicalName)) {
     return { ready: false, reason: `provider "${canonicalName}" is disabled by the model catalog` };
   }

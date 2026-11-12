@@ -9,7 +9,8 @@ import {
   GEMMA_LOCAL_MODEL_ID, LOCAL_BRIDGE_MODELS, LOCAL_MODEL_IDS, LOCAL_MODEL_PROFILES, QWEN_LOCAL_MODEL_ID,
 } from "../../../../catalog/local-model.js";
 import { LOCAL_AGENT_LIMIT_SETTINGS } from "../../../../catalog/local-model-parameters.js";
-import { localBridgeModelInstalled, resolveDefaultLocalModel } from "../../../../shared/native/functions/local-model-defaults.js";
+import { localBridgeModelInstalled, localModelSupportsPlatform, resolveDefaultLocalModel } from "../../../../shared/native/functions/local-model-defaults.js";
+import { buildImageClient, localImageProviderModels } from "./image-client.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getSetting } from "../../../queue/functions/index.js";
 import { dispatchLocalProvider } from "../../../../shared/native/functions/local-provider-dispatch.js";
@@ -70,6 +71,7 @@ export const MODEL_TIERS = Object.freeze({
 });
 
 export { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot };
+export { buildImageClient };
 
 export function getModelTierConfig(tier = "standard", { modelRoot = defaultLocalGenerationModelRoot() } = {}) {
   const key = tier in MODEL_TIERS ? tier : "standard";
@@ -104,6 +106,24 @@ export function localModelLimits(modelId) {
     maxToolTurns: saved("agentMaxToolTurns", profile.maxToolTurns),
     maxToolResultChars: saved("agentMaxToolResultChars", profile.maxToolResultChars),
   };
+}
+
+/**
+ * Whether the local image provider can generate: the native runtime is in
+ * use and a prompt-to-image model is installed for this platform. Unlike
+ * text generation it needs no text model and no experimental opt-in: an
+ * installed image model is the operator's choice to use it.
+ */
+export function isImageReady({ manager = nativeBinaries, modelRoot = defaultLocalGenerationModelRoot() } = {}) {
+  const models = localImageProviderModels();
+  if (!models.some(model => localModelSupportsPlatform(model))) {
+    return { ready: false, reason: `local image generation has no model for ${process.platform}-${process.arch}` };
+  }
+  if (!manager.shouldUse("ml")) return { ready: false, reason: "native ML runtime is disabled" };
+  if (!models.some(model => localBridgeModelInstalled(modelRoot, model))) {
+    return { ready: false, reason: `a local image model is not installed; run: posse local install ${models[0].slug}` };
+  }
+  return { ready: true, reason: null };
 }
 
 export function hasCredentials() {

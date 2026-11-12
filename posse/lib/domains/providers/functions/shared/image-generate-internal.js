@@ -4,7 +4,7 @@ import { BUDGET_PAUSED } from "../../../../catalog/admission-budget.js";
 import fs from "fs";
 import path from "path";
 import { isPathInside, realpathExistingPrefix } from "../../../runtime/functions/fs-safety.js";
-import { IMAGE_GENERATION_TIMEOUT_MS } from "../../../../catalog/artifact.js";
+import { IMAGE_GENERATION_TIMEOUT_MS, LOCAL_IMAGE_GENERATION_TIMEOUT_MS } from "../../../../catalog/artifact.js";
 import { getArtifactProtocol, getResolvedImageProtocol } from "../../../artifacts/functions/index.js";
 import { getDefaultImageModel, getDefaultImageProvider, normalizeGrokImageModelName, imageModelNativeFormats } from "../model-catalog.js";
 import {
@@ -19,6 +19,7 @@ const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = IMAGE_GENERATION_TIMEOUT_MS;
 const MAX_DOWNLOADED_IMAGE_BYTES = 64 * 1024 * 1024;
 const MAX_IMAGE_DOWNLOAD_REDIRECTS = 3;
 const NO_IMAGE_PROVIDERS_AVAILABLE = "No image providers available";
+const LOCAL_IMAGE_PROVIDER = "posse-local";
 // A provider can be unready for a moment (a credential or catalog reload), so
 // readiness is checked once more after this pause before the tool says no
 // image provider is ready.
@@ -143,12 +144,19 @@ async function _buildImageClient(providerName) {
     ? await import("../openai/index.js")
     : provider === "grok"
       ? await import("../grok/index.js")
-      : null;
+      : provider === LOCAL_IMAGE_PROVIDER
+        ? await import("../posse-local/image-client.js")
+        : null;
   const build = mod?.buildImageClient;
   if (typeof build !== "function") {
     throw new Error(`Provider "${providerName}" does not support image generation.`);
   }
   return build();
+}
+
+async function _queueLocalImageRender(request) {
+  const { queueLocalImageRender } = await import("../posse-local/image-render-queue.js");
+  return queueLocalImageRender(request);
 }
 
 function _buildImageTimeoutError(timeoutMs) {
@@ -316,6 +324,10 @@ export async function execGenerateImageInternal(args = {}, {
   signal = null,
   imageDownloadMaxBytes = MAX_DOWNLOADED_IMAGE_BYTES,
   enforceProviderAvailability = buildImageClient === _buildImageClient,
+  // Defers a local model's image to a queued render when the call is inside
+  // a job; returns null to generate now. A caller that supplies its own image
+  // client (a test, a tool that must return the image) generates now.
+  queueLocalRender = buildImageClient === _buildImageClient ? _queueLocalImageRender : null,
   waitBeforeReadinessRecheck = _waitBeforeReadinessRecheck,
 } = {}) {
   if (!args.prompt || typeof args.prompt !== "string") {
@@ -393,6 +405,7 @@ export async function execGenerateImageInternal(args = {}, {
       signal,
       imageDownloadMaxBytes,
       onProviderRequest,
+      queueLocalRender,
     });
   }
 
@@ -426,6 +439,7 @@ export async function execGenerateImageInternal(args = {}, {
     signal,
     imageDownloadMaxBytes,
     onProviderRequest,
+    queueLocalRender,
   });
 }
 
@@ -443,6 +457,7 @@ async function _executeGenerateImageWithRoute({
   signal = null,
   imageDownloadMaxBytes,
   onProviderRequest,
+  queueLocalRender = null,
 }) {
   const format = ext === ".jpg" ? "jpeg" : ext.slice(1);
   const nativeFormats = imageModelNativeFormats(model);
@@ -450,6 +465,26 @@ async function _executeGenerateImageWithRoute({
     return `Error: image model ${model} does not natively produce ${format}; supported formats: ${nativeFormats.join(", ")}. Choose an authorized compatible route or revise the deliverable before generation.`;
   }
   const startedAt = Date.now();
+  const local = provider === LOCAL_IMAGE_PROVIDER;
+  // Inside a job, a local model's image is deferred: a placeholder now, the
+  // real image from a queued render, so no agent turn waits out the model.
+  if (local && typeof queueLocalRender === "function") {
+    let queued = null;
+    try {
+      signal?.throwIfAborted();
+      if (!canWriteOutput()) return `Error: generate_image blocked - ${filename} is outside the allowed creation scope.`;
+      queued = await queueLocalRender({ outputPath, filename, prompt: args.prompt, model, size: args.size });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      return `Error: could not queue local image generation: ${String(err?.message || err).slice(0, 300)}`;
+    }
+    if (queued) {
+      onProviderRequest();
+      await _recordImageGenerationTelemetry({ provider, model, args, status: "queued", startedAt, outputBytes: null });
+      return `Image queued: a ${queued.width}x${queued.height} placeholder is saved to ${filename} now, and Posse replaces it with the real image when the local model finishes (render job #${queued.jobId}, provider=${provider}, model=${model}). `
+        + "Treat the file as delivered: do not wait for it, inspect it, or generate it again.";
+    }
+  }
   try {
     const client = await buildImageClient(provider);
     const quality = args.quality;
@@ -470,11 +505,15 @@ async function _executeGenerateImageWithRoute({
     try {
       onProviderRequest();
       dispatched = true;
-      response = await _generateImageWithTimeout(client, params, { timeoutMs: imageTimeoutMs, signal });
+      // A local model is slow and has no download step: give it most of the
+      // tool's deadline unless the caller set its own limit.
+      const requestTimeoutMs = local && imageTimeoutMs === DEFAULT_IMAGE_GENERATION_TIMEOUT_MS ? LOCAL_IMAGE_GENERATION_TIMEOUT_MS : imageTimeoutMs;
+      response = await _generateImageWithTimeout(client, params, { timeoutMs: requestTimeoutMs, signal });
     } finally {
       // Image usage currently has no complete price receipt. Keep that unknown,
       // requiring operator reconciliation when a spend threshold is enabled.
-      settleBudget(reservation, { notDispatched: !dispatched });
+      // A local model spends nothing, so its reservation settles at zero.
+      settleBudget(reservation, { notDispatched: !dispatched || local });
     }
     if (!Array.isArray(response?.data) || response.data.length === 0) {
       await _recordImageGenerationTelemetry({

@@ -56,7 +56,7 @@ export const SETTING_DEFINITIONS = [
 
   // ── Model selection (empty = use provider tier default) ──────────────────
   ...MODEL_SELECTION_SETTINGS,
-  { key: "artifact_image_provider", default: "", description: "Provider used for image artifacts (openai or grok)" },
+  { key: "artifact_image_provider", default: "", description: "Provider used for image artifacts (openai, grok, or posse-local once a local image model is installed)" },
 
   // ── Remote model catalog (fetched from posse-remote /v1/catalog/models) ──
   { key: "model_catalog_cache_ms", default: "86400000", numeric: { integer: true, min: 60000 }, description: "Milliseconds to cache the remote model catalog before refreshing (default 24h)" },

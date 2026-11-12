@@ -40,7 +40,8 @@ export const PROVIDER_CAPABILITIES = Object.freeze({
     mcpToolDeadline: PROVIDER_MCP_TOOL_DEADLINE_MODE.copilot,
   }),
   "posse-local": Object.freeze({
-    images: false,
+    // An installed local image model; no text model or opt-in is needed.
+    images: true,
     sessionResume: false,
     toolAttachment: "function",
     localGeneration: true,

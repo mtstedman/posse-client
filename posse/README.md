@@ -626,6 +626,26 @@ The slugs are `qwen-code` (`qwen2.5-coder-3b-instruct`), `qwen-image`
 `qwen-image-edit` edits or combines 1 to 10 reference PNGs named with
 `--ref-images a.png,b.png` (refer to them in the prompt as image 1, image 2, …);
 it needs a native runtime that advertises reference-image input.
+
+An installed `qwen-image` can also be Posse's image provider: once it is
+installed, **Local** appears as an Image provider choice in Admin (or set
+`artifact_image_provider` to `posse-local`). Image jobs then generate on this
+machine through `posse local`, with no API key and no spend. Output is PNG; a
+requested size is scaled to fit 1024 and rounded to 16, and with no size the
+model's saved defaults apply. It needs neither a local text model nor the
+experimental local-generation setting.
+
+A local model is slow on a CPU, so an image job does not wait for it. The
+image tool saves a grey placeholder PNG of the final size, queues a render
+job in the same work item, and returns; the agent finishes and that job is not
+assessed. The render job runs without an agent, one at a time, for up to 19
+minutes, and replaces the placeholder with the real image. Until it has,
+promote jobs install the other files and leave that one for a follow-up, and
+the work item does not finish, so a placeholder never reaches your branch. A
+render that fails keeps the placeholder and is not retried by itself: the
+work item waits for you to retry the render job, or cancel it to accept the
+placeholder. Outside a job (a media tool, `posse local`) the image is
+generated before the command returns.
 `posse local --model <slug> --help` lists that profile's supported parameters,
 types, defaults, limits and input/output capabilities without loading the runtime.
 `--parameters` accepts a strict JSON object using the keys printed by help.
