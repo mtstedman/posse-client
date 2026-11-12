@@ -5,7 +5,7 @@
 import path from "node:path";
 import { LOCAL_BRIDGE_MODELS } from "../../../../catalog/local-model.js";
 import { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot } from "../../../../shared/native/functions/local-model-paths.js";
-import { localBridgeModelInstalled, localModelSupportsPlatform } from "../../../../shared/native/functions/local-model-defaults.js";
+import { localBridgeModelInstallationStatus, localModelSupportsPlatform } from "../../../../shared/native/functions/local-model-defaults.js";
 import { installLocalModel, openLocalRuntime } from "../../../cli/functions/local-install.js";
 import { downloadQuestion, formatArtifactBytes } from "../../../cli/functions/local-models-command.js";
 
@@ -49,9 +49,11 @@ export class LocalModelInstallController {
   // What is on this machine and what could be added, one entry per model.
   inventory() {
     return LOCAL_BRIDGE_MODELS.map((model) => {
-      const status = localBridgeModelInstalled(this._modelRoot, model) ? "installed"
-        : localModelSupportsPlatform(model) ? "available" : "unsupported";
-      const detail = status === "installed" ? "installed"
+      const files = localBridgeModelInstallationStatus(this._modelRoot, model);
+      const status = !localModelSupportsPlatform(model) ? "unsupported"
+        : files === "present-unverified" ? "installed" : files === "incomplete" ? "incomplete" : "available";
+      const detail = status === "installed" ? "files present; verified when used"
+        : status === "incomplete" ? "incomplete files; not ready to use"
         : status === "available" ? `available, ${formatArtifactBytes(model.downloadBytes)} download`
           : "not supported on this machine";
       return { slug: model.slug, kind: model.kind, status, detail };

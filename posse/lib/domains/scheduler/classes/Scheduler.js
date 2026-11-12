@@ -43,7 +43,7 @@ import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atl
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import { ENVIRONMENT_SETUP_RUNTIME_CREDIT_CAP_MS } from "../../../catalog/tools/environment-setup.js";
 import { SHARED_RUN_END_REASONS } from "../../../catalog/shared-run.js";
-import { pairingSessionLive, sharedRunEndFromSessionPoll, sharedRunStaysOpen } from "../../pairing/functions/shared-run.js";
+import { createSessionLiveProbe, sharedRunEndFromSessionPoll, sharedRunStaysOpen } from "../../pairing/functions/shared-run.js";
 import { DEFAULT_LEASE_SEC, DEFAULT_CONCURRENCY, DEFAULT_POLL_MS, DEFAULT_REPAIR_POLL_MS, LOCK_RENEW_SEC, MAX_RUNNABLE_SCAN_PER_TICK, PROGRESS_TIMEOUT_SEC, QUEUE_LOCK_INDEX_UNCONDITIONAL_REFRESH_MS, maxJobRuntimeSecFor, readActiveWorktreeCap, readAtlasDriftCheckIntervalMs, readHeadlessHumanTimeoutSec, readHumanGateResnoozeSec, readImplementationReservedSlots, readPositiveIntSetting, readRuntimeWriteCeilingMultiplier, readRuntimeWriteGraceSec } from "../functions/config.js";
 import { findFileConflict } from "../functions/file-scope.js";
 import { RUNTIME_NO_ESCALATION_BACKSTOP_MULTIPLIER, runtimeKillCanEscalate, runtimeWriteExtensionActive } from "../functions/runtime-escalation.js";
@@ -169,7 +169,7 @@ export class Scheduler {
     // A shared run (posse go inside a live session) stays open when its queue
     // empties; see pairing/functions/shared-run.js.
     this._staysOpenInSession = opts.staysOpenInSession === true;
-    this._sessionLiveProbe = typeof opts.sessionLiveProbe === "function" ? opts.sessionLiveProbe : pairingSessionLive;
+    this._sessionLiveProbe = typeof opts.sessionLiveProbe === "function" ? opts.sessionLiveProbe : createSessionLiveProbe();
     // Why the session asked this run to drain, once it has (null otherwise).
     this.sessionEnd = null;
     this._running = false;
@@ -1339,7 +1339,7 @@ export class Scheduler {
    * @param {function} workerCallback - async job executor
    * @param {object} opts
    */
-  async runLoop(workerCallback, { onIdle, onDone, onQuiet, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange, onSessionEvent, onQueueStateChange, beforeSessionStop } = {}) {
+  async runLoop(workerCallback, { onIdle, onDone, onQuiet, onQuietHold, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange, onSessionEvent, onQueueStateChange, beforeSessionStop } = {}) {
     // boot() starts renewal immediately after lock acquisition so long
     // pre-loop hooks cannot let the scheduler lock expire.
     if (!this._running) {
@@ -1512,10 +1512,12 @@ export class Scheduler {
       let autoMergeRetried = false;
       const headlessNonHumanWaitingLogged = new Set();
       // A shared run that would otherwise finish stays open instead. onQuiet
-      // fires once per quiet stretch; the hold then sleeps like any idle lap
-      // (a queue change, a finished worker, the next due poll, or the repair
-      // timer wakes it), so an empty session costs one lap per wake.
-      let quietAnnounced = false;
+      // fires once per quiet stretch, and again if the reason for the quiet
+      // changes (done, then parked on a person); every other held lap fires
+      // onQuietHold. The hold then sleeps like any idle lap (a queue change, a
+      // finished worker, the next due poll, or the repair timer wakes it), so
+      // an empty session costs one lap per wake.
+      let quietAnnounced = null;
       const staysOpen = () => sharedRunStaysOpen({
         enabled: this._staysOpenInSession,
         sessionLive: this._staysOpenInSession && this._sessionLiveProbe(),
@@ -1523,16 +1525,78 @@ export class Scheduler {
         stopRequested: this._stopRequested || !this._running,
         lockLost: this._lockLost,
       });
+      // Plan 12(c): periodic ATLAS-drift reconciliation, run at the end of
+      // every lap and on every held-open lap: a quiet shared run is when
+      // members' merges arrive and no worker is busy, so it must not skip it.
+      const reconcileAtlasDriftWhenDue = async () => {
+        // Runs in a try/catch so a transient git or fs error never crashes the
+        // scheduler loop.
+        const atlasDriftCheckIntervalMs = this._atlasDriftCheckIntervalMs || readAtlasDriftCheckIntervalMs();
+        if (
+          !atlasDriftReindexDisabledUntilRestart
+          && !atlasDriftReindexInFlight
+          && Date.now() - lastAtlasDriftCheck >= atlasDriftCheckIntervalMs
+        ) {
+          lastAtlasDriftCheck = Date.now();
+          try {
+            let statusReported = false;
+            const outcome = await this._reconcileAtlasDriftIfIdle({
+              cwd: process.cwd(),
+              isWorkerIdle: () => activeWorkers.size === 0,
+              onStatus: ({ ok, error, repoId, staged }) => {
+                statusReported = true;
+                // End the dispatch hold promptly: the hold branch sleeps until
+                // a wake or the repair poll. Only a background settle (the
+                // in-flight tracking was armed after the call returned) holds
+                // anything; a synchronous report inside this lap must not bump
+                // the wake generation, or the lap-end sleep would return at
+                // once every lap and starve the event loop.
+                const wasHolding = atlasDriftReindexInFlight;
+                atlasDriftReindexInFlight = false;
+                atlasDriftReindexStartedAt = 0;
+                atlasDriftReindexChild = null;
+                if (wasHolding) this._wakeSleeps();
+                if (!ok) {
+                  log.warn("atlas", "Drift reindex failed", { repoId: repoId || null, error: error || null });
+                } else if (staged?.staged === true) {
+                  log.info("atlas", "Drift reindex complete", { repoId: repoId || null });
+                } else {
+                  log.debug("atlas", "Drift check found nothing to restage", { repoId: repoId || null });
+                }
+              },
+            });
+            // v2 restages run in the background and settle via onStatus; a
+            // legacy outcome may still expose a child process handle. Either
+            // way, arm the in-flight tracking so the failsafe above can bound
+            // a restage that never reports back.
+            const reindexChild = outcome.reindex?.child || outcome.child || null;
+            if (outcome.attempted && (outcome.background || reindexChild) && !statusReported) {
+              atlasDriftReindexInFlight = true;
+              atlasDriftReindexStartedAt = Date.now();
+              atlasDriftReindexChild = reindexChild;
+              log.debug("atlas", "ATLAS drift restage running in background", {});
+            } else if (outcome.skipped === "workers_busy") {
+              log.debug("atlas", "Drift reindex deferred", {});
+            }
+          } catch (err) {
+            log.warn("atlas", "Drift reconciliation errored", { error: err?.message || String(err) });
+          }
+        }
+      };
       const holdOpen = async (lapQueueGeneration, lapWakeGeneration, detail = {}) => {
-        if (!quietAnnounced) {
-          quietAnnounced = true;
+        const quietReason = detail.parked ? "parked" : "done";
+        if (quietAnnounced !== quietReason) {
+          quietAnnounced = quietReason;
           this._invokeCallback("onQuiet", onQuiet, detail);
+        } else {
+          this._invokeCallback("onQuietHold", onQuietHold);
         }
         this._invokeCallback("onSlotStatus", onSlotStatus, {
           idle: this.concurrency,
           blockedByLock: 0,
           blockedLockDetails: [],
         });
+        await reconcileAtlasDriftWhenDue();
         await this._sleepUntilQueueWakeOrRepair(lapQueueGeneration, lapWakeGeneration);
       };
 
@@ -2653,7 +2717,7 @@ export class Scheduler {
           parkedStallSince = null;
           autoMergeAwaitedSince.clear();
           autoMergeRetried = false;
-          quietAnnounced = false;
+          quietAnnounced = null;
         }
         if (!launched && executableActiveWorkerCount === 0) {
           // Nothing running and nothing to start. Reuse the tracked rows from
@@ -2753,59 +2817,7 @@ export class Scheduler {
           }
         }
 
-        // Plan 12(c): periodic ATLAS-drift reconciliation. Runs in a try/catch
-        // so a transient git or fs error never crashes the scheduler loop.
-        const atlasDriftCheckIntervalMs = this._atlasDriftCheckIntervalMs || readAtlasDriftCheckIntervalMs();
-        if (
-          !atlasDriftReindexDisabledUntilRestart
-          && !atlasDriftReindexInFlight
-          && Date.now() - lastAtlasDriftCheck >= atlasDriftCheckIntervalMs
-        ) {
-          lastAtlasDriftCheck = Date.now();
-          try {
-            let statusReported = false;
-            const outcome = await this._reconcileAtlasDriftIfIdle({
-              cwd: process.cwd(),
-              isWorkerIdle: () => activeWorkers.size === 0,
-              onStatus: ({ ok, error, repoId, staged }) => {
-                statusReported = true;
-                // End the dispatch hold promptly: the hold branch sleeps until
-                // a wake or the repair poll. Only a background settle (the
-                // in-flight tracking was armed after the call returned) holds
-                // anything; a synchronous report inside this lap must not bump
-                // the wake generation, or the lap-end sleep would return at
-                // once every lap and starve the event loop.
-                const wasHolding = atlasDriftReindexInFlight;
-                atlasDriftReindexInFlight = false;
-                atlasDriftReindexStartedAt = 0;
-                atlasDriftReindexChild = null;
-                if (wasHolding) this._wakeSleeps();
-                if (!ok) {
-                  log.warn("atlas", "Drift reindex failed", { repoId: repoId || null, error: error || null });
-                } else if (staged?.staged === true) {
-                  log.info("atlas", "Drift reindex complete", { repoId: repoId || null });
-                } else {
-                  log.debug("atlas", "Drift check found nothing to restage", { repoId: repoId || null });
-                }
-              },
-            });
-            // v2 restages run in the background and settle via onStatus; a
-            // legacy outcome may still expose a child process handle. Either
-            // way, arm the in-flight tracking so the failsafe above can bound
-            // a restage that never reports back.
-            const reindexChild = outcome.reindex?.child || outcome.child || null;
-            if (outcome.attempted && (outcome.background || reindexChild) && !statusReported) {
-              atlasDriftReindexInFlight = true;
-              atlasDriftReindexStartedAt = Date.now();
-              atlasDriftReindexChild = reindexChild;
-              log.debug("atlas", "ATLAS drift restage running in background", {});
-            } else if (outcome.skipped === "workers_busy") {
-              log.debug("atlas", "Drift reindex deferred", {});
-            }
-          } catch (err) {
-            log.warn("atlas", "Drift reconciliation errored", { error: err?.message || String(err) });
-          }
-        }
+        await reconcileAtlasDriftWhenDue();
 
         if (launched) {
           await yieldNow();

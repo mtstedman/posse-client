@@ -28,13 +28,20 @@ export async function openLocalRuntime({ manager, invoke, modelRoot, runtimeRoot
 // any model bytes are requested. Resolves { installed: false } when declined.
 export async function installLocalModel(model, runtime, { confirm, source, onStage = () => {}, artifacts = {} }) {
   const capability = requireLocalModelCapability(model, runtime.capabilities, { version: runtime.version });
-  return model.installation === "signed-package"
-    ? installSignedPackage(model, runtime, { confirm, onStage, artifacts })
-    : installPinnedFiles(model, capability, runtime, { confirm, source, onStage });
+  try {
+    return await (model.installation === "signed-package"
+      ? installSignedPackage(model, runtime, { confirm, onStage, artifacts })
+      : installPinnedFiles(model, capability, runtime, { confirm, source, onStage }));
+  } catch (error) {
+    if (/unknown field [`'"]replace[`'"]/.test(error?.message || "")) {
+      throw new Error("This native runtime does not support explicit model replacement. Update posse-ml and retry installation.", { cause: error });
+    }
+    throw error;
+  }
 }
 
 async function installPinnedFiles(model, capability, runtime, { confirm, source, onStage }) {
-  let request = { modelId: model.modelId, sourceDirectory: source ? path.resolve(source) : undefined };
+  let request = { modelId: model.modelId, sourceDirectory: source ? path.resolve(source) : undefined, replace: true };
   if (!source) {
     if (!capability.installation?.includes("pinned-download")) {
       throw new Error("This native runtime supports local-file installation only; update posse-ml or use --source DIR.");
@@ -42,7 +49,7 @@ async function installPinnedFiles(model, capability, runtime, { confirm, source,
     const bytes = capability.models.find(candidate => candidate.id === model.modelId)?.bytes;
     if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error("Native model download size is missing.");
     if (!await confirm({ label: model.slug, bytes })) return { installed: false };
-    request = { modelId: model.modelId, download: true };
+    request = { modelId: model.modelId, download: true, replace: true };
   }
   runtime.options.signal?.throwIfAborted();
   onStage(source ? "Installing model files" : "Downloading model files");
@@ -81,7 +88,7 @@ async function installSignedPackage(model, runtime, { confirm, onStage, artifact
   assertSelectedPackage(result, artifact);
   signal?.throwIfAborted();
   onStage("Installing verified model package");
-  await runtime.invoke(ML_MODEL_PACKAGE_INSTALL_METHOD, result, runtime.options);
+  await runtime.invoke(ML_MODEL_PACKAGE_INSTALL_METHOD, { ...result, replace: true }, runtime.options);
   return { installed: true };
 }
 

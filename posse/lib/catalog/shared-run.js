@@ -16,6 +16,11 @@ export const SHARED_RUN_END_REASONS = Object.freeze({
   CLOSE_REQUESTED: "close-requested",
 });
 
+// Exit code of `posse session merge|deploy` when the operator declined the
+// typed approval: nothing was published and nothing failed. Callers that ran
+// the command for the operator report it as canceled, not as an error.
+export const SESSION_PUBLISH_DECLINED_EXIT_CODE = 3;
+
 export const SHARED_RUN_END_REASON_VALUES = Object.freeze(Object.values(SHARED_RUN_END_REASONS));
 
 // Set to 1 to make `posse session host` / `join` stay in the session console

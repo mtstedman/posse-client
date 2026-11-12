@@ -85,6 +85,8 @@ export function localModelProfile(modelId = null, tier = "standard") {
 
 // Operator CLI inventory. This does not widen agent/provider model selection.
 export const QWEN_IMAGE_MODEL_ID = "qwen-image-2512";
+// Instruction editing over 1 to 10 reference images.
+export const QWEN_IMAGE_EDIT_MODEL_ID = "qwen-image-edit-2511";
 export const MINIMAX_H3_MODEL_ID = "minimax-h3";
 export const LOCAL_BRIDGE_MODELS = Object.freeze([
   Object.freeze({ slug: "qwen-code", modelId: QWEN_LOCAL_MODEL_ID, kind: "text",
@@ -106,6 +108,11 @@ export const LOCAL_BRIDGE_MODELS = Object.freeze([
     platforms: Object.freeze(["linux-x64", "linux-arm64", "win32-x64", "darwin-arm64"]), installation: "pinned-files",
     downloadBytes: 19_337_692_230,
     requirements: "x64: AVX2, FMA, F16C; ARM64: NEON; approximately 19 GiB RAM for the tested 384x384 profile" }),
+  Object.freeze({ slug: "qwen-image-edit", modelId: QWEN_IMAGE_EDIT_MODEL_ID, kind: "image",
+    directory: QWEN_IMAGE_EDIT_MODEL_ID, formats: Object.freeze(["png", "json"]),
+    platforms: Object.freeze(["linux-x64", "linux-arm64", "win32-x64", "darwin-arm64"]), installation: "pinned-files",
+    downloadBytes: 20_691_855_334,
+    requirements: "19.27 GiB model download; x64: AVX2, FMA, F16C; ARM64: NEON; more RAM than qwen-image, growing with the number of reference images" }),
   Object.freeze({ slug: "minimax-h3", modelId: MINIMAX_H3_MODEL_ID, kind: "video",
     directory: MINIMAX_H3_MODEL_ID, formats: Object.freeze(["avi", "json"]),
     platforms: Object.freeze(["linux-x64", "linux-arm64", "win32-x64", "darwin-arm64"]), installation: "pinned-files",

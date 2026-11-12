@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { SCRIPT_TOOL_ENTRY_EFFECTS, SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_MANIFEST_FILE } from "../../../catalog/custom-tools.js";
+import { SCRIPT_TOOL_ENTRY_EFFECTS, SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_MANIFEST_FILE, SCRIPT_TOOL_MEDIA_KINDS } from "../../../catalog/custom-tools.js";
 import { automationDataDir, repositoryID } from "../functions/paths.js";
 import { demand, digest, schemaCheck } from "../functions/policy.js";
 import { normalizeScriptManifest, parseParamSpec, renderScriptTemplate, validScriptEnvName, validScriptToolName } from "../functions/script-tools.js";
@@ -74,6 +74,10 @@ export class ScriptToolRegistry {
     const { name, template = "bash", description, effect = "read", params = [], input_schema = null,
       inputs = null, output_schema = null, env = [], secrets = [], generate = null } = spec || {};
     demand(validScriptToolName(name), "Tool name must be lower-case like orders.lookup", "script_invalid");
+    // A media tool is only its generation settings; dropping these silently
+    // would create a tool that is not what was asked for.
+    demand(!SCRIPT_TOOL_MEDIA_KINDS.includes(template) || (!params.length && !env.length && !secrets.length && inputs == null),
+      "An image or video tool takes no --param, --env, --secret or operator inputs; it has a prompt and its generation settings", "script_invalid");
     const variables = [
       ...env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item),
       ...secrets.map(secret => ({ name: secret, secret: true })),
@@ -106,9 +110,13 @@ export class ScriptToolRegistry {
     // part of the tool digest, so this write makes its test and grants stale.
     // A media tool keeps its kind; provider, model, folder and arguments
     // may change, and unsupplied ones stay as they are.
+    // A new provider without a model takes that provider's default model:
+    // the old provider's model name means nothing to it.
+    const changesProvider = generate?.provider && String(generate.provider).trim().toLowerCase() !== existing.generate?.provider;
     const rendered = existing.generate ? renderScriptTemplate({
       name, template: existing.generate.kind, description: String(description || "").trim() || existing.description,
-      inputSchema: input_schema || existing.params, generate: { ...existing.generate, ...(generate || {}), kind: existing.generate.kind },
+      inputSchema: input_schema || existing.params,
+      generate: { ...existing.generate, ...(changesProvider && !generate.model ? { model: "" } : {}), ...(generate || {}), kind: existing.generate.kind },
     }) : renderScriptTemplate({
       name, template: "bash", effect,
       description: String(description || "").trim() || existing.description,

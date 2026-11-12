@@ -419,8 +419,9 @@ export class DisplayBottomInputRenderer {
     if (this.onSkipJob) control.push(hint("s", "skip task", C.yellow));
     if (this._rightMode !== "monitor" && this.onKill && this.workers.size > 0) control.push(hint("k", "kill", C.red));
     if (this.onKillWI) control.push(hint("x", "cancel WI", C.red));
-    // A shared run does not end the session: Ctrl+C goes back to its console.
-    control.push(hint("Ctrl+C", this.sharedRun ? "session console" : "quit", C.red));
+    // A shared run does not end the session: Ctrl+C goes back to its console,
+    // or to the shell when the run was started from one.
+    control.push(hint("Ctrl+C", !this.sharedRun ? "quit" : this.sharedRunFromConsole === false ? "stop run" : "session console", C.red));
 
     const left = [...input, ...inspect].join("  ");
     const right = control.join("  ");

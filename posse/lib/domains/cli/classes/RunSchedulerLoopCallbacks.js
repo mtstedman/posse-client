@@ -69,6 +69,7 @@ export class RunSchedulerLoopCallbacks {
       onIdle: (activeJobs, options) => this.onIdle(activeJobs, options),
       onDone: (report) => this.onDone(report),
       onQuiet: (detail) => this.sharedSession?.onQuiet(detail),
+      onQuietHold: () => this.sharedSession?.onQuietHold(),
       onBackgroundOnly: (state) => this.onBackgroundOnly(state),
       onSlotStatus: (status) => this.onSlotStatus(status),
       onKillJob: (jobId, reason) => this.worker.killJob(jobId, reason),

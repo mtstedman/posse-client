@@ -523,8 +523,11 @@ a starter that fails until you edit it.
   file there, and returns its path. The tool's `prompt` argument is
   required; other declared arguments pass to a local model as its settings.
   Such a tool always has effect `write`, takes no env, secrets, or caller
-  inputs, and defaults to the 600-second timeout. Changing its provider,
-  model, or folder changes its digest, so it needs a new passing test.
+  inputs, and defaults to the 600-second timeout; `--param`, `--env`,
+  `--secret` and `--effect` are refused for these templates. Changing its
+  provider, model, or folder changes its digest, so it needs a new passing
+  test; a new provider without a model takes that provider's default model.
+  A run that fails, times out, or is canceled leaves nothing in the folder.
   These tools are the only place a custom format is produced: agents work
   in text and call a tool for media.
 
@@ -614,10 +617,15 @@ posse local --model qwen-code --prompt "Explain Rust ownership" --format text
 printf 'Explain Rust ownership' | posse local --model qwen-code --format json --output answer.json
 posse local --model qwen-image --prompt 'A red robot holding a POSSE sign' --format png --output robot.png --steps 20
 posse local --model qwen-image --prompt 'A red robot' --parameters '{"width":320,"height":320,"steps":20}' --output robot-small.png
+posse local --model qwen-image --init-image robot.png --strength 0.6 --prompt 'An oil painting of a red robot' --output robot-painted.png
 ```
 
 The slugs are `qwen-code` (`qwen2.5-coder-3b-instruct`), `qwen-image`
-(`qwen-image-2512`), and `minimax-h3` (video with stereo audio); either slug or full ID works with `--model`.
+(`qwen-image-2512`), `qwen-image-edit` (`qwen-image-edit-2511`), and `minimax-h3` (video with stereo audio); either slug or full ID works with `--model`.
+`posse local help --model <slug>` lists a model's parameters, defaults and limits.
+`qwen-image-edit` edits or combines 1 to 10 reference PNGs named with
+`--ref-images a.png,b.png` (refer to them in the prompt as image 1, image 2, …);
+it needs a native runtime that advertises reference-image input.
 `posse local --model <slug> --help` lists that profile's supported parameters,
 types, defaults, limits and input/output capabilities without loading the runtime.
 `--parameters` accepts a strict JSON object using the keys printed by help.
@@ -626,6 +634,14 @@ Existing individual flags remain supported; supplying the same setting in JSON
 and a flag is an error. Keep the prompt in `--prompt`, `--input` or stdin.
 Dimensions follow each model's alignment: for example, use 320×320 rather than
 300×300. Silent video is not exposed by the current H3 adapter.
+Qwen image-to-image accepts an opaque PNG up to 4 MiB with `--init-image FILE`
+or JSON `initImage`. Output dimensions are inherited from the PNG (64–1024,
+multiples of 16); explicit dimensions must match. `--strength` / JSON `strength`
+requires an image, ranges from 0 to 1 and defaults to 0.75. Higher values transform
+more. Sampling is quantized to steps and always runs at least one step, even at
+zero. This uses the base Qwen-Image-2512 model; dedicated Qwen-Image-Edit reference
+editing is not included. Image input requires an updated native runtime advertising
+the capability; existing text-to-image calls continue to work on older artifacts.
 `--input FILE` reads a prompt from a UTF-8 file. `--model-root DIR` selects an
 existing model store; the default is `~/.posse/models`.
 `--runtime-root DIR` selects the ONNX runtime cache, defaulting to
@@ -645,6 +661,13 @@ Ctrl+C cancels inference and retires the native worker.
 
 Model downloads require interactive size confirmation. To install image files
 already on disk, use `posse local install qwen-image --source /absolute/files`.
+An explicit `posse local install <slug>` always replaces that model, including
+healthy or incomplete installations; no force flag is needed. New files are
+staged and verified before the old installation is replaced, so a failed
+download or checksum check leaves the old files intact. Staging requires room
+for both copies until replacement completes. This applies to Admin installs too
+and requires an updated native runtime. Automatic model setup still reuses
+verified installations.
 The image installer uses the native catalog's immutable URLs and SHA-256 pins;
 callers cannot substitute download URLs or hashes. Qwen image generation is
 available on Linux x64 and Windows x64 (AVX2, FMA and F16C), and Linux ARM64 and
@@ -1372,9 +1395,11 @@ relay has lost touch with them, `joining` before their first heartbeat,
   session default), `c` sets their write scope, and `z` removes them (or
   declines a request) after a confirmation. `h` opens the session's own
   actions: merge, deploy, auto merge and auto deploy on or off, invites open
-  or closed, policy, and close. Deploy and close ask first; merge and deploy
-  hand the terminal to `posse session merge` / `deploy` for the typed approval
-  and then return. Every action is the same command `u` takes, so the host
+  or closed, policy, and close. Deploy, close, and turning auto deploy on ask
+  first; merge and deploy hand the terminal to `posse session merge` /
+  `deploy` for the typed approval and then return. Declining that approval
+  is a cancel, not a failure: the command exits with code 3 and nothing is
+  published. Every action is the same command `u` takes, so the host
   check stays in the command and the Remote. A **member's** Session view only
   shows: it lists no actions, and the keys do nothing there.
 - In the session console (`posse session host` / `join`), `who` (or `panel`)

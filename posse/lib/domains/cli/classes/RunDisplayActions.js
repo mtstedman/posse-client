@@ -25,6 +25,7 @@ import {
 import { createWorkItemTransitionExecutor } from "../../bridge/functions/work-item-actions.js";
 import { buildImageInjectionPayload } from "../functions/run-session.js";
 import { spawnPosseInForeground, waitForForegroundExit } from "../../pairing/functions/foreground-command.js";
+import { SESSION_PUBLISH_DECLINED_EXIT_CODE } from "../../../catalog/shared-run.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { requestSessionResume, setSessionHold } from "../../pairing/functions/session-hold.js";
 import { readSessionSync } from "../../pairing/functions/session-sync.js";
@@ -211,6 +212,7 @@ export class RunDisplayActions {
     this.liveReviewPromise = null;
     this.sessionCommandsInFlight = new Set();
     this.foregroundChild = null;
+    this.foregroundStopped = false;
     this.spawnPosse = spawnPosse;
     this.terminal = terminal;
     this.humanGatePrompts = new Map();
@@ -271,6 +273,18 @@ export class RunDisplayActions {
     }
   }
 
+  /**
+   * The run is shutting down: end the foreground command that has the
+   * terminal, so it is not left reading the terminal after this process exits.
+   */
+  stopForegroundCommand() {
+    const child = this.foregroundChild;
+    if (!child) return false;
+    this.foregroundStopped = true;
+    try { child.kill("SIGTERM"); } catch { /* already gone */ }
+    return true;
+  }
+
   /** Whether a foreground session command has the terminal right now. */
   foregroundCommandActive() {
     return this.foregroundChild != null;
@@ -291,19 +305,25 @@ export class RunDisplayActions {
     }
     if (this.foregroundChild) throw new Error("Another session command has the terminal");
     if (!display.lendTerminal()) throw new Error("The run screen cannot hand the terminal over right now");
+    this.foregroundStopped = false;
     let outcome = null;
     try {
       output.write(`\n  ${this.C.cyan}[session]${this.C.reset} ${label} (the run keeps going; Ctrl+C here cancels only this command)\n\n`);
       this.foregroundChild = this.spawnPosse(args, { cwd: this.projectDir });
       outcome = await waitForForegroundExit(this.foregroundChild);
       // The command's output sits on the plain terminal, which the run screen
-      // is about to cover: let the host read it first.
-      await this.waitForEnter(`\n  ${this.C.dim}Press Enter to return to the session screen.${this.C.reset} `);
+      // is about to cover: let the host read it first. A run that is shutting
+      // down has no screen to come back to and must not wait on a key.
+      if (!this.foregroundStopped) await this.waitForEnter(`\n  ${this.C.dim}Press Enter to return to the session screen.${this.C.reset} `);
     } catch (error) {
       outcome = outcome || { error };
     } finally {
       this.foregroundChild = null;
       display.reclaimTerminal();
+    }
+    if (this.foregroundStopped) throw new Error(`${label} was stopped because the run is shutting down`);
+    if (outcome?.code === SESSION_PUBLISH_DECLINED_EXIT_CODE) {
+      throw Object.assign(new Error(`${label} was canceled; nothing was published`), { cancelled: true });
     }
     if (outcome?.error) throw new Error(`could not run ${label}: ${outcome.error?.message || outcome.error}`);
     if (outcome?.code !== 0) {

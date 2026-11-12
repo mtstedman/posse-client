@@ -215,7 +215,7 @@ export async function processIterativeWrapUp({
   mergeIterativePassToTarget = null,
 } = {}) {
   const terminal = listWorkItems(["complete", "failed"]).filter((wi) => isIterativeWorkItemActive(wi));
-  if (terminal.length === 0) return { spawned: 0, finalized: 0, rerun: false };
+  if (terminal.length === 0) return { spawned: 0, finalized: 0, deferred: 0, rerun: false };
 
   const say = (message) => {
     if (display) display.addEvent(message);
@@ -224,6 +224,7 @@ export async function processIterativeWrapUp({
 
   let spawned = 0;
   let finalized = 0;
+  let deferred = 0;
   for (let wi of terminal) {
     const state = getIterativeState(wi);
     if (!state || !state.active) continue;
@@ -304,6 +305,9 @@ export async function processIterativeWrapUp({
         say(needsAttention
           ? `  ${C.red}[iterate]${C.reset} WI#${wi.id}: Team publication blocked — grant did not verify after re-resolution (${mergeResult.reason}); passes preserved, reissue the grant to resume`
           : `  ${C.yellow}[iterate]${C.reset} WI#${wi.id}: pass merge deferred (${mergeResult.reason || "shared trunk busy"}); will retry`);
+        // Only a deferral that time can clear is counted: a caller that stays
+        // running retries those, while a blocked grant waits for its reissue.
+        if (!needsAttention) deferred++;
         continue;
       }
       if (!mergeResult.ok) {
@@ -344,7 +348,7 @@ export async function processIterativeWrapUp({
     say(`  ${C.cyan}[iterate]${C.reset} WI#${wi.id}: queued pass ${spawnedPass.passNumber}/${refreshed.maxPasses} (${spawnedPass.mode})`);
   }
 
-  return { spawned, finalized, rerun: spawned > 0 };
+  return { spawned, finalized, deferred, rerun: spawned > 0 };
 }
 
 // Re-export for orchestrator-app.js convenience so the bootDeps

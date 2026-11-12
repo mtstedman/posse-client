@@ -6,7 +6,7 @@ import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { PAIRING_ACTION_ARITY } from "../../../catalog/pairing-command.js";
 import { ADMISSION_POLL_INTERVAL_MS, ADMISSION_MAX_CONSECUTIVE_FAILURES } from "../../../catalog/pairing-wire.js";
 import { STARTUP_UPDATE_FLAGS } from "../../../catalog/cli-flags.js";
-import { SESSION_CONSOLE_FIRST_ENV } from "../../../catalog/shared-run.js";
+import { SESSION_CONSOLE_FIRST_ENV, SESSION_PUBLISH_DECLINED_EXIT_CODE } from "../../../catalog/shared-run.js";
 import {
   SESSION_COMPUTE_LEASE_DEFAULT,
   SESSION_COMPUTE_OWNERS,
@@ -2012,7 +2012,7 @@ async function runSessionPublishCommand({ action, projectDir, C, json, unattende
     return { ok: false, action, reason: error?.code || "session_publish_failed", paused: handled?.paused === true };
   }
   if (json) console.log(JSON.stringify(result));
-  if (!result.ok) process.exitCode = 1;
+  if (!result.ok) process.exitCode = result.cancelled && result.reason === "declined" ? SESSION_PUBLISH_DECLINED_EXIT_CODE : 1;
   return result;
 }
 

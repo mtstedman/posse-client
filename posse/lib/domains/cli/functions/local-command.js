@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot } from "../../../shared/native/functions/local-model-paths.js";
 import path from "node:path";
 import { LOCAL_BRIDGE_MODELS } from "../../../catalog/local-model.js";
@@ -8,13 +7,14 @@ import { LOCAL_USAGE, parseLocalOptions } from "./local-options.js";
 import { checkLocalOutput, encodeLocalOutput, readLocalPrompt, writeLocalOutput } from "./local-output.js";
 import { requireLocalModelCapability } from "./local-capabilities.js";
 import { installLocalModel, openLocalRuntime } from "./local-install.js";
-import { resolveDefaultLocalModel } from "../../../shared/native/functions/local-model-defaults.js";
+import { resolveDefaultLocalModel, localBridgeModelInstallationStatus } from "../../../shared/native/functions/local-model-defaults.js";
 import { LOCAL_DEFAULT_MODELS } from "../../../catalog/local-model.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
 import { resolveLocalParameters, resolveLocalModel, localModelHelp } from "./local-parameters.js";
 import { selectGenerationGpu, writeImageGpuInventory } from "./local-gpu.js";
 import { requireFirstFrameCapability } from "./local-video-media.js";
 import { LocalVideoContinuation } from "../classes/LocalVideoContinuation.js";
+import { prepareImageInput, prepareReferenceImages } from "./local-image-input.js";
 
 export { LOCAL_USAGE };
 
@@ -29,8 +29,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
   if (args.action === "list") {
     const models = await Promise.all(LOCAL_BRIDGE_MODELS.map(async model => {
       const location = path.join(modelRoot, model.directory);
-      const exists = await fs.lstat(location).catch(error => { if (error.code === "ENOENT") return null; throw error; });
-      return { ...model, path: location, installationStatus: exists?.isDirectory() && !exists.isSymbolicLink() ? "present-unverified" : "not-installed",
+      return { ...model, path: location, installationStatus: localBridgeModelInstallationStatus(modelRoot, model),
         platformSupported: model.platforms.includes(`${process.platform}-${process.arch}`), installable: model.platforms.includes(`${process.platform}-${process.arch}`) };
     }));
     if (args.json || args.format === "json") stdout.write(JSON.stringify({ modelRoot, models }) + "\n");
@@ -88,6 +87,14 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
       return 0;
     }
     const capability = requireLocalModelCapability(model, caps, { version });
+    if (model.kind === "image" && parameters.initImage !== undefined) {
+      progress.update({ stage: "Reading starting image" });
+      Object.assign(payload, await prepareImageInput(capability, parameters, args, signal));
+    }
+    if (model.kind === "image" && parameters.refImages !== undefined) {
+      progress.update({ stage: "Reading reference images" });
+      Object.assign(payload, await prepareReferenceImages(capability, parameters, args, signal));
+    }
     if (model.kind === "video" && (parameters.firstFrame !== undefined || parameters.continueFrom !== undefined)) {
       requireFirstFrameCapability(capability);
       progress.update({ stage: parameters.continueFrom ? "Extracting previous video's last frame" : "Reading first frame" });
@@ -112,8 +119,9 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     try {
       result = await invoke(model.kind === "video" ? ML_GENERATE_VIDEO_METHOD : model.kind === "image" ? ML_GENERATE_IMAGE_METHOD : ML_GENERATE_METHOD, payload, options);
     } catch (error) {
-      if (error?.name !== "AbortError" && /inspect directory|not installed|No such file/i.test(error?.message || "")) {
-        throw new Error(`${model.slug} is not installed or its files are incomplete. Run: posse local install ${model.slug} --model-root ${JSON.stringify(modelRoot)}`, { cause: error });
+      if (error?.name !== "AbortError" && /inspect directory|not installed|No such file/i.test(error?.message || "")
+        && localBridgeModelInstallationStatus(modelRoot, model) !== "present-unverified") {
+        throw new Error(`${model.slug} is not installed or its files are incomplete. Run: posse local install ${model.slug} --model-root ${JSON.stringify(modelRoot)}\nNative error: ${error.message}`, { cause: error });
       }
       throw error;
     }
@@ -164,7 +172,7 @@ async function generationPayload(model, args, parameters, input) {
   if (model.kind !== "text") {
     // GPU mode and selection belong to the CLI; native generation accepts a
     // boolean and the exact resolved device ID, never auto/on/off.
-    const { gpu: _gpu, gpuId: _gpuId, firstFrame: _firstFrame, continueFrom: _continueFrom, ...settings } = parameters;
+    const { gpu: _gpu, gpuId: _gpuId, firstFrame: _firstFrame, continueFrom: _continueFrom, initImage: _initImage, refImages: _refImages, ...settings } = parameters;
     return { modelId: model.modelId, prompt, ...settings };
   }
   const { temperature, topP, topK, seed } = parameters;

@@ -6,6 +6,7 @@ import { formatNativeDownloadMiB, summarizeNativeArtifactResults } from "../func
 import { ensureRemoteCatalogLoaded, getRemoteCatalog } from "../../providers/functions/model-catalog-store.js";
 import { noteGoWindow } from "../../pairing/functions/session-owner-launch.js";
 import { pairingSessionLive, sharedRunEligible, sharedRunTerminalAttached, workItemsSettledForSeeding } from "../../pairing/functions/shared-run.js";
+import { SESSION_OWNER_CHILD_ENV } from "../../../catalog/session-sync.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { describeModelCatalogWarning, validateConfiguredModels } from "../../providers/functions/model-catalog-validate.js";
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
@@ -332,8 +333,12 @@ export class RunSession {
     scoped: isScopedRun, nonInteractive, dryRun: DRY_RUN, terminal: sharedRunHasTerminal() === true,
   }) && sharedRunSessionLive() === true;
   let idleAutoMergeForSharedRun = null;
+  // The session console (and the screen it opens) start this run as their
+  // child; `posse go` typed in a shell has no console to go back to.
+  const sharedRunFromConsole = Number(process.env[SESSION_OWNER_CHILD_ENV]) > 0;
   const sharedSession = new RunSharedSession({
     enabled: sharedRun,
+    fromConsole: sharedRunFromConsole,
     getDisplay: () => display,
     getIdleAutoMerge: () => idleAutoMergeForSharedRun,
     C,
@@ -2816,6 +2821,7 @@ export class RunSession {
     // Ctrl+C in a shared run returns to the session console; it does not end
     // the session.
     display.sharedRun = sharedRun;
+    display.sharedRunFromConsole = sharedRunFromConsole;
     // Replay the most recent queue snapshot the scheduler has emitted so
     // the display opens with a fully populated view instead of a blank
     // frame that waits for the next state change.
@@ -2938,6 +2944,7 @@ export class RunSession {
     },
     exitProcess,
     isTerminalLent: () => displayActions?.foregroundCommandActive?.() === true,
+    stopForegroundCommand: () => displayActions?.stopForegroundCommand?.() === true,
   });
   this._activeShutdown = shutdown;
   removeBootSignalHandlers();
@@ -3001,6 +3008,13 @@ export class RunSession {
   // runLoop already drained this before stopping the session monitor; a merge
   // started after that (a worker that outlived the shutdown wait) is finished here.
   await schedulerCallbacks.finishPendingAutoMerge();
+  // A shared run's quiet closeout may still be merging an iterative pass or
+  // refreshing the deploy offer; exiting under it would cut a merge short.
+  if (sharedSession.quietWork) {
+    emitCloseoutStatus("Finishing the session's idle merge before exiting.", C.cyan);
+    await flushCloseoutStatus();
+  }
+  await sharedSession.settle();
 
   // A session close started from this screen stopped the scheduler and is
   // still draining members and freezing the session's work in this process:

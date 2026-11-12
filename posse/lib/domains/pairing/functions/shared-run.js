@@ -33,6 +33,32 @@ export function pairingSessionLive(getState = getLivePairingState) {
   }
 }
 
+// How many reads of the pairing row may fail in a row before a shared run
+// treats the session as gone.
+const SESSION_LIVE_READ_FAILURES = 3;
+
+/**
+ * The live-session probe a running shared run polls. One failed read (a busy
+ * database) keeps the last answer, as every other read in a scheduler lap is
+ * retried; only repeated failures end the run, so an unreadable row still
+ * cannot keep it open forever.
+ */
+export function createSessionLiveProbe(getState = getLivePairingState, { failures: allowed = SESSION_LIVE_READ_FAILURES } = {}) {
+  // The run is shared only because the session was live when it started.
+  let last = true, failed = 0;
+  return () => {
+    try {
+      const state = getState();
+      failed = 0;
+      last = Boolean(state && state.phase === "active" && state.relay_token);
+    } catch {
+      failed += 1;
+      if (failed >= allowed) last = false;
+    }
+    return last;
+  };
+}
+
 /**
  * The stay-open decision, taken at every point where a run would otherwise
  * finish: the queue emptied, nothing can progress, or only parked work is

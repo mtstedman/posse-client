@@ -7,7 +7,6 @@ import path from "node:path";
 
 import {
   GEMMA_LOCAL_MODEL_ID, LOCAL_BRIDGE_MODELS, LOCAL_MODEL_IDS, LOCAL_MODEL_PROFILES, QWEN_LOCAL_MODEL_ID,
-  resolveLocalModelId,
 } from "../../../../catalog/local-model.js";
 import { LOCAL_AGENT_LIMIT_SETTINGS } from "../../../../catalog/local-model-parameters.js";
 import { localBridgeModelInstalled, resolveDefaultLocalModel } from "../../../../shared/native/functions/local-model-defaults.js";
@@ -72,12 +71,14 @@ export const MODEL_TIERS = Object.freeze({
 
 export { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot };
 
-export function getModelTierConfig(tier = "standard") {
+export function getModelTierConfig(tier = "standard", { modelRoot = defaultLocalGenerationModelRoot() } = {}) {
   const key = tier in MODEL_TIERS ? tier : "standard";
   const base = MODEL_TIERS[key];
   // Local models have no strength tiers: every tier runs the one selected
-  // code model.
-  return { ...base, model: resolveLocalModelId(readModelSetting("posse_local_default_code_model")) || base.model };
+  // code model. With no selection that is the first installed code model,
+  // the same rule an agent turn and `posse local --kind code` follow.
+  const selected = resolveDefaultLocalModel("code", { modelRoot, readSetting: readModelSetting });
+  return { ...base, model: selected?.modelId || base.model };
 }
 
 /** True when the profile's files are present and it can run on this platform. */
@@ -222,7 +223,7 @@ export async function callProvider(promptText, opts = {}) {
     /** @type {any} */ (error).code = "POSSE_LOCAL_SESSION_RESUME_UNSUPPORTED";
     throw error;
   }
-  const tier = getModelTierConfig(modelTier);
+  const tier = getModelTierConfig(modelTier, { modelRoot });
   const selected = selectExecutionModel({
     jobModelName: modelName,
     globalModelOverride: null,
@@ -381,7 +382,7 @@ export async function callAgentTurn(promptText, options = {}) {
   // choice, else the most capable general model installed on this machine.
   const modelName = options.modelName
     || resolveDefaultLocalModel("text", { modelRoot, readSetting: readModelSetting })?.modelId
-    || getModelTierConfig().model;
+    || getModelTierConfig("standard", { modelRoot }).model;
   if (!LOCAL_MODEL_PROFILES[modelName]) throw new Error(`Unsupported posse-local model: ${modelName}`);
   const profile = localModelLimits(modelName);
   const manager = options.manager || nativeBinaries;

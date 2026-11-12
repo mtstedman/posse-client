@@ -40,10 +40,16 @@ export async function readBoundedMedia(file, maxBytes) {
   } finally { await handle.close(); }
 }
 
-export function firstFrameDimensions(bytes) {
+/** Width and height from a PNG's header; `label` names the input in the error. */
+export function pngHeaderDimensions(bytes, label) {
   if (bytes.length < 33 || bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a"
-    || bytes.readUInt32BE(8) !== 13 || bytes.subarray(12, 16).toString() !== "IHDR") throw new Error("firstFrame must be a PNG file.");
-  return validateDimensions(bytes.readUInt32BE(16), bytes.readUInt32BE(20));
+    || bytes.readUInt32BE(8) !== 13 || bytes.subarray(12, 16).toString() !== "IHDR") throw new Error(`${label} must be a PNG file.`);
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
+export function firstFrameDimensions(bytes) {
+  const { width, height } = pngHeaderDimensions(bytes, "firstFrame");
+  return validateDimensions(width, height);
 }
 
 function validateDimensions(width, height) {

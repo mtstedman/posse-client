@@ -354,12 +354,26 @@ export class DisplayInputController {
     }
     this._inputMode = false;
     this._inputBuf = "";
+    // The same command twice at once (a repeated key before the roster
+    // refreshes) would race itself: the first one is still doing the work.
+    this._sessionCommandsRunning ??= new Set();
+    if (this._sessionCommandsRunning.has(command)) {
+      this.addEvent(`${C.dim}Session command already running: ${command.slice(0, 80)}${C.reset}`);
+      this._drainQuestions();
+      return;
+    }
+    this._sessionCommandsRunning.add(command);
     this.addEvent(`${C.cyan}Session command started: ${command.slice(0, 80)}${C.reset}`);
-    Promise.resolve(this.onSessionCommand(command)).then(() => {
+    let started;
+    try { started = Promise.resolve(this.onSessionCommand(command)); } catch (error) { started = Promise.reject(error); }
+    started.then(() => {
       this.addEvent(`${C.green}\u2713 Session command completed${C.reset}`);
-      this.requestRender({ force: true });
     }, (error) => {
-      this.addEvent(`${C.red}Session command failed: ${error?.message || error}${C.reset}`);
+      this.addEvent(error?.cancelled === true
+        ? `${C.dim}Session command canceled: ${error?.message || error}${C.reset}`
+        : `${C.red}Session command failed: ${error?.message || error}${C.reset}`);
+    }).finally(() => {
+      this._sessionCommandsRunning.delete(command);
       this.requestRender({ force: true });
     });
     this._drainQuestions();

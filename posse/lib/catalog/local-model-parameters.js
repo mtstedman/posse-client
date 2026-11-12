@@ -1,6 +1,9 @@
 // CLI contracts for the shipped native profiles. Native request validation
 // remains authoritative; do not list features that the adapter cannot execute.
-import { LOCAL_BRIDGE_MODELS, LOCAL_DEFAULT_MODELS, LOCAL_MODEL_IDS, LOCAL_MODEL_PROFILES, QWEN_LOCAL_MODEL_ID, QWEN_IMAGE_MODEL_ID, MINIMAX_H3_MODEL_ID } from "./local-model.js";
+import { LOCAL_BRIDGE_MODELS, LOCAL_DEFAULT_MODELS, LOCAL_MODEL_IDS, LOCAL_MODEL_PROFILES, QWEN_LOCAL_MODEL_ID, QWEN_IMAGE_MODEL_ID, QWEN_IMAGE_EDIT_MODEL_ID, MINIMAX_H3_MODEL_ID } from "./local-model.js";
+
+/** Most reference images one edit request may carry; the native runtime enforces the same cap. */
+export const MAX_REFERENCE_IMAGES = 10;
 
 const integer = (flag, defaultValue, min, max, multiple = 1) => Object.freeze({
   flag, type: "integer", default: defaultValue, min, max, multiple,
@@ -39,7 +42,7 @@ const writingProfile = modelId => {
   return Object.freeze({
     parameters: Object.freeze({
       maxOutputTokens: integer("max-tokens", 1024, 1, maxOutputTokens),
-      system: Object.freeze({ flag: "system", type: "string", maxBytes: 262144, description: "Optional system prompt." }),
+      system: Object.freeze({ flag: "system", type: "string", maxBytes: 262144, description: "Optional standing instructions (role, rules, tone) placed before the prompt. The request itself goes in --prompt." }),
       temperature: number("temperature", sampling.temperature, 0.01, 2, "Sampling temperature; lower is more literal."),
       topP: number("top-p", sampling.topP, 0.01, 1, "Nucleus sampling cutoff."),
       topK: integer("top-k", sampling.topK, 1, 1000),
@@ -55,12 +58,14 @@ const MODEL_PARAMETER_TABLE = Object.freeze({
   [QWEN_LOCAL_MODEL_ID]: Object.freeze({
     parameters: Object.freeze({
       maxOutputTokens: integer("max-tokens", 512, 1, 4096),
-      system: Object.freeze({ flag: "system", type: "string", maxBytes: 262144, description: "Optional system prompt." }),
+      system: Object.freeze({ flag: "system", type: "string", maxBytes: 262144, description: "Optional standing instructions (role, rules, tone) placed before the prompt. The request itself goes in --prompt." }),
     }),
     behavior: "Text input and output; independent requests with greedy decoding. No conversation history or media inputs.",
   }),
   [QWEN_IMAGE_MODEL_ID]: Object.freeze({
     parameters: Object.freeze({
+      initImage: Object.freeze({ flag: "init-image", type: "string", pattern: "\\S", maxBytes: 4096, description: "Opaque PNG starting image, at most 4 MiB; inherits its dimensions. Explicit width/height must match." }),
+      strength: Object.freeze({ flag: "strength", type: "number", min: 0, max: 1, description: "Requires initImage; default 0.75. Higher values transform more; sampling is quantized to steps and always runs at least one step." }),
       width: integer("width", 384, 64, 1024, 16),
       height: integer("height", 384, 64, 1024, 16),
       steps: steps(IMAGE_STEPS_SETTING),
@@ -68,7 +73,21 @@ const MODEL_PARAMETER_TABLE = Object.freeze({
       cfgScale: Object.freeze({ flag: "cfg-scale", type: "number", default: 2.5, min: 1, max: 10 }),
       negativePrompt: Object.freeze({ flag: "negative-prompt", type: "string", default: "", maxBytes: 8192 }),
     }),
-    behavior: "Text input to PNG; independent requests. No image/video/audio inputs or iterative editing. Sampler: Euler; flow shift: 3.",
+    behavior: "Text and optional starting PNG to PNG; independent requests. initImage enables image-to-image transformation with strength. This is the base Qwen-Image model, not Qwen-Image-Edit. Sampler: Euler; flow shift: 3.",
+  }),
+  [QWEN_IMAGE_EDIT_MODEL_ID]: Object.freeze({
+    parameters: Object.freeze({
+      refImages: Object.freeze({ flag: "ref-images", type: "string", required: true, pattern: "\\S", maxBytes: 65536,
+        description: `Comma-separated PNG files to edit or combine, 1 to ${MAX_REFERENCE_IMAGES}; each opaque and at most 4 MiB. Name them in the prompt by position: image 1, image 2, … File names cannot contain commas.` }),
+      width: Object.freeze({ ...integer("width", 384, 64, 1024, 16), description: "With neither width nor height given, the output takes the first reference image's size, scaled to fit 1024 and rounded to 16." }),
+      height: integer("height", 384, 64, 1024, 16),
+      // Its own saved default: the shared image setting belongs to qwen-image.
+      steps: Object.freeze({ ...integer("steps", STEPS.default, STEPS.min, STEPS.max), description: "Sampling iterations." }),
+      ...media,
+      cfgScale: Object.freeze({ flag: "cfg-scale", type: "number", default: 2.5, min: 1, max: 10 }),
+      negativePrompt: Object.freeze({ flag: "negative-prompt", type: "string", default: "", maxBytes: 8192 }),
+    }),
+    behavior: "Reference PNGs plus an instruction to PNG; independent requests. Edits one image or combines several. For text-to-image or a single starting image, use qwen-image. Sampler: Euler; flow shift: 3.",
   }),
   [MINIMAX_H3_MODEL_ID]: Object.freeze({
     parameters: Object.freeze({

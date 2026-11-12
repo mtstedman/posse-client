@@ -18,6 +18,13 @@
 import { RUN_DISPLAY_GLOBAL_KEYS } from "../../../catalog/shared-run.js";
 import { describeSharedRunEnd } from "../../pairing/functions/shared-run.js";
 
+// How long a quiet run waits before it tries a deferred or failed closeout
+// again, doubling up to the cap while the cause persists.
+const CLOSEOUT_RETRY_MS = 30_000;
+const CLOSEOUT_RETRY_MAX_MS = 5 * 60_000;
+// How long the exit waits for a closeout that is still merging.
+const CLOSEOUT_SETTLE_MS = 30_000;
+
 export class RunSharedSession {
   constructor({
     enabled = false,
@@ -32,6 +39,10 @@ export class RunSharedSession {
     countReviewableWorkItems = () => 0,
     seedQueuedWorkItems = () => ({ seeded: 0, unsettled: 0 }),
     getRole = () => "member",
+    now = () => Date.now(),
+    // False for `posse go` typed in a plain shell: Ctrl+C there returns to
+    // that shell, not to a session console.
+    fromConsole = true,
   } = {}) {
     this.enabled = enabled === true;
     this.getDisplay = getDisplay;
@@ -45,7 +56,13 @@ export class RunSharedSession {
     this.countReviewableWorkItems = countReviewableWorkItems;
     this.seedQueuedWorkItems = seedQueuedWorkItems;
     this.getRole = getRole;
+    this.now = now;
+    this.fromConsole = fromConsole !== false;
     this.quietWork = null;
+    // When the closeout is due again (a pass merge deferred, or it failed);
+    // null when the last one finished everything it could.
+    this.closeoutRetryAt = null;
+    this.closeoutRetryDelayMs = CLOSEOUT_RETRY_MS;
     this.lastSeedGeneration = null;
     this.lastReviewableAnnounced = 0;
   }
@@ -94,15 +111,59 @@ export class RunSharedSession {
     this.say(parked
       ? "Nothing can run right now: the remaining work waits on a person. The session stays open."
       : "All queued work is done. The session stays open.", `${this.C.green}${this.C.bold}`);
-    this.say(`${this.getDisplay()?.onInject ? `[${RUN_DISPLAY_GLOBAL_KEYS.INJECT}] adds a task · ` : ""}Ctrl+C returns to the session console`, this.C.dim);
+    this.say(`${this.getDisplay()?.onInject ? `[${RUN_DISPLAY_GLOBAL_KEYS.INJECT}] adds a task · ` : ""}${this.fromConsole ? "Ctrl+C returns to the session console" : "Ctrl+C stops this run; the session stays open"}`, this.C.dim);
+    this.closeoutRetryDelayMs = CLOSEOUT_RETRY_MS;
+    this.#startCloseout();
+  }
+
+  /**
+   * Every later lap of the same quiet stretch. Nothing else brings the
+   * closeout back while the run stays quiet, so a pass merge that deferred
+   * (the shared trunk was busy) or a closeout that failed is tried again here.
+   */
+  onQuietHold() {
+    if (!this.enabled || this.quietWork || this.closeoutRetryAt == null) return;
+    if (this.now() < this.closeoutRetryAt) return;
+    this.#startCloseout();
+  }
+
+  #startCloseout() {
     if (this.quietWork) return;
+    this.closeoutRetryAt = null;
+    const again = () => {
+      this.closeoutRetryAt = this.now() + this.closeoutRetryDelayMs;
+      this.closeoutRetryDelayMs = Math.min(this.closeoutRetryDelayMs * 2, CLOSEOUT_RETRY_MAX_MS);
+    };
     this.quietWork = this.#closeoutWithoutLeaving()
-      .catch((error) => this.say(`Session idle closeout failed: ${error?.message || error}`, this.C.yellow))
+      .then((result) => { if (result?.retry) again(); })
+      .catch((error) => {
+        this.say(`Session idle closeout failed: ${error?.message || error}`, this.C.yellow);
+        again();
+      })
       .finally(() => { this.quietWork = null; });
   }
 
+  /**
+   * Resolves when no closeout is running, or after a bounded wait: the run is
+   * exiting and must not leave a merge half done, nor hang on one.
+   */
+  async settle({ timeoutMs = CLOSEOUT_SETTLE_MS } = {}) {
+    if (!this.quietWork) return;
+    let timer = null;
+    try {
+      await Promise.race([
+        this.quietWork,
+        new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); timer.unref?.(); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** @returns {Promise<{ retry: boolean }>} retry: a pass merge was deferred. */
   async #closeoutWithoutLeaving() {
     const display = this.getDisplay();
+    let retry = false;
     if (typeof this.processIterativeWrapUp === "function") {
       const iterate = await this.processIterativeWrapUp({
         display,
@@ -110,7 +171,8 @@ export class RunSharedSession {
         mergeIterativePassToTarget: this.mergeIterativePassToTarget,
       });
       // The next pass is queued work: the run is busy again.
-      if (iterate?.spawned > 0) return;
+      if (iterate?.spawned > 0) return { retry: false };
+      retry = Number(iterate?.deferred) > 0;
     }
     let merged = 0;
     const idleAutoMerge = this.getIdleAutoMerge();
@@ -140,6 +202,7 @@ export class RunSharedSession {
       this.C.yellow);
     }
     this.lastReviewableAnnounced = reviewable;
+    return { retry };
   }
 
   /**

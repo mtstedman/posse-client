@@ -29,8 +29,11 @@ export class RunShutdownController {
     // True while a foreground command the run screen started has the terminal
     // (a session merge waiting for the host's typed approval).
     isTerminalLent = () => false,
+    // Ends that foreground command; called once a shutdown is under way.
+    stopForegroundCommand = () => false,
   } = {}) {
     this.isTerminalLent = isTerminalLent;
+    this.stopForegroundCommand = stopForegroundCommand;
     this.getDisplay = getDisplay;
     this.worker = worker;
     this.threadManager = threadManager;
@@ -245,6 +248,10 @@ export class RunShutdownController {
       console.log(`\n  ${this.C.yellow}Graceful shutdown — killing workers, stashing work...${this.C.reset}`);
       console.log(`  ${this.C.dim}(Ctrl+C again to force-exit)${this.C.reset}`);
     }
+
+    // A command the run screen lent the terminal to would outlive this
+    // process and keep reading the terminal: end it with the run.
+    try { this.stopForegroundCommand(); } catch { /* best effort */ }
 
     let killed = 0;
     try { killed = this.worker.killAllJobs("shutdown"); } catch { /* watchdog remains armed */ }

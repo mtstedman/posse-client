@@ -86,6 +86,9 @@ export async function runToolsCli(argv = process.argv.slice(3), io = {}) {
       const media = SCRIPT_TOOL_MEDIA_KINDS.includes(template);
       const settings = Object.fromEntries([["provider", "--provider"], ["model", "--model"], ["folder", "--folder"]]
         .filter(([, flag]) => args.one(flag)).map(([key, flag]) => [key, key === "folder" ? path.resolve(args.one(flag)) : args.one(flag)]));
+      if (media && ["--param", "--env", "--secret", "--effect"].some(flag => args.flags[flag] !== undefined)) {
+        throw Object.assign(new Error("--param, --env, --secret and --effect do not apply to --template image or video; a media tool takes a prompt and always has effect write"), { code: "invalid_request" });
+      }
       if (!media && Object.keys(settings).length) throw Object.assign(new Error("--provider, --model and --folder apply to --template image or video"), { code: "invalid_request" });
       const created = await request("script.create", { spec: media ? {
         name: args.positional[0], template, description: args.one("--description") || "", generate: settings,

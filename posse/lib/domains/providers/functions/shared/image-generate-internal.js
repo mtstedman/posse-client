@@ -159,11 +159,15 @@ function _buildImageTimeoutError(timeoutMs) {
   return err;
 }
 
-async function _generateImageWithTimeout(client, params, { timeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS } = {}) {
+async function _generateImageWithTimeout(client, params, { timeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS, signal = null } = {}) {
   const resolvedTimeoutMs = Math.max(1, Number(timeoutMs) || DEFAULT_IMAGE_GENERATION_TIMEOUT_MS);
   const controller = new AbortController();
   let timedOut = false;
   let timer = null;
+  // The caller's cancel stops the provider request the same way a timeout does.
+  signal?.throwIfAborted();
+  const onAbort = () => controller.abort(signal.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
 
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(() => {
@@ -177,7 +181,10 @@ async function _generateImageWithTimeout(client, params, { timeoutMs = DEFAULT_I
 
   try {
     const requestPromise = client.images.generate(params, { signal: controller.signal, timeoutMs: resolvedTimeoutMs });
-    return await Promise.race([requestPromise, timeoutPromise]);
+    const abortPromise = new Promise((_, reject) => {
+      controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+    });
+    return await Promise.race([requestPromise, timeoutPromise, abortPromise]);
   } catch (err) {
     if (timedOut && (err?.name === "AbortError" || err?.code === "ABORT_ERR")) {
       throw _buildImageTimeoutError(resolvedTimeoutMs);
@@ -185,6 +192,7 @@ async function _generateImageWithTimeout(client, params, { timeoutMs = DEFAULT_I
     throw err;
   } finally {
     if (timer) clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -303,6 +311,9 @@ export async function execGenerateImageInternal(args = {}, {
   buildImageClient = _buildImageClient,
   fetchImpl = globalThis.fetch,
   imageTimeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
+  // Optional: a caller's cancel. An aborted run throws the signal's reason
+  // and writes nothing.
+  signal = null,
   imageDownloadMaxBytes = MAX_DOWNLOADED_IMAGE_BYTES,
   enforceProviderAvailability = buildImageClient === _buildImageClient,
   waitBeforeReadinessRecheck = _waitBeforeReadinessRecheck,
@@ -379,6 +390,7 @@ export async function execGenerateImageInternal(args = {}, {
       buildImageClient,
       fetchImpl,
       imageTimeoutMs,
+      signal,
       imageDownloadMaxBytes,
       onProviderRequest,
     });
@@ -411,6 +423,7 @@ export async function execGenerateImageInternal(args = {}, {
     buildImageClient,
     fetchImpl,
     imageTimeoutMs,
+    signal,
     imageDownloadMaxBytes,
     onProviderRequest,
   });
@@ -427,6 +440,7 @@ async function _executeGenerateImageWithRoute({
   buildImageClient,
   fetchImpl,
   imageTimeoutMs,
+  signal = null,
   imageDownloadMaxBytes,
   onProviderRequest,
 }) {
@@ -456,7 +470,7 @@ async function _executeGenerateImageWithRoute({
     try {
       onProviderRequest();
       dispatched = true;
-      response = await _generateImageWithTimeout(client, params, { timeoutMs: imageTimeoutMs });
+      response = await _generateImageWithTimeout(client, params, { timeoutMs: imageTimeoutMs, signal });
     } finally {
       // Image usage currently has no complete price receipt. Keep that unknown,
       // requiring operator reconciliation when a spend threshold is enabled.
@@ -499,6 +513,7 @@ async function _executeGenerateImageWithRoute({
       throw new Error(`Generated image exceeds the ${imageDownloadMaxBytes}-byte limit.`);
     }
 
+    signal?.throwIfAborted();
     if (!canWriteOutput()) {
       throw new Error("Image creation scope was revoked during generation.");
     }
@@ -524,7 +539,7 @@ async function _executeGenerateImageWithRoute({
       startedAt,
       error: err?.message || String(err),
     });
-    if (err?.code === BUDGET_PAUSED) throw err;
+    if (err?.code === BUDGET_PAUSED || signal?.aborted) throw err;
     if (err?.imageGenerationTimeout) {
       return `Error: image generation failed: ${err.message}.`;
     }

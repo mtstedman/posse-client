@@ -45,6 +45,9 @@ export function normalizeMediaGenerate(raw, name) {
   if (provider === SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER && !localMediaModel(raw.kind, model)) {
     fail(`${model} is not a local ${raw.kind} model; choose ${LOCAL_BRIDGE_MODELS.filter(item => item.kind === raw.kind).map(item => item.slug).join(", ")}`);
   }
+  if (provider !== SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER && localMediaModel(raw.kind, model)) {
+    fail(`${model} is a local model; ${provider} needs one of its own ${raw.kind} models`);
+  }
   const folder = typeof raw.folder === "string" ? raw.folder.trim() : "";
   if (!folder || folder.includes("\0") || !path.isAbsolute(folder) || path.resolve(folder) === path.parse(path.resolve(folder)).root) {
     fail("folder is required and must be an absolute folder other than the filesystem root; generated files are written there");

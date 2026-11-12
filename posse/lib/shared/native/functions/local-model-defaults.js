@@ -9,13 +9,31 @@ export function localModelSupportsPlatform(model, platform = `${process.platform
   return model.platforms.includes(platform);
 }
 
-/** True when the model's files are present and it can run on this platform. */
-export function localBridgeModelInstalled(modelRoot, model) {
-  if (!localModelSupportsPlatform(model)) return false;
+// This is a cheap inventory check, not integrity verification. Native generation
+// still hashes the files before use; never hash multi-GB weights on a UI render.
+export function localBridgeModelInstallationStatus(modelRoot, model) {
+  const stat = file => {
+    try { return fs.lstatSync(file); }
+    catch (error) { if (["ENOENT", "ENOTDIR"].includes(error.code)) return null; throw error; }
+  };
   const profile = LOCAL_MODEL_PROFILES[model.modelId];
-  return fs.existsSync(profile
-    ? path.join(path.resolve(modelRoot), profile.directory, profile.installedFile)
-    : path.join(path.resolve(modelRoot), model.directory));
+  const directory = path.join(path.resolve(modelRoot), profile?.directory || model.directory);
+  const folder = stat(directory);
+  if (!folder) return "not-installed";
+  if (!folder.isDirectory() || folder.isSymbolicLink()) return "incomplete";
+  if (profile) {
+    const file = stat(path.join(directory, profile.installedFile));
+    if (!file?.isFile() || file.isSymbolicLink()) return "incomplete";
+    // GGUF profiles contain one pinned file; downloadBytes is its exact size.
+    if (profile.engine === "llama.cpp" && file.size !== model.downloadBytes) return "incomplete";
+  }
+  return "present-unverified";
+}
+
+/** True when the model's expected files are present and it can run on this platform. */
+export function localBridgeModelInstalled(modelRoot, model) {
+  return localModelSupportsPlatform(model)
+    && localBridgeModelInstallationStatus(modelRoot, model) === "present-unverified";
 }
 
 /**

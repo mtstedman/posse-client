@@ -32,18 +32,34 @@ function localGenerationEnv(sourceEnv = process.env) {
 // discovery, capability checks and GPU selection, and a child can be stopped
 // on timeout or cancel without disturbing the owner. It works from a
 // scratch directory so nothing but the result lands in the output folder.
-async function generateLocal({ generate, prompt, parameters, file, format, timeoutMs, signal }) {
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "posse-media-"));
-  try {
-    return await spawnLocalGeneration({ generate, prompt, parameters, file, format, timeoutMs, signal, scratch });
-  } finally {
-    fs.rmSync(scratch, { recursive: true, force: true });
+// The child also writes its result in the scratch directory: a child stopped
+// mid-write (timeout, cancel) then leaves its temporary file there, not in
+// the output folder, and only a complete result is moved into place.
+export function createLocalGenerator({ entry = POSSE_ENTRY } = {}) {
+  return async function generateLocal({ generate, prompt, parameters, file, format, timeoutMs, signal }) {
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "posse-media-"));
+    try {
+      const produced = path.join(scratch, `result.${format}`);
+      const outcome = await spawnLocalGeneration({ generate, prompt, parameters, file: produced, format, timeoutMs, signal, scratch, entry });
+      if (outcome.ok && fs.existsSync(produced)) moveIntoPlace(produced, file);
+      return outcome;
+    } finally {
+      fs.rmSync(scratch, { recursive: true, force: true });
+    }
+  };
+}
+
+// The scratch directory and the output folder may be on different filesystems.
+function moveIntoPlace(from, to) {
+  try { fs.renameSync(from, to); } catch (error) {
+    if (error?.code !== "EXDEV") throw error;
+    fs.copyFileSync(from, to, fs.constants.COPYFILE_EXCL);
   }
 }
 
-async function spawnLocalGeneration({ generate, prompt, parameters, file, format, timeoutMs, signal, scratch }) {
+async function spawnLocalGeneration({ generate, prompt, parameters, file, format, timeoutMs, signal, scratch, entry }) {
   const model = localMediaModel(generate.kind, generate.model);
-  const args = [POSSE_ENTRY, "local", "--model", model.slug, "--format", format, "--output", file, "--quiet", "--non-interactive",
+  const args = [entry, "local", "--model", model.slug, "--format", format, "--output", file, "--quiet", "--non-interactive",
     ...(Object.keys(parameters).length ? ["--parameters", JSON.stringify(parameters)] : [])];
   return await new Promise((resolve, reject) => {
     let child;
@@ -83,17 +99,24 @@ async function spawnLocalGeneration({ generate, prompt, parameters, file, format
 
 // API image models run through the same executor the built-in image tool
 // uses, with Posse's own provider credentials, budget and telemetry.
-async function generateRemote({ generate, prompt, file, timeoutMs }) {
-  const { execGenerateImageInternal } = await import("../../providers/functions/shared/image-generate-internal.js");
-  const message = await execGenerateImageInternal({ prompt, filename: path.basename(file), provider: generate.provider }, {
-    cwd: path.dirname(file), scopePredicates: { canCreate: () => true },
-    imageProvider: generate.provider, imageModel: generate.model, imageTimeoutMs: timeoutMs,
-  });
-  const failed = typeof message !== "string" || /^error\b/i.test(message.trim());
-  return { ok: !failed, timedOut: false, exitCode: failed ? 1 : 0, detail: failed ? scrubSecretText(String(message ?? "")).trim() : "" };
+export function createRemoteGenerator({ execute = null } = {}) {
+  return async function generateRemote({ generate, prompt, file, timeoutMs, signal }) {
+    const execGenerateImageInternal = execute
+      || (await import("../../providers/functions/shared/image-generate-internal.js")).execGenerateImageInternal;
+    const started = performance.now();
+    const message = await execGenerateImageInternal({ prompt, filename: path.basename(file), provider: generate.provider }, {
+      cwd: path.dirname(file), scopePredicates: { canCreate: () => true },
+      imageProvider: generate.provider, imageModel: generate.model, imageTimeoutMs: timeoutMs, signal,
+    });
+    const failed = typeof message !== "string" || /^error\b/i.test(message.trim());
+    // The executor reports its own timeout as an ordinary failure message; a
+    // failure that used the whole allowance is the tool's timeout.
+    const timedOut = failed && performance.now() - started >= timeoutMs;
+    return { ok: !failed, timedOut, exitCode: failed && !timedOut ? 1 : failed ? null : 0, detail: failed ? scrubSecretText(String(message ?? "")).trim() : "" };
+  };
 }
 
-export const defaultMediaGenerators = Object.freeze({ local: generateLocal, remote: generateRemote });
+export const defaultMediaGenerators = Object.freeze({ local: createLocalGenerator(), remote: createRemoteGenerator() });
 
 function fileStamp(now) {
   return new Date(now).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
@@ -117,13 +140,20 @@ export async function runMediaTool(tool, input, { signal = null, generators = de
   const file = path.join(folder, `${base}-${fileStamp(now())}-${randomBytes(3).toString("hex")}.${format}`);
   const parameters = Object.fromEntries(Object.entries(input || {}).filter(([key]) => !RESERVED_ARGUMENTS.includes(key)));
   const run = generate.provider === SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER ? generators.local : generators.remote;
-  const outcome = await run({ generate, prompt, parameters, file, format, timeoutMs: tool.manifest.timeout_seconds * 1000, signal });
+  // A failed or stopped generation must not leave a partial file behind.
+  const discard = () => { try { fs.rmSync(file, { force: true }); } catch {} };
+  let outcome;
+  try {
+    outcome = await run({ generate, prompt, parameters, file, format, timeoutMs: tool.manifest.timeout_seconds * 1000, signal });
+  } catch (error) {
+    // Canceled, or the generator itself failed to start.
+    discard();
+    throw error;
+  }
   const result = (ok, detail, fields = {}) => ({
     ok, exit_code: outcome.timedOut ? null : ok ? 0 : outcome.exitCode ?? 1, timed_out: outcome.timedOut === true,
     truncated: false, redacted: false, stderr: detail, duration_ms: Math.round(performance.now() - started), ...fields,
   });
-  // A failed or stopped generation must not leave a partial file behind.
-  const discard = () => { try { fs.rmSync(file, { force: true }); } catch {} };
   if (!outcome.ok) {
     discard();
     return result(false, outcome.detail || (outcome.timedOut ? "generation timed out" : "generation failed"), { output: "" });

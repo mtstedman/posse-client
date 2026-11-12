@@ -18,7 +18,9 @@ function sessionRosterDashboardLines(session, width, { selectedId = null, onSele
   const rows = formatSessionRosterLines(roster, {
     width: Math.max(8, width - 4),
     // The pipeline pane scrolls, so it can afford more rows than the console.
-    maxRows: SESSION_PANEL_LAYOUT.MAX_PARTICIPANT_ROWS * 3,
+    // With a row selected nothing is cut off: the selection moves through
+    // every row, and one hidden behind "+N more" could still be acted on.
+    maxRows: selectedIndex >= 0 ? roster.rows.length + 1 : SESSION_PANEL_LAYOUT.MAX_PARTICIPANT_ROWS * 3,
     header: false,
     indent: "",
     moreHint: "",

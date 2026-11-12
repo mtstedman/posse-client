@@ -1,6 +1,7 @@
 import { LOCAL_BRIDGE_MODELS } from "../../../catalog/local-model.js";
 import { LOCAL_MODEL_PARAMETERS, LOCAL_PARAMETER_FLAGS } from "../../../catalog/local-model-parameters.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
+import { LOCAL_GPU_HELP } from "./local-options.js";
 
 export function resolveLocalModel(name) {
   const model = LOCAL_BRIDGE_MODELS.find(candidate => candidate.slug === name || candidate.modelId === name);
@@ -82,6 +83,14 @@ export function resolveLocalParameters(model, args, readSetting = getSetting) {
   if (parameters.firstFrame !== undefined && parameters.continueFrom !== undefined) {
     throw new Error("Use firstFrame (--first-frame) or continueFrom (--continue-from), not both.");
   }
+  for (const [key, parameter] of Object.entries(schema)) {
+    if (parameter.required && parameters[key] === undefined) {
+      throw new Error(`${model.slug} needs ${key} (--${parameter.flag}). Run posse local help --model ${model.slug}.`);
+    }
+  }
+  if (parameters.strength !== undefined && parameters.initImage === undefined) {
+    throw new Error("strength (--strength) requires initImage (--init-image).");
+  }
   return { parameters, args: resolvedArgs };
 }
 
@@ -102,12 +111,14 @@ export function localModelHelp(model, readSetting = getSetting) {
   ];
   for (const [key, parameter] of Object.entries(profile.parameters)) {
     const fallback = helpDefault(key, parameter, readSetting);
-    lines.push(`  ${key}: ${parameterConstraints(parameter)}${fallback !== undefined ? `; default: ${JSON.stringify(fallback)}` : "; optional"}`,
+    lines.push(`  ${key}: ${parameterConstraints(parameter)}${fallback !== undefined ? `; default: ${JSON.stringify(fallback)}` : parameter.required ? "; required" : "; optional"}`,
       `    --${parameter.flag}${parameter.description ? ` — ${parameter.description}` : ""}`);
   }
   lines.push("", "Use strict JSON, with double-quoted keys and string values. Existing flags also work;",
     "do not supply the same parameter through both JSON and a flag.",
     "Prompt text is supplied separately with --prompt, --input or stdin.",
-    "Steps are sampling iterations, not conversation turns. Run posse local --help for shared options.");
+    "Run posse local help for shared options.");
+  if (profile.parameters.steps) lines.push("Steps are sampling iterations, not conversation turns.");
+  if (profile.parameters.gpu) lines.push("", LOCAL_GPU_HELP);
   return lines.join("\n");
 }

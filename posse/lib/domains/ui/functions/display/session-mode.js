@@ -68,7 +68,8 @@ export function sessionModeView(data, width, { selectedId = null } = {}) {
   });
   // The host hands the code out for as long as the session runs.
   if (session.role === "host" && session.invite_code) {
-    lines.push(fit(` ${C.dim}INVITE${C.reset} posse session join ${_sanitizeDisplayLine(session.invite_code)}`, width));
+    lines.push(fit(` ${C.dim}INVITE${C.reset} posse session join ${_sanitizeDisplayLine(session.invite_code)}`
+      + (session.enrollment_open === false ? ` ${C.yellow}(invites closed)${C.reset}` : ""), width));
   }
   if (session.role === "host" && session.publish) {
     const mode = (value) => (value === "auto" ? "auto" : "you approve");

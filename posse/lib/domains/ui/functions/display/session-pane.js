@@ -135,6 +135,7 @@ function confirmQuestion(action, row, session) {
       ? `Decline ${rowLabel(row)}'s request to join?`
       : `Remove ${rowLabel(row)} from the session? Their access is revoked and their runs stop.`;
   }
+  if (action === A.AUTO_DEPLOY) return "Turn auto deploy on? Posse then pushes merged work to origin as it lands, without asking.";
   if (action === A.DEPLOY) return "Deploy: merge the team's work and push your branch to origin? You approve the exact change next.";
   if (action === A.CLOSE) {
     const others = Math.max(0, Number(session?.peer_count) || 0);
@@ -166,7 +167,10 @@ export function sessionActionPlan(action, {
   const rowAction = Object.values(ROW_ACTION_KEYS).includes(action);
   if (rowAction && !sessionRowActions({ role, row }).includes(action)) return null;
   if (!rowAction && !sessionHostActions({ role }).includes(action)) return null;
-  if (SESSION_PANE_CONFIRMED_ACTIONS.includes(action) && !confirmed) {
+  // Turning automatic deploy on is a standing permission to push to origin
+  // unattended, so it asks like a single deploy does; turning it off does not.
+  const enablesAutoDeploy = action === A.AUTO_DEPLOY && session?.publish?.deploy_mode === "ask";
+  if ((SESSION_PANE_CONFIRMED_ACTIONS.includes(action) || enablesAutoDeploy) && !confirmed) {
     return {
       kind: "prompt",
       prompt: {

@@ -305,6 +305,7 @@ export class Display {
     this._sessionFollowSelection = false;
     // A shared run: Ctrl+C returns to the session console (hint wording).
     this.sharedRun = false;
+    this.sharedRunFromConsole = true;
     // While a foreground command has the terminal (terminal-lease.js).
     this._terminalLent = false;
     this._toolScroll = 0;
