@@ -64,9 +64,9 @@ const COMMAND_USAGE = {
     console.log("  On blocked recovery, pass uses the offered explicit waiver and preserves the verification gap.");
   },
   serve: () => {
-    console.log(`\n  Usage: posse serve [--show-token] [--pair]`);
-    console.log(`  Start this clone's HTTP+WebSocket control bridge for phone/web clients.`);
-    console.log(`  ${C.dim}This does not join clones or share Git work; use \`posse pair\` for multi-user shared-trunk collaboration.${C.reset}\n`);
+    console.log(`\n  Usage: posse serve [--pair] [--remote origin] [--branch name] | serve join <CODE>`);
+    console.log(`  Serve this repository to phones, web clients, and other Posse clones.`);
+    console.log(`  ${C.dim}Shows phone pairing and a clone invite. Shared Git setup waits until a clone joins; phone-only use leaves Git untouched.${C.reset}\n`);
   },
   pair: () => {
     console.log(`\n  Usage:`);
@@ -75,11 +75,11 @@ const COMMAND_USAGE = {
     console.log(`    posse pair join <CODE>`);
     console.log(`    posse pair status`);
     console.log(`    posse pair leave`);
-    console.log(`\n  Opens or joins multi-user collaboration across separate clones on one shared Git side trunk.`);
+    console.log(`\n  Compatibility alias for serve: phone access starts now; shared Git setup waits for a clone join.`);
     console.log(`  Live participants see bounded, read-only peer WI/job summaries outside their local queue.`);
     console.log(`  Each clone keeps its own queue and database; peer activity is never scheduled locally.`);
     console.log(`  The host console takes typed commands: ${C.cyan}close${C.reset} drains and integrates; ${C.cyan}Ctrl+C${C.reset} forces close and integration.`);
-    console.log(`  ${C.dim}This does not expose a phone/web control bridge; use \`posse serve --pair\` for that.${C.reset}\n`);
+    console.log(`  ${C.dim}Use \`posse serve --pair\` to add another phone and keep serving afterwards.${C.reset}\n`);
   },
   session: () => {
     console.log(`\n  Usage:`);
@@ -101,7 +101,7 @@ const COMMAND_USAGE = {
     console.log(`    posse session leave|close [--keep-branch|--history-preserving]`);
     console.log(`    posse session integrate [--approve-source-oid SHA --approve-origin-oid SHA]`);
     console.log(`    posse session abandon-integration`);
-    console.log(`\n  Opens or joins a shared Posse collaboration session.`);
+    console.log(`\n  Compatibility alias for serve. Hosting reserves an invitation; a clone join creates the shared Git session.`);
     console.log(`  Joiners wait for the host to confirm their four-character countersign.`);
     console.log(`  The host issues each member's lease: host runs their work on the host's computer and provider account,`);
     console.log(`  member lets them run and pay for their own. Unset leases follow the session policy (host-only means host).`);
@@ -162,7 +162,7 @@ ${aliasDiagnostic}
     ${C.cyan}queue${C.reset}      Show all work items and their status
     ${C.cyan}status${C.reset}     Detailed job-level status
     ${C.dim}             status [--active] [--limit N|all] [--json]${C.reset}
-    ${C.cyan}serve${C.reset}      Control this clone from paired phone/web clients
+    ${C.cyan}serve${C.reset}      Serve this repository to phones, web clients, and Posse clones
     ${C.dim}             serve [--show-token] [--pair]${C.reset}
     ${C.cyan}health${C.reset}     Failure/stuck-job health summary
     ${C.cyan}dashboard${C.reset}  Visual job board
@@ -209,10 +209,10 @@ ${aliasDiagnostic}
     ${C.dim}             shared-trunk ops [--json] | shared-trunk ops abandon <id> | shared-trunk provenance reset${C.reset}
     ${C.cyan}pairing-preflight${C.reset}  Verify this member's shared-remote access
     ${C.dim}             pairing-preflight [--json]${C.reset}
-    ${C.cyan}pair${C.reset}       Collaborate across clones on a shared Git side trunk
+    ${C.cyan}pair${C.reset}       Compatibility alias for serve
     ${C.dim}             pair [host] [--remote origin] [--branch name] | pair <CODE> | pair join <CODE> | pair leave | pair status${C.reset}
-    ${C.dim}             Host: g gracefully drains/integrates; Ctrl+C forces close/integration; unlike serve, pair does not connect phone/web clients${C.reset}
-    ${C.cyan}session${C.reset}    Host or join the shared session model (preferred; pair is an alias)
+    ${C.dim}             Alias of serve; shared Git setup begins only when a clone joins${C.reset}
+    ${C.cyan}session${C.reset}    Compatibility alias for serve, including session management
     ${C.dim}             session host|join|admit|status|hold|resume|members|pending|kick|scope|policy|publication|invite|leave|close|integrate|abandon-integration${C.reset}
     ${C.cyan}unpair${C.reset}     Leave pairing; host drains and integrates, members restore locally
     ${C.cyan}atlas${C.reset}        Atlas admin commands

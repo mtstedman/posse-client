@@ -1319,25 +1319,40 @@ through one remote side branch. Each person must use a separate clone and a sepa
 `.posse/` database. Never point two instances at one clone, one worktree, or a
 SQLite database on a network filesystem.
 
-The host opens a persistent shared session from a clean named branch:
+Start remote access from an initialized Posse repository:
 
 ```bash
-posse session host
+posse serve
 ```
 
-For a GitHub origin, Posse uses the authenticated `gh` CLI to create a private
-throwaway repository, installs a host deploy key through repo-local SSH
-configuration, pushes a unique side branch, and prints a reusable 10-character
-code plus a `posse://session` invite link. GitHub is the only provisioning
-adapter in v1; other providers are refused instead of exposing the origin
-repository to members. Any number of members can request admission from their
-own clean clone:
+Interactive serve offers the phone QR and manual token (Enter skips pairing),
+then starts the bridge and prints a clone invitation. `posse serve --pair`
+adds another phone and continues serving afterwards. Phones retain account-level
+credentials and the existing account-paired repository access. Adding a phone
+to an existing bridge preserves that repository's identity and credential.
+Phone commands run on the served computer through its normal queue and execution
+path; phone-only use creates no Git branch or temporary repository.
+
+The shared Git session is created only when a clone joins:
 
 ```bash
-posse session join ABCDE-FG234
-# invite links are accepted directly too
+posse serve join ABCDE-FG234
+# Existing spellings and invite links remain supported:
 posse session join 'posse://session?token=ABCDE-FG234'
 ```
+
+The join waits while the serving host checks its checkout and provisions the
+session. The host must then be on its clean, up-to-date default branch with
+no scheduler running. Posse uses the authenticated `gh` CLI to create a private
+throwaway repository, install a host deploy key, and push a unique side branch.
+GitHub remains the only provisioning adapter. Failed preparation is reported to
+both ends; the phone bridge remains available. Fix the reported precondition
+and restart serve for a fresh invitation. `--remote`, `--branch`, `--merge-mode`
+and `--deploy-mode` on serve apply when that Git session is created.
+
+`posse pair` and `posse session host` enter this same serving lifecycle. Session
+management verbs also work under `posse serve`, such as `serve admit AB23 host`
+and `serve status`.
 
 Joining initializes Posse automatically in `~/posse-sessions/<CODE>` regardless
 of the terminal's starting folder. A new session folder gets its own fresh
@@ -1421,9 +1436,9 @@ relay has lost touch with them, `joining` before their first heartbeat,
   it for everyone and asks before the session's work is published; a member
   types `leave`. A shared run also ends when the host closes the session or
   removes this clone, and says which.
-- `posse session host` and `posse session join` go straight to the session
+- `posse session join` goes straight to the session
   screen once the checkout has synced for the first time, when the terminal can
-  show it. `POSSE_SESSION_CONSOLE=1` keeps them in the session console; `go`
+  show it. `POSSE_SESSION_CONSOLE=1` keeps it in the session console; `go`
   there opens the screen. `go` runs in the console's own terminal on every
   platform (the console is suspended meanwhile); `go window` keeps the Windows
   option of a separate PowerShell window.
@@ -1498,7 +1513,7 @@ invalidate cached native authentication on the next five-second session
 heartbeat. If the member monitor is not running, a previously minted envelope
 can remain usable only until its normal pulse TTL expires.
 
-`posse pair` remains a compatibility alias for `posse session`; `posse unpair`
+`posse pair` and `posse session` remain compatibility aliases for `posse serve`; `posse unpair`
 remains an alias for `posse session leave`.
 
 The host and member commands remain connected, like `posse serve`. A live run
@@ -1562,10 +1577,11 @@ human gates remain with the executor, and origin work completes only after the
 shared trunk contains its `Posse-Origin-Work-Item` trailer. Model-call cost rows
 retain both originator and executor instance identifiers.
 
-During the compatibility rollout, `posse serve --pair` still pairs a
-phone/client to the durable Remote bridge through its own ceremony. It does not
-bypass session admission or enroll another Posse clone. The phone's lease is
-the fixed `host` lease described above.
+Phone enrollment and clone enrollment use the `/v1/pairing/*` route family.
+The phone confirmation accepts its four-character code or `admit <CODE> host`.
+It issues the existing account credentials and a fixed host compute lease;
+clone admission retains its SSH key, scope, and host/member lease checks.
+Legacy `/v1/bridge-pair/*` URLs remain compatibility adapters for installed clients.
 
 Manual configuration remains available for existing long-lived administrator-managed
 trunks through explicit `posse admin set` commands. These legacy runtime keys are

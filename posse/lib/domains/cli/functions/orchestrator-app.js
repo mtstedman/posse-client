@@ -1,3 +1,4 @@
+import { REMOTE_ACCESS_COMMANDS, sessionArgumentsForServe } from "../../../catalog/pairing-command.js";
 import { followUpMetadataFromArgs } from "./follow-up-options.js";
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import { commandInitializesProject, isPosseProjectInitialized, uninitializedProjectMessage } from "./project-init-state.js";
@@ -2051,13 +2052,11 @@ async function cmdPairingPreflight() {
 }
 
 async function cmdPair() {
-  const { runPairingCommand } = await loadPairCommandModule();
-  return runPairingCommand(process.argv.slice(3), { projectDir: PROJECT_DIR, C });
+  return cmdServe();
 }
 
 async function cmdSession() {
-  const { runPairingCommand } = await loadPairCommandModule();
-  return runPairingCommand(process.argv.slice(3), { projectDir: PROJECT_DIR, C });
+  return cmdServe();
 }
 
 async function cmdUnpair() {
@@ -2426,8 +2425,8 @@ export async function main() {
   }
   const baseCommandPolicy = getCommandBootstrapPolicy(command);
   let pairSubcommand = "";
-  if (["pair", "session"].includes(command)) {
-    const pairArgs = process.argv.slice(3);
+  if (REMOTE_ACCESS_COMMANDS.includes(command)) {
+    const pairArgs = sessionArgumentsForServe(process.argv.slice(3));
     for (let index = 0; index < pairArgs.length; index += 1) {
       const arg = String(pairArgs[index] || "");
       if (["--remote", "--branch", "--merge-mode", "--deploy-mode"].includes(arg)) {
@@ -2450,9 +2449,9 @@ export async function main() {
       delete process.env.GIT_SSH_COMMAND;
     }
   }
-  const commandPolicy = ["pair", "session"].includes(command)
-      && ["leave", "close", "status", "admit", "members", "pending", "kick", "lease", "invite", "scope", "policy", "hold", "resume", "auto"].includes(pairSubcommand)
-    ? { ...baseCommandPolicy, requiresNativeGit: false }
+  const commandPolicy = REMOTE_ACCESS_COMMANDS.includes(command)
+    ? { ...baseCommandPolicy, requiresNativeGit:
+      !["", "host", "leave", "close", "status", "admit", "members", "pending", "kick", "lease", "invite", "scope", "policy", "hold", "resume", "auto"].includes(pairSubcommand) }
     : baseCommandPolicy;
   const informationalOnly = commandPolicy.readOnly === true || helpFlagRequested();
   // Report and polling commands may write the dated operational log, but they
@@ -2525,7 +2524,7 @@ export async function main() {
     // recovery that failed still reports its cause.
     const sessionReportsPending = recovery.reported === true
       || (recovery.code === "pairing_integration_required"
-        && ["pair", "session"].includes(command)
+        && REMOTE_ACCESS_COMMANDS.includes(command)
         && (["", "host", "join", "integrate", "abandon-integration"].includes(pairSubcommand)
           || /^[a-z0-9]{5}-[a-z0-9]{5}$/u.test(pairSubcommand)
           || pairSubcommand.startsWith("posse://")));
@@ -2533,7 +2532,7 @@ export async function main() {
       if (!sessionReportsPending) {
         console.error(`  ${C.yellow}Pairing recovery remains pending:${C.reset} ${recovery.message}`);
       }
-      if (!commandPolicy.readOnly && !["pair", "session", "unpair"].includes(commandPolicy.name)) {
+      if (!commandPolicy.readOnly && ![...REMOTE_ACCESS_COMMANDS, "unpair"].includes(commandPolicy.name)) {
         throw Object.assign(new Error("Resolve the pending pairing recovery before starting new work"), {
           code: recovery.code || "pairing_recovery_pending",
         });

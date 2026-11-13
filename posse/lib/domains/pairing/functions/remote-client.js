@@ -4,6 +4,8 @@ import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAu
 import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 import { abortable } from "../../../shared/concurrency/functions/abortable.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { SERVED_SESSION_POLL_MS, SERVED_REPOSITORY_WAIT_MS } from "../../../catalog/pairing-wire.js";
 import { TEAM_PUBLICATION_MODES } from "../../../catalog/team.js";
 import { SESSION_COMPUTE_LEASE_PROTOCOL, SESSION_COMPUTE_OWNER_VALUES, SESSION_COMPUTE_POLICY_VALUES, SESSION_SYNC_POLICY, TRUNK_HEAD_PATTERN } from "../../../catalog/session-sync.js";
 
@@ -391,6 +393,8 @@ export function createPairingRemoteClient({
   authManager = heartbeatAuthManager,
   pulseTokens = pulseTokenManager,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  repositoryWaitMs = SERVED_REPOSITORY_WAIT_MS,
+  repositoryPollMs = SERVED_SESSION_POLL_MS,
 } = {}) {
   if (typeof fetchImpl !== "function") throw new TypeError("Pairing client requires fetch");
   const trustedPolicy = authManager.getTrustedAuthPolicy?.();
@@ -461,6 +465,47 @@ export function createPairingRemoteClient({
   };
 
   return Object.freeze({
+    reserve: (instanceId) => validatedRequest("sessions", {
+      path: "serve", body: { instance_id: instanceId },
+    }),
+    heartbeatReservation: async (token, { signal = null } = {}) => {
+      const response = await request("serve/heartbeat", { token, signal });
+      validateExpiry("serve/heartbeat", response);
+      if (typeof response.repository_ready !== "boolean" || typeof response.repository_requested !== "boolean"
+        || (response.repository_error != null && typeof response.repository_error !== "string")) {
+        throw invalidResponse("serve/heartbeat", "repository state is invalid");
+      }
+      return response;
+    },
+    activateReservation: async (reservation, metadata) => {
+      const response = await request("serve/activate", { token: reservation.host_token, body: metadata });
+      if (response.session_id !== reservation.session_id) throw invalidResponse("serve/activate", "session changed");
+      return validatePairingRemoteResponse("sessions", {
+        ...response, code: reservation.code, host_token: reservation.host_token,
+      });
+    },
+    failReservation: (token, message) => request("serve/fail", { token, body: { message } }),
+    cancelReservation: (token) => request("serve/cancel", { token }),
+    resolveForJoin: async (code, { signal = null, onPreparing = () => {} } = {}) => {
+      const deadline = Date.now() + repositoryWaitMs;
+      let requested = false;
+      while (true) {
+        signal?.throwIfAborted();
+        try { return await validatedRequest("resolve", { body: { code }, signal }); }
+        catch (error) {
+          if (error.code !== "pairing_repository_preparing") throw error;
+          if (!requested) {
+            await request("prepare", { body: { code }, signal });
+            requested = true;
+            onPreparing();
+          }
+          if (Date.now() >= deadline) throw Object.assign(new Error("The host did not finish preparing the session; check its serve console and retry this join."), {
+            code: "pairing_repository_timeout",
+          });
+          await delay(Math.min(repositoryPollMs, deadline - Date.now()), undefined, { signal: signal || undefined });
+        }
+      }
+    },
     start: (metadata) => validatedRequest("sessions", {
       body: { ...metadata, shutdown_protocol: 2 },
     }),

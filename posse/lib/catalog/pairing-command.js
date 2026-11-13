@@ -1,5 +1,21 @@
 import { readonlyMap } from "./readonly-collections.js";
-// Canonical `posse pair` / `posse session` action table. The argument parser
+export const REMOTE_ACCESS_COMMANDS = Object.freeze(["serve", "pair", "session"]);
+const SERVE_VALUE_OPTIONS = Object.freeze(["--confirmation-code", "--pair-code"]);
+const SERVE_FLAGS = Object.freeze(["--pair", "--show-token", "--show-lan-token"]);
+
+/** Strip phone/token options before parsing the shared session operation. */
+export function sessionArgumentsForServe(argv = []) {
+  const result = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = String(argv[i]);
+    if (SERVE_FLAGS.includes(arg)) continue;
+    if (SERVE_VALUE_OPTIONS.includes(arg)) { i += 1; continue; }
+    if (SERVE_VALUE_OPTIONS.some((name) => arg.startsWith(`${name}=`))) continue;
+    result.push(arg);
+  }
+  return result;
+}
+// Canonical `posse serve` / `pair` / `session` action table. The argument parser
 // and the addon-free run bootstrap both read it: the bootstrap has to know,
 // before SQLite loads, whether a command opens a session.
 

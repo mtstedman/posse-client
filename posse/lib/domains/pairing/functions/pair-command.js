@@ -1069,7 +1069,7 @@ async function closeClaimedHostSession(root, remoteClient, state, {
 
 // Keep enrollment alive separately from the compact dependency display.
 async function preparePairingEnvironment(root, environment, {
-  json, before, stateId = null, progressIntervalMs = PAIRING_ENVIRONMENT_PROGRESS_INTERVAL_MS,
+  json, before, stateId = null, progressIntervalMs = PAIRING_ENVIRONMENT_PROGRESS_INTERVAL_MS, signal = null,
 }) {
   const progress = new DependencyProgress({ silent: json });
   const untrackedBefore = listUntrackedPairingPaths(root);
@@ -1082,6 +1082,7 @@ async function preparePairingEnvironment(root, environment, {
   progress.start(`checking runtime dependencies before ${before}`);
   try {
     const result = await environment.prepare(root, {
+      signal,
       onRepair: () => progress.update("installing missing dependencies"),
       onProgress: json ? null : (event) => progress.update(event),
     });
@@ -1109,7 +1110,10 @@ async function runHost({
   mergeMode = null,
   deployMode = null,
   environment,
+  signal = null,
+  sessionScreenFirst = true,
 }) {
+  signal?.throwIfAborted();
   const autoMerge = mergeMode === "auto";
   const autoDeploy = deployMode === "auto";
   if (!json) console.log(`  ${C.dim}[pair check] Checking repository and remote branch...${C.reset}`);
@@ -1155,7 +1159,8 @@ async function runHost({
   const { owner: githubOwner } = assertGitHubCliReady(root);
   if (!json) console.log(`  ${C.green}[pair check] GitHub session permissions ready.${C.reset}`);
   // Last, because a repair can take minutes: every cheaper refusal comes first.
-  await preparePairingEnvironment(root, environment, { C, json, before: "opening the session" });
+  await preparePairingEnvironment(root, environment, { C, json, before: "opening the session", signal });
+  signal?.throwIfAborted();
   const state = createPairingState({
     role: "host",
     remoteName: remote,
@@ -1228,6 +1233,15 @@ async function runHost({
         }
       });
     });
+    // A reserved invitation already has its final identity. Journal it before
+    // activation: a lost reply must not delete a repository peers can now join.
+    if (remoteClient.reservation) {
+      updatePairingEnrollment(state.id, {
+        remoteSessionId: remoteClient.reservation.session_id,
+        relayToken: remoteClient.reservation.host_token,
+        baselineOid: publishedOid,
+      });
+    }
     started = validatePairingRemoteResponse("sessions", await remoteClient.start({
       instance_id: ensureBridgeInstanceId(root),
       repository_url: sessionUrl,
@@ -1277,7 +1291,8 @@ async function runHost({
     }
     const outcome = await monitorPairing(remoteClient, state.id, {
       projectDir: root, C, json, sessionCode: started.code,
-      enterSharedRun: enterSessionScreenFirst({ C, json }),
+      enterSharedRun: sessionScreenFirst && enterSessionScreenFirst({ C, json }),
+      signal,
     });
     if (["graceful_close", "force_close", "draining", "closed", "expired"].includes(outcome.reason)) {
       const liveState = getPairingState(state.id);
@@ -1324,7 +1339,7 @@ async function runHost({
     // that exists only in the session repository. Keep the repository, the
     // checkout, and the pairing state; the next posse command's crash recovery
     // freezes an integration candidate from them instead of deleting it.
-    if (started) {
+    if (started || remoteClient.activationAttempted) {
       error.message = `${safeError(error)}\n  The session repository and local pairing state were kept; `
         + "run any posse command here to recover, then `posse session integrate`.";
       throw error;
@@ -1393,7 +1408,11 @@ async function runJoinInCheckout({
     ), { code: "pairing_promotion_already_pending" });
   }
   const original = currentCheckout(root, { allowUnborn: freshCheckout });
-  const resolved = validatePairingRemoteResponse("resolve", await remoteClient.resolve(code));
+  const resolved = validatePairingRemoteResponse("resolve", await (remoteClient.resolveForJoin
+    ? remoteClient.resolveForJoin(code, { onPreparing: () => {
+      if (!json) console.log("  The host is preparing the shared Git session. Waiting for it to be ready...");
+    } })
+    : remoteClient.resolve(code)));
   const metadata = resolved?.repository || {};
   if (repositoryFingerprint(metadata.url) !== String(metadata.fingerprint || "").toLowerCase()) {
     throw Object.assign(new Error("Pairing repository fingerprint does not match its remote URL"), {
@@ -2195,6 +2214,8 @@ export async function runPairingCommand(argv = [], {
   pairingProcessIsAlive = pairingOwnerProcessIsAlive,
   pairingEnvironment = PAIRING_ENVIRONMENT,
   pairingRuntimeCheck = checkPairingRuntimeCommands,
+  signal = null,
+  sessionScreenFirst = true,
 } = {}) {
   const args = parsePairArgs(argv);
   if (["host", "join"].includes(args.action)) {
@@ -2223,6 +2244,7 @@ export async function runPairingCommand(argv = [], {
   }
   if (args.action === "host") return runHost({
     ...args, projectDir, remoteClient: client, C, environment: pairingEnvironment,
+    signal, sessionScreenFirst,
   });
   if (args.action === "join") return runJoin({
     ...args, projectDir, remoteClient: client, C, environment: pairingEnvironment,

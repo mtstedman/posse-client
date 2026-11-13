@@ -128,9 +128,9 @@ if (await runMaintenanceCliIfRequested()) {
 // install dependencies or create runtime state there. Joining owns first-run
 // initialization in the folder selected above.
 const { isPosseProjectInitialized, uninitializedProjectMessage } = await import("./lib/domains/cli/functions/project-init-state.js");
-const { pairingCommandOpensSession } = await import("./lib/catalog/pairing-command.js");
+const { pairingCommandOpensSession, REMOTE_ACCESS_COMMANDS } = await import("./lib/catalog/pairing-command.js");
 const earlyCommand = String(process.argv[2] || "").toLowerCase();
-const opensSession = ["pair", "session"].includes(earlyCommand)
+const opensSession = REMOTE_ACCESS_COMMANDS.includes(earlyCommand)
   && pairingCommandOpensSession(process.argv.slice(3));
 if ((earlyCommand === "run" || (opensSession && !sessionJoinRequest()))
     && !process.argv.includes("--help") && !process.argv.includes("-h")

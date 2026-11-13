@@ -1,3 +1,4 @@
+import { REMOTE_ACCESS_COMMANDS } from "../../../catalog/pairing-command.js";
 import {
   COMMAND_BOOTSTRAP_POLICIES,
   UNKNOWN_COMMAND_BOOTSTRAP_POLICY,
@@ -36,7 +37,7 @@ export function getCommandBootstrapPolicy(command) {
 export function commandResumesInterruptedPairing(command, pairSubcommand = "") {
   const policy = getCommandBootstrapPolicy(command);
   if (policy.readOnly || policy.name === "admin") return false;
-  if (["pair", "session"].includes(policy.name)
+  if (REMOTE_ACCESS_COMMANDS.includes(policy.name)
     && PAIRING_READ_SUBCOMMANDS.includes(String(pairSubcommand || "").toLowerCase())) {
     return false;
   }

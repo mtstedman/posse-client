@@ -77,6 +77,12 @@ export function parseSessionConsoleLine(line, { role = "host" } = {}) {
   const [word, ...rest] = text.split(/\s+/u);
   const command = word.toLowerCase();
   const host = role === "host";
+  if (command === "admit" && rest[0]?.toLowerCase() !== "admit") {
+    const admission = parseSessionConsoleLine(rest.join(" "), { role });
+    return admission.kind === "admit"
+      ? admission
+      : { kind: "invalid", message: "Usage: admit <CODE> [host|member] (host only)" };
+  }
   if (["status", "s"].includes(command)) return { kind: "status" };
   if (["who", "panel"].includes(command) && rest.length === 0) return { kind: "panel" };
   if (["help", "h", "?"].includes(command)) return { kind: "help" };

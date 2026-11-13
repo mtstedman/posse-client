@@ -128,6 +128,7 @@ export class PairingMonitor {
       // Open the session screen (`go`) by itself once the session is ready,
       // so hosting or joining lands there; Ctrl+C then lands in this console.
       enterSharedRun = false,
+      signal = null,
     } = this.options;
     let sharedRunEntered = false;
     let forceRequested = false;
@@ -590,6 +591,8 @@ export class PairingMonitor {
     // owns the terminal must not use up the handler, or the next one would hit
     // Node's default and kill the console without a close.
     process.on("SIGINT", stop);
+    signal?.addEventListener("abort", stop, { once: true });
+    if (signal?.aborted) stop();
     process.once("SIGTERM", stop);
     process.once("SIGHUP", hangup);
     const waitForNextLap = async (ms) => {
@@ -778,6 +781,7 @@ export class PairingMonitor {
       // A detached console leaves the code for the posse go that keeps the session.
       if (role === "host" && !detached) clearSessionInvite();
       process.removeListener("SIGINT", stop);
+      signal?.removeEventListener("abort", stop);
       process.removeListener("SIGTERM", stop);
       process.removeListener("SIGHUP", hangup);
     }

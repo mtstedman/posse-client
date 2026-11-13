@@ -1,7 +1,7 @@
 import { renderDoctorHelp, renderUpdateHelp } from "./maintenance-help.js";
 import { C } from "../../../shared/format/functions/colors.js";
 // Pure data module: keeps this bootstrap free of the SQLite-backed graph.
-import { pairingCommandOpensSession } from "../../../catalog/pairing-command.js";
+import { pairingCommandOpensSession, REMOTE_ACCESS_COMMANDS } from "../../../catalog/pairing-command.js";
 import { isInstallationDoctor, isPosseProjectInitialized } from "./project-init-state.js";
 import { STARTUP_UPDATE_FLAGS } from "../../../catalog/cli-flags.js";
 // doctor/update bootstrap that runs before orchestrator-app opens SQLite.
@@ -264,7 +264,7 @@ export function needsRunnablePosse(argv) {
   if (["run", "go"].includes(argv[0])) return true;
   // Hosting or joining a session runs the same work: if Posse can run, it can
   // pair, and only what stops run/go stops pairing.
-  return ["pair", "session"].includes(argv[0]) && pairingCommandOpensSession(argv.slice(1));
+  return REMOTE_ACCESS_COMMANDS.includes(argv[0]) && pairingCommandOpensSession(argv.slice(1));
 }
 
 // Called while the parent is still addon-free. The repair worker probes the

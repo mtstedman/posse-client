@@ -1,3 +1,4 @@
+import { REMOTE_ACCESS_COMMANDS } from "../../../catalog/pairing-command.js";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,7 +19,7 @@ export const SESSION_JOIN_FOLDERS_DIRECTORY = "posse-sessions";
 // and Finder litter.
 export const EMPTY_JOIN_FOLDER_ENTRIES = Object.freeze(new Set([".posse", ".DS_Store"]));
 
-const SESSION_COMMANDS = new Set(["session", "pair"]);
+const SESSION_COMMANDS = new Set(REMOTE_ACCESS_COMMANDS);
 const VALUE_OPTIONS = new Set(["--remote", "--branch"]);
 const PAIRING_CODE_RE = /^[a-z0-9]{5}-[a-z0-9]{5}$/iu;
 // Signals a terminal delivers to its whole foreground process group. The
