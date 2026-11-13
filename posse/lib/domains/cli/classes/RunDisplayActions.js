@@ -6,6 +6,8 @@ import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import {
   humanGateStateAllowsAnswer,
   humanInputChoicesForPayload,
+  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
+  MERGE_VERIFICATION_REVIEW_TYPE,
   tryHumanGateNameForPayload,
 } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
@@ -662,6 +664,33 @@ export class RunDisplayActions {
     );
   }
 
+  // Manual review can create a gate after the scheduler has stopped. Present
+  // it here and await its transition before the merge queue/closeout settles.
+  async resolveReviewMergeGate(jobs = []) {
+    const gates = jobs.filter((job) => job.job_type === "human_input" && job.status === "waiting_on_human"
+      && [MERGE_FAILURE_RECOVERY_REVIEW_TYPE, MERGE_VERIFICATION_REVIEW_TYPE]
+        .includes(parseJobPayload(job).review_type));
+    if (!gates.length || !this.display?.askQuestions) return;
+    const display = this.display;
+    const mode = display._mode;
+    const rightMode = display._rightMode;
+    // Preserve the approval data and resolver: resetting approval here would
+    // strand enterApprovalMode(), while leaving it active hides question keys.
+    display._mode = "normal";
+    display._rightMode = "log";
+    try {
+      this.surfaceActionableHumanGates(gates, { authoritative: false, explicit: true });
+      await Promise.resolve(); // let askQuestions enqueue before selecting it
+      display._startAnsweringForJob?.(gates[0].id);
+      display.requestRender?.({ force: true });
+      await Promise.all(gates.map((gate) => this.humanGatePrompts.get(gate.id)));
+    } finally {
+      if (!display._aborted) display._mode = mode;
+      display._rightMode = rightMode;
+      display.requestRender?.({ force: true });
+    }
+  }
+
   inject(description) {
     const title = description.split("\n")[0].slice(0, 100);
     const mode = this.inferWiMode(description) || "build";
@@ -819,7 +848,9 @@ export class RunDisplayActions {
       this.display.addEvent(`${this.C.dim}Review is already open/running${this.C.reset}`);
       return;
     }
-    this.liveReviewPromise = this.runLiveReview(this.display)
+    this.liveReviewPromise = this.runLiveReview(this.display, {
+      resolveMergeGate: (jobs) => this.resolveReviewMergeGate(jobs),
+    })
       .catch((err) => {
         if (typeof this.display._resetApprovalState === "function") {
           this.display._resetApprovalState();

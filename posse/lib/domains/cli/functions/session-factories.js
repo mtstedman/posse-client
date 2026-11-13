@@ -82,6 +82,7 @@ import {
   checkRemotePromptCompilerReadiness,
 } from "../../remote/functions/readiness.js";
 import { drainPostMergeAtlasWarmJobs } from "./post-merge-closeout.js";
+import { RunDisplayActions } from "../classes/RunDisplayActions.js";
 
 export function prepareNonInteractiveHumanInputGates({ workItemIds = [], autoApprove = false, autoApprovePlan = false } = {}) {
   const scopedIds = new Set(
@@ -190,6 +191,12 @@ export async function createReviewSessionDeps(bootDeps) {
     getTargetBranch,
     appendReviewRejectionDescription,
     markWorkItemMergeFailed,
+    createReviewMergeGateResolver: (display) => {
+      const actions = new RunDisplayActions({
+        display, projectDir, C, getJob, getWorkItem, refreshWorkItemStatus, logEvent,
+      });
+      return (jobs) => actions.resolveReviewMergeGate(jobs);
+    },
     reviewRejectionReadiness,
     setMergeState,
     cleanupWiBranch: helpers.cleanupWiBranch,
@@ -375,7 +382,7 @@ export async function createRunSessionDeps(bootDeps) {
     cleanupWiBranch: helpers.cleanupWiBranch,
     cleanupWiBranchAsync: helpers.cleanupWiBranchAsync,
     skipJob,
-    runLiveReview: (display) => reviewSession.runLiveReview(display),
+    runLiveReview: (display, options) => reviewSession.runLiveReview(display, options),
     listJobsByWorkItem,
     getArtifacts,
     getToolInvocationCountsByJob,
@@ -389,7 +396,7 @@ export async function createRunSessionDeps(bootDeps) {
     hasAutoMergeableCompletedWorkItems: helpers.hasAutoMergeableCompletedWorkItems,
     autoMergePendingReviewBlockers: getAutoMergeConfig().enabled,
     describePendingReviewLockBlockers: () => reviewSession.describePendingReviewLockBlockers(),
-    wrapUpTui: (display) => reviewSession.wrapUpTui(display),
+    wrapUpTui: (display, options) => reviewSession.wrapUpTui(display, options),
     wrapUp: () => reviewSession.wrapUp(),
     setRunWorkItemIds: (ids) => reviewSession.setRunWorkItemIds(ids),
     beginRunCohort,

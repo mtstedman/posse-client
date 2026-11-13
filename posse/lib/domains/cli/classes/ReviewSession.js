@@ -590,8 +590,9 @@ export class ReviewSession {
     return reportData;
   }
 
-  installApprovalActions(display, reportData) {
+  installApprovalActions(display, reportData, { resolveMergeGate = null } = {}) {
     const { C, updateWorkItemStatus, logEvent, gitMergeToTarget, PROJECT_DIR, cleanupWiBranch, requeueWorkItemAfterRejection, getWorkItem, gitMergeToTargetAsync, cleanupWiBranchAsync, commitInScopeChangesAsyncFn, discardWorktreeFilesAsyncFn, stashTargetBranchChangesAsyncFn } = this;
+    resolveMergeGate ||= this.createReviewMergeGateResolver?.(display);
 
   const currentTargetBranch = () => this.targetBranch();
   let mergeQueue = Promise.resolve();
@@ -617,11 +618,11 @@ export class ReviewSession {
     display.setBlockingOverlay(title, wiLabel ? `${wiLabel} - please wait` : "Please wait", meta);
   }
 
-  function enqueueGitWork(item, run, {
+  const enqueueGitWork = (item, run, {
     overlay = "Merging....",
     overlayLayoutTitle = overlay,
     advanceAfter = true,
-  } = {}) {
+  } = {}) => {
     item._mergeInFlight = true;
     item._mergePhase = overlay;
     item._mergeOverlayLayoutTitle = overlayLayoutTitle;
@@ -648,8 +649,24 @@ export class ReviewSession {
         };
         Promise.resolve()
           .then(() => run({ phase }))
-          .then((result) => {
+          .then(async (result) => {
             if (result?.keepFocused) shouldAdvance = false;
+            if (result?.recoverMerge && resolveMergeGate) {
+              setApprovalOverlay(null);
+              await resolveMergeGate(this.listJobsByWorkItem?.(item.wi.id) || []);
+              item.wi = getWorkItem(item.wi.id) || item.wi;
+              item.jobs = this.listJobsByWorkItem?.(item.wi.id) || item.jobs;
+              await this._refreshWorktreeStatus(item);
+              if (item.wi.merge_state === "merged") {
+                item._decision = "approved";
+                item._mergeResult = `${C.green}\u2713 Merged after recovery${C.reset}`;
+                shouldAdvance = advanceAfter;
+              } else if (!item.wi.merge_state && ["queued", "planning", "planned", "running"].includes(item.wi.status)) {
+                item._decision = "rejected";
+                item._mergeResult = `${C.yellow}\u21bb returned for fixes${C.reset}`;
+                shouldAdvance = advanceAfter;
+              }
+            }
           })
           .catch((err) => {
             shouldAdvance = false;
@@ -669,7 +686,7 @@ export class ReviewSession {
           });
       }, RENDER_FLUSH_DELAY_MS);
     }));
-  }
+  };
 
   function refreshApprovalItem(item, action) {
     const fresh = getWorkItem(item.wi.id);
@@ -843,7 +860,7 @@ export class ReviewSession {
         } else if (result.reviewHold) {
           item._decision = undefined;
           item._mergeResult = `${C.yellow}! ${result.message}. ${this._reviewHoldText(result.reviewHold)}${C.reset}`;
-          return { keepFocused: true };
+          return { keepFocused: true, recoverMerge: true };
         } else if (result.deferred) {
           item._decision = undefined;
           item._mergeResult = `${C.yellow}! ${result.message}${C.reset}`;
@@ -851,7 +868,7 @@ export class ReviewSession {
         } else {
           item._decision = undefined;
           item._mergeResult = `${C.red}\u2717 ${result.message}${C.reset}`;
-          return { keepFocused: true };
+          return { keepFocused: true, recoverMerge: true };
         }
       }, { overlay: "Merging....", overlayLayoutTitle: "Retrying Merge....", advanceAfter: true });
       return { deferAdvance: true };
@@ -1363,7 +1380,7 @@ export class ReviewSession {
     }
   }
 
-  async runLiveReview(display) {
+  async runLiveReview(display, options = {}) {
     const { autoMergeCompletedWorkItems, C } = this;
 
   const reviewStart = createTuiWrapUpTracker(display, {
@@ -1422,7 +1439,7 @@ export class ReviewSession {
   } finally {
     reviewStart.clear();
   }
-  this.installApprovalActions(display, reportData);
+  this.installApprovalActions(display, reportData, options);
 
   for (const item of reportData) {
     const hadWriteJob = item.jobs.some(jobIsWriteStep);
@@ -1744,7 +1761,7 @@ export class ReviewSession {
 
   }
 
-  async wrapUpTui(display) {
+  async wrapUpTui(display, options = {}) {
     const { autoMergeCompletedWorkItems, C, offerPush, ensureCleanTargetBranch, cleanupRunningAgentCalls, notifyDirtyState, processIterativeWrapUp, mergeIterativePassToTarget } = this;
 
   const wrapUp = createRunWrapUpTracker(display);
@@ -1833,7 +1850,7 @@ export class ReviewSession {
     doneDetail: (items) => `${items.length} report${items.length === 1 ? "" : "s"}`,
   });
   wrapUp.clear();
-  this.installApprovalActions(display, reportData);
+  this.installApprovalActions(display, reportData, options);
 
   // Classify: defensive fallback for legacy report data that may still include
   // non-writing items. Normal approval queues should already exclude them.

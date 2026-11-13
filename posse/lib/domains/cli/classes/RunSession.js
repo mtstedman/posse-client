@@ -3082,7 +3082,9 @@ export class RunSession {
       emitCloseoutStatus("Run wrap-up: starting closeout.", C.cyan);
       if (typeof display.setRunPhase === "function") display.setRunPhase("Run wrap-up");
       await flushCloseoutStatus();
-      nextAction = await wrapUpTui(display);
+      nextAction = await wrapUpTui(display, {
+        resolveMergeGate: (jobs) => displayActions.resolveReviewMergeGate(jobs),
+      });
     } else {
       emitCloseoutStatus("Run wrap-up: starting closeout.", C.cyan);
       nextAction = await wrapUp();
