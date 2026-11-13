@@ -1354,6 +1354,12 @@ and `--deploy-mode` on serve apply when that Git session is created.
 management verbs also work under `posse serve`, such as `serve admit AB23 host`
 and `serve status`.
 
+`posse serve --json` (including its aliases) emits JSON lines on stdout for
+`serving`, `invitation`, and `stopped` events. The invitation includes the clone
+code and `repository_pending: true`; Git activation retains the existing host
+session JSON response. Human diagnostics go to stderr. JSON hosting skips the
+automatic phone prompt; explicit `--pair` sends its QR and prompt to stderr.
+
 Joining initializes Posse automatically in `~/posse-sessions/<CODE>` regardless
 of the terminal's starting folder. A new session folder gets its own fresh
 checkout and takes the session repository's history after admission. Retrying

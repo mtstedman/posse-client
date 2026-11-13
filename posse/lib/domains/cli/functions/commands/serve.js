@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { sessionArgumentsForServe } from "../../../../catalog/pairing-command.js";
+import { SERVED_EVENTS } from "../../../../catalog/pairing-wire.js";
 import { scrubSecrets } from "../../../../shared/telemetry/classes/logging/secret-scrub.js";
 import { Bridge } from "../../../bridge/classes/Bridge.js";
 import { getBridgeConfig } from "../../../bridge/functions/auth.js";
@@ -253,13 +254,18 @@ export async function runServeCommand(argv = [], {
   // All session operations share the serve entry; pair/session remain aliases.
   const sessionArgs = sessionArgumentsForServe(argv);
   const { parsePairArgs, runPairingCommand } = await import("../../../pairing/functions/pair-command.js");
-  if (parsePairArgs(sessionArgs).action !== "host") {
+  const parsed = parsePairArgs(sessionArgs);
+  if (parsed.action !== "host") {
     return runPairingCommand(sessionArgs, { projectDir, C });
   }
+  const json = parsed.json;
+  const log = (...args) => (json ? console.error : console.log)(...args);
+  const emit = (event) => { if (json) console.log(JSON.stringify(event)); };
   let config = getBridgeConfig(projectDir);
 
   if (hasFlag(argv, "--show-token")) {
-    console.log(config.token);
+    if (json) emit({ ok: true, token: config.token });
+    else log(config.token);
     return { ok: true, token: config.token };
   }
 
@@ -267,36 +273,45 @@ export async function runServeCommand(argv = [], {
   // bridge bearer), surfaced under a more descriptive name. Phones that
   // pair over the LAN need this token, separately from the relay bearer.
   if (hasFlag(argv, "--show-lan-token")) {
-    console.log(`\n  ${C.bold}Posse LAN bridge token${C.reset}`);
-    console.log(`  ${C.dim}Use this on the phone when adding a LAN bridge:${C.reset}`);
-    console.log(`  ${C.cyan}${config.token}${C.reset}`);
-    console.log(
+    log(`\n  ${C.bold}Posse LAN bridge token${C.reset}`);
+    log(`  ${C.dim}Use this on the phone when adding a LAN bridge:${C.reset}`);
+    log(`  ${C.cyan}${config.token}${C.reset}`);
+    log(
       `\n  ${C.dim}Bridge bind:${C.reset} ${C.cyan}http://${config.bindHost}:${config.port || "(auto 7531+)"}${C.reset}`,
     );
-    console.log(`  ${C.dim}Instance:${C.reset} ${config.instanceId}`);
-    console.log(`  ${C.dim}Label:${C.reset} ${config.label}\n`);
+    log(`  ${C.dim}Instance:${C.reset} ${config.instanceId}`);
+    log(`  ${C.dim}Label:${C.reset} ${config.label}\n`);
+    emit({ ok: true, token: config.token, instance_id: config.instanceId });
     return { ok: true, token: config.token, instanceId: config.instanceId };
   }
 
   // Linking a phone is what serve is for: an unpaired repo shows the pairing
   // QR right here instead of sending the operator to another command.
   const linkPhone = async (why, reuseIdentity = true) => {
-    console.log(`\n  ${C.yellow}${why}${C.reset} Scan the QR below to link your phone; press Enter at the code prompt to skip phone pairing and continue serving.`);
+    log(`\n  ${C.yellow}${why}${C.reset} Scan the QR below to link your phone; press Enter at the code prompt to skip phone pairing and continue serving.`);
     let paired = null;
     try {
-      paired = await pair(reuseIdentity ? config : { ...config, relayToken: null }, { C, argv, projectDir });
+      paired = await pair(reuseIdentity ? config : { ...config, relayToken: null }, { C, argv, projectDir, json });
+      if (reuseIdentity && config.relayToken && paired?.reason === "pair_start_failed"
+        && paired.status === 401 && paired.body?.error?.code === "bridge_credential_invalid") {
+        // An invalid saved bridge must not prevent --pair from reaching its
+        // repair flow. The fresh ceremony still requires account authentication.
+        log(`  ${C.yellow}The saved bridge credential was rejected; starting fresh phone pairing.${C.reset}`);
+        paired = await pair({ ...config, relayToken: null }, { C, argv, projectDir, json });
+      }
     } catch (err) {
       // Pairing is optional for serve: LAN clients still need the bridge.
-      console.log(`\n  ${C.red}Pairing failed:${C.reset} ${err?.message || err}\n`);
+      log(`\n  ${C.red}Pairing failed:${C.reset} ${err?.message || err}\n`);
     }
     if (paired?.ok) config = getBridgeConfig(projectDir);
     return paired;
   };
-  if (hasFlag(argv, "--pair") || interactive) {
+  if (hasFlag(argv, "--pair") || (interactive && !json)) {
     const paired = await linkPhone(config.relayToken ? "Add a phone to this repo." : "This repo is not linked to the relay yet.");
-    if (paired?.reason === "canceled") return paired;
+    if (paired?.reason === "canceled") { emit({ ok: false, reason: "canceled" }); return paired; }
     if (hasFlag(argv, "--pair") && !paired?.ok) {
       process.exitCode = 1;
+      emit({ ok: false, reason: paired?.reason || "pair_failed" });
       return paired || { ok: false, reason: "pair_failed" };
     }
   }
@@ -304,15 +319,16 @@ export async function runServeCommand(argv = [], {
   const startBridge = async () => {
     const started = new BridgeClass({ projectDir, config });
     const startedInfo = await started.start();
-    console.log(`\n  ${C.green}Posse bridge listening${C.reset}: ${C.cyan}${startedInfo.url}${C.reset}`);
-    console.log(`  ${C.dim}Instance:${C.reset} ${startedInfo.instanceId}`);
-    console.log(`  ${C.dim}Label:${C.reset} ${startedInfo.label}`);
-    console.log(`  ${C.dim}Bearer token:${C.reset} hidden (use --show-token or --show-lan-token)`);
-    console.log(`  ${C.dim}WebSocket:${C.reset} ${startedInfo.url}/v1/stream`);
-    if (startedInfo.relayEnabled) console.log(`  ${C.dim}Relay:${C.reset} ${startedInfo.relayUrl}`);
-    console.log(`  ${C.dim}Compute:${C.reset} ${servedComputeLine()}`);
-    console.log(`  ${C.dim}Commands:${C.reset} ${listAllowedBridgeCommands().join(", ")}`);
-    console.log(`  ${C.dim}Press Ctrl-C to stop.${C.reset}\n`);
+    log(`\n  ${C.green}Posse bridge listening${C.reset}: ${C.cyan}${startedInfo.url}${C.reset}`);
+    log(`  ${C.dim}Instance:${C.reset} ${startedInfo.instanceId}`);
+    log(`  ${C.dim}Label:${C.reset} ${startedInfo.label}`);
+    log(`  ${C.dim}Bearer token:${C.reset} hidden (use --show-token or --show-lan-token)`);
+    log(`  ${C.dim}WebSocket:${C.reset} ${startedInfo.url}/v1/stream`);
+    if (startedInfo.relayEnabled) log(`  ${C.dim}Relay:${C.reset} ${startedInfo.relayUrl}`);
+    log(`  ${C.dim}Compute:${C.reset} ${servedComputeLine()}`);
+    log(`  ${C.dim}Commands:${C.reset} ${listAllowedBridgeCommands().join(", ")}`);
+    log(`  ${C.dim}Press Ctrl-C to stop.${C.reset}\n`);
+    emit({ ok: true, event: SERVED_EVENTS.STARTED, url: startedInfo.url, instance_id: startedInfo.instanceId });
     return { bridge: started, info: startedInfo };
   };
   let { bridge, info } = await startBridge();
@@ -320,15 +336,15 @@ export async function runServeCommand(argv = [], {
   // Remote reachability is the whole point of serve — never go quiet while
   // the relay link is missing or rejected.
   if (!info.relayEnabled) {
-    console.log(`  ${C.yellow}NOT PAIRED with the relay.${C.reset} Phones and the web portal cannot see this repo.`);
-    console.log(interactive
+    log(`  ${C.yellow}NOT PAIRED with the relay.${C.reset} Phones and the web portal cannot see this repo.`);
+    log(interactive
       ? `  ${C.dim}Start \`posse serve\` again to scan a fresh QR. LAN-only clients still work.${C.reset}\n`
       : `  ${C.dim}Run \`posse serve --pair\` at a terminal to pair it and keep serving. LAN-only clients still work.${C.reset}\n`);
   } else if (wait) {
     let relay = await waitForRelayOutcome(bridge);
     // A revoked or stale pairing needs a fresh QR, not another command. The
     // bridge keeps serving LAN clients until the new identity replaces it.
-    if (relay.state === "unauthorized" && interactive) {
+    if (relay.state === "unauthorized" && interactive && !json) {
       const paired = await linkPhone(`Relay REJECTED this bridge credential${relay.last_error ? ` (${relay.last_error})` : ""}.`, false);
       if (paired?.reason === "canceled") {
         await bridge.stop();
@@ -341,12 +357,12 @@ export async function runServeCommand(argv = [], {
       }
     }
     if (relay.state === "online") {
-      console.log(`  ${C.green}Relay connected${C.reset} — this repo is ONLINE for phones and the web portal.\n`);
+      log(`  ${C.green}Relay connected${C.reset} — this repo is ONLINE for phones and the web portal.\n`);
     } else if (relay.state === "unauthorized") {
-      console.log(`  ${C.red}Relay REJECTED this bridge credential${relay.last_error ? ` (${relay.last_error})` : ""}.${C.reset}`);
-      console.log(`  ${C.dim}The pairing is stale or revoked — run \`posse serve --pair\` to re-pair.${C.reset}\n`);
+      log(`  ${C.red}Relay REJECTED this bridge credential${relay.last_error ? ` (${relay.last_error})` : ""}.${C.reset}`);
+      log(`  ${C.dim}The pairing is stale or revoked — run \`posse serve --pair\` to re-pair.${C.reset}\n`);
     } else if (relay.state !== "stopped") {
-      console.log(`  ${C.yellow}Relay not connected yet${C.reset} (${relay.state}${relay.last_error ? ` — ${relay.last_error}` : ""}). Retrying in the background; phones see this repo as offline until it connects.\n`);
+      log(`  ${C.yellow}Relay not connected yet${C.reset} (${relay.state}${relay.last_error ? ` — ${relay.last_error}` : ""}). Retrying in the background; phones see this repo as offline until it connects.\n`);
     }
   }
 
@@ -365,29 +381,32 @@ export async function runServeCommand(argv = [], {
     const active = fs.existsSync(getRuntimeDbPath()) ? getLivePairingState() : null;
     if (sessionFactory && !active && !stopping) {
       session = sessionFactory({
-        remoteClient: remoteClientFactory(), instanceId: config.instanceId,
+        remoteClient: remoteClientFactory(), instanceId: config.instanceId, log,
         host: async (remoteClient, signal) => {
           const { prepareServedHost } = await import("../../../pairing/functions/served-host-preflight.js");
           await prepareServedHost({ signal });
           return runPairingCommand(sessionArgs, { projectDir, C, remoteClient, signal, sessionScreenFirst: false });
         },
       });
-      await session.start();
+      const invitation = await session.start();
+      emit({ ok: true, event: SERVED_EVENTS.INVITATION, role: "host", code: invitation.code,
+        session_id: invitation.session_id, repository_pending: true });
       sessionEnded = session.done.then(() => "session closed", (error) => {
-        console.log(`  ${C.yellow}Clone session unavailable:${C.reset} ${scrubSecrets(error?.message || String(error))}`);
+        log(`  ${C.yellow}Clone session unavailable:${C.reset} ${scrubSecrets(error?.message || String(error))}`);
         // Phone access remains available after a preparation or relay failure.
         return new Promise(() => {});
       });
     }
   } catch (error) {
-    console.log(`  ${C.yellow}Clone invitations unavailable:${C.reset} ${scrubSecrets(error?.message || String(error))}. Phone and LAN access remain available.`);
+    log(`  ${C.yellow}Clone invitations unavailable:${C.reset} ${scrubSecrets(error?.message || String(error))}. Phone and LAN access remain available.`);
   }
   const signal = await (sessionEnded ? Promise.race([shutdown, sessionEnded]) : shutdown);
   shutdownAbort.abort();
   try { await session?.stop(); }
-  catch (error) { console.log(`  Invitation cleanup: ${scrubSecrets(error?.message || String(error))}`); }
+  catch (error) { log(`  Invitation cleanup: ${scrubSecrets(error?.message || String(error))}`); }
   releaseCrashGuard();
   await bridge.stop();
-  console.log(`\n  ${C.yellow}Posse bridge stopped${signal ? ` (${signal})` : ""}.${C.reset}\n`);
+  log(`\n  ${C.yellow}Posse bridge stopped${signal ? ` (${signal})` : ""}.${C.reset}\n`);
+  emit({ ok: true, event: SERVED_EVENTS.STOPPED, signal });
   return { ok: true, signal };
 }

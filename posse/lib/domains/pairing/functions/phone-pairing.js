@@ -26,11 +26,11 @@ function bridgePairUrl(relayHttpBase, endpoint) {
 
 function promptForConfirmationCode(
   prompt = "  Enter the 4-character code shown on your phone: ",
-  { signal, onCancel } = {},
+  { signal, onCancel, output = process.stdout } = {},
 ) {
   const rl = readline.createInterface({
     input: process.stdin,
-    output: process.stdout,
+    output,
   });
   return new Promise((resolve) => {
     let settled = false;
@@ -126,6 +126,7 @@ export async function runPairCommand(
   {
     C = new Proxy({}, { get: () => "" }),
     argv = [],
+    json = false,
     promptCode = promptForConfirmationCode,
     retryDelayMs = 2_000,
     confirmRetryLimit = 3,
@@ -139,6 +140,7 @@ export async function runPairCommand(
     requestTimeoutMs = 15_000,
   } = {},
 ) {
+  const log = (...args) => (json ? console.error : console.log)(...args);
   const resolvedPosseKey = posseKey === undefined ? resolvePosseKey() : String(posseKey || "").trim();
   const scopedAuthManager = authManager || (
     posseKey === undefined ? heartbeatAuthManager : new HeartbeatAuthManager({ posseKey: resolvedPosseKey })
@@ -151,16 +153,16 @@ export async function runPairCommand(
   const trustedPolicy = scopedAuthManager.getTrustedAuthPolicy?.();
   const pairHttpBase = trustedPolicy?.origin ? new URL("/", trustedPolicy.origin) : null;
 
-  console.log(`\n  ${C.bold}Pair this Posse instance${C.reset}`);
+  log(`\n  ${C.bold}Pair this Posse instance${C.reset}`);
 
   // Pairing requires a valid API key (bridge:pair grant) — the relay
   // refuses to mint or confirm QR tokens for keyless installs.
   if (!resolvedPosseKey) {
-    console.log(`\n  ${C.red}POSSE_KEY is required to pair.${C.reset} Set the POSSE_KEY environment variable to your API key and run \`posse serve --pair\` again.\n`);
+    log(`\n  ${C.red}POSSE_KEY is required to pair.${C.reset} Set the POSSE_KEY environment variable to your API key and run \`posse serve --pair\` again.\n`);
     return { ok: false, reason: "missing_posse_key" };
   }
   if (!pairHttpBase) {
-    console.log(`\n  ${C.red}Pairing authentication is unavailable.${C.reset} Trusted remote API policy could not be resolved.\n`);
+    log(`\n  ${C.red}Pairing authentication is unavailable.${C.reset} Trusted remote API policy could not be resolved.\n`);
     return { ok: false, reason: "pair_auth_unavailable" };
   }
 
@@ -197,9 +199,9 @@ export async function runPairCommand(
       });
       if (cancelRes.ok || cancelBody?.error?.code === "already_consumed") return;
       const message = cancelBody?.error?.message || cancelBody?.message || `HTTP ${cancelRes.status}`;
-      console.log(`  ${C.yellow}Pair cleanup did not complete:${C.reset} ${message}. The QR will expire automatically.\n`);
+      log(`  ${C.yellow}Pair cleanup did not complete:${C.reset} ${message}. The QR will expire automatically.\n`);
     } catch (err) {
-      console.log(`  ${C.yellow}Pair cleanup did not complete:${C.reset} ${err?.message || err}. The QR will expire automatically.\n`);
+      log(`  ${C.yellow}Pair cleanup did not complete:${C.reset} ${err?.message || err}. The QR will expire automatically.\n`);
     }
   };
 
@@ -217,17 +219,17 @@ export async function runPairCommand(
       }));
     } catch (err) {
       if (cancelRequested) throw err;
-      console.log(`\n  ${C.red}Network error contacting relay:${C.reset} ${err?.message || err}\n`);
+      log(`\n  ${C.red}Network error contacting relay:${C.reset} ${err?.message || err}\n`);
       return { ok: false, reason: "network_error" };
     }
     if (!startRes.ok) {
       const message = startBody?.error?.message || startBody?.message || `HTTP ${startRes.status}`;
-      console.log(`\n  ${C.red}Relay rejected pair-start:${C.reset} ${message}\n`);
+      log(`\n  ${C.red}Relay rejected pair-start:${C.reset} ${message}\n`);
       return { ok: false, reason: "pair_start_failed", status: startRes.status, body: startBody };
     }
     qrToken = startBody?.qr_token;
     if (!qrToken) {
-      console.log(`\n  ${C.red}Relay returned no qr_token.${C.reset}\n`);
+      log(`\n  ${C.red}Relay returned no qr_token.${C.reset}\n`);
       return { ok: false, reason: "missing_qr_token", body: startBody };
     }
     expiresAt = qrExpiresAtMs(startBody?.expires_at);
@@ -236,18 +238,18 @@ export async function runPairCommand(
     // Step 2: render the QR for the phone to scan.
     const payloadUrl = `posse://pair?token=${encodeURIComponent(qrToken)}`;
     const qrArt = await abortable(renderTerminalQr(payloadUrl), ceremonyAbort.signal);
-    console.log("");
-    console.log(qrArt);
-    console.log(`  ${C.dim}1.${C.reset} On the Posse phone app, tap "Pair an instance" → "Scan QR".`);
-    console.log(`  ${C.dim}2.${C.reset} Scan the QR above with your phone's camera.`);
-    console.log(`  ${C.dim}3.${C.reset} The phone will display a 4-character confirmation code.`);
-    console.log(`  ${C.dim}4.${C.reset} Type that code below (or admit <CODE> host) to finish pairing.\n`);
+    log("");
+    log(qrArt);
+    log(`  ${C.dim}1.${C.reset} On the Posse phone app, tap "Pair an instance" → "Scan QR".`);
+    log(`  ${C.dim}2.${C.reset} Scan the QR above with your phone's camera.`);
+    log(`  ${C.dim}3.${C.reset} The phone will display a 4-character confirmation code.`);
+    log(`  ${C.dim}4.${C.reset} Type that code below (or admit <CODE> host) to finish pairing.\n`);
     // The phone's "Enter token manually" takes the bare token or the
     // posse://pair URL; a camera that cannot read the terminal needs it in text.
-    console.log(`  ${C.dim}Can't scan?${C.reset} On the phone tap "Enter token manually" and type this token:`);
-    console.log(`  ${C.bold}${qrToken}${C.reset}\n`);
+    log(`  ${C.dim}Can't scan?${C.reset} On the phone tap "Enter token manually" and type this token:`);
+    log(`  ${C.bold}${qrToken}${C.reset}\n`);
     if (startBody?.expires_at) {
-      console.log(`  ${C.dim}QR expires at:${C.reset} ${startBody.expires_at}\n`);
+      log(`  ${C.dim}QR expires at:${C.reset} ${startBody.expires_at}\n`);
     }
 
     // Step 3: prompt for the confirmation code (or take it from a flag for scripting).
@@ -266,16 +268,16 @@ export async function runPairCommand(
         expiryTimer = setTimeout(() => ceremonyAbort.abort(), Math.max(0, expiresAt - Date.now()));
         confirmationCode = normalizeConfirmationCode(await abortable(promptCode(
           "  Enter the 4-character code shown on your phone: ",
-          { signal: ceremonyAbort.signal, onCancel: cancelFromSignal },
+          { signal: ceremonyAbort.signal, onCancel: cancelFromSignal, output: json ? process.stderr : process.stdout },
         ), ceremonyAbort.signal));
         ceremonyAbort.signal.throwIfAborted();
       }
       if (!confirmationCode) {
-        console.log(`\n  ${C.red}Pairing cancelled (no confirmation code).${C.reset}\n`);
+        log(`\n  ${C.red}Pairing cancelled (no confirmation code).${C.reset}\n`);
         return { ok: false, reason: cancelRequested ? "canceled" : "no_confirmation_code" };
       }
       if (!isValidConfirmationCode(confirmationCode)) {
-        console.log(`\n  ${C.red}Invalid confirmation code.${C.reset} Use 4 characters A-Z or 2-9, without 0/O/1/I/L.\n`);
+        log(`\n  ${C.red}Invalid confirmation code.${C.reset} Use 4 characters A-Z or 2-9, without 0/O/1/I/L.\n`);
         if (scripted) return { ok: false, reason: "invalid_confirmation_code" };
         confirmationCode = "";
         continue;
@@ -299,12 +301,12 @@ export async function runPairCommand(
         if (cancelRequested || ceremonyAbort.signal.aborted) throw err;
         transientConfirmFailures += 1;
         if (transientConfirmFailures < Math.max(1, Number(confirmRetryLimit) || 1)) {
-          console.log(`\n  ${C.yellow}Relay confirmation response was interrupted; retrying the same pair safely.${C.reset}\n`);
+          log(`\n  ${C.yellow}Relay confirmation response was interrupted; retrying the same pair safely.${C.reset}\n`);
           const remainingMs = expiresAt - Date.now();
           if (remainingMs > 0) await delay(Math.min(retryDelayMs, remainingMs), undefined, { signal: ceremonyAbort.signal });
           continue;
         }
-        console.log(`\n  ${C.red}Network error contacting relay:${C.reset} ${err?.message || err}\n`);
+        log(`\n  ${C.red}Network error contacting relay:${C.reset} ${err?.message || err}\n`);
         return { ok: false, reason: "network_error" };
       }
 
@@ -315,7 +317,7 @@ export async function runPairCommand(
       if (confirmRes.status >= 500) {
         transientConfirmFailures += 1;
         if (transientConfirmFailures < Math.max(1, Number(confirmRetryLimit) || 1)) {
-          console.log(`\n  ${C.yellow}Relay confirmation failed transiently; retrying the same pair safely.${C.reset}\n`);
+          log(`\n  ${C.yellow}Relay confirmation failed transiently; retrying the same pair safely.${C.reset}\n`);
           const remainingMs = expiresAt - Date.now();
           if (remainingMs > 0) await delay(Math.min(retryDelayMs, remainingMs), undefined, { signal: ceremonyAbort.signal });
           continue;
@@ -327,36 +329,36 @@ export async function runPairCommand(
       const message = body?.error?.message || body?.message || `HTTP ${confirmRes.status}`;
       const friendly = PAIR_CONFIRM_FRIENDLY[code] || message;
       if (code === "confirmation_pending") {
-        console.log(`\n  ${C.yellow}Pair not confirmed yet:${C.reset} ${friendly}\n`);
+        log(`\n  ${C.yellow}Pair not confirmed yet:${C.reset} ${friendly}\n`);
         if (scripted) return { ok: false, reason: code, status: confirmRes.status, body };
         const remainingMs = expiresAt - Date.now();
         if (remainingMs > 0) await delay(Math.min(retryDelayMs, remainingMs), undefined, { signal: ceremonyAbort.signal });
         continue;
       }
       if (code === "confirmation_mismatch") {
-        console.log(`\n  ${C.yellow}Pair not confirmed yet:${C.reset} ${friendly}\n`);
+        log(`\n  ${C.yellow}Pair not confirmed yet:${C.reset} ${friendly}\n`);
         if (scripted) return { ok: false, reason: code, status: confirmRes.status, body };
         confirmationCode = "";
         continue;
       }
-      console.log(`\n  ${C.red}Pair failed:${C.reset} ${friendly}\n`);
+      log(`\n  ${C.red}Pair failed:${C.reset} ${friendly}\n`);
       return { ok: false, reason: code || "pair_failed", status: confirmRes.status, body };
     }
 
     if (!confirmed) {
-      console.log(`\n  ${C.red}QR expired before pairing completed.${C.reset} Run \`posse serve --pair\` again.\n`);
+      log(`\n  ${C.red}QR expired before pairing completed.${C.reset} Run \`posse serve --pair\` again.\n`);
       return { ok: false, reason: "qr_token_expired" };
     }
 
     const token = typeof body?.bridge_token === "string" ? body.bridge_token.trim()
       : body?.instance?.id === config.instanceId ? config.relayToken || "" : "";
     if (!token) {
-      console.log(`\n  ${C.red}Relay accepted code but returned no bridge_token.${C.reset}\n`);
+      log(`\n  ${C.red}Relay accepted code but returned no bridge_token.${C.reset}\n`);
       return { ok: false, reason: "missing_bridge_token", body };
     }
     const instanceId = typeof body?.instance?.id === "string" ? body.instance.id.trim() : "";
     if (!instanceId) {
-      console.log(`\n  ${C.red}Relay accepted code but returned no instance id.${C.reset}\n`);
+      log(`\n  ${C.red}Relay accepted code but returned no instance id.${C.reset}\n`);
       return { ok: false, reason: "missing_instance_id", body };
     }
 
@@ -373,23 +375,23 @@ export async function runPairCommand(
         projectDir,
       );
     } catch (err) {
-      console.log(`\n  ${C.red}Pair confirmed on the relay but storing the identity locally FAILED:${C.reset} ${err?.message || err}`);
-      console.log(`  ${C.dim}Nothing was persisted — this repo will look paired on the phone but stay offline.`);
-      console.log(`  Retry \`posse serve --pair\` before the QR expires (the same confirm is replay-safe), or after expiry re-pair from scratch.${C.reset}\n`);
+      log(`\n  ${C.red}Pair confirmed on the relay but storing the identity locally FAILED:${C.reset} ${err?.message || err}`);
+      log(`  ${C.dim}Nothing was persisted — this repo will look paired on the phone but stay offline.`);
+      log(`  Retry \`posse serve --pair\` before the QR expires (the same confirm is replay-safe), or after expiry re-pair from scratch.${C.reset}\n`);
       return { ok: false, reason: "persist_failed", error: err?.message || String(err) };
     }
     const persisted = getBridgeConfig(projectDir);
     if (!persisted.relayToken || persisted.instanceId !== instanceId) {
-      console.log(`\n  ${C.red}Pair confirmed on the relay but the stored identity does not read back.${C.reset}`);
-      console.log(`  ${C.dim}Expected instance ${instanceId}; read ${persisted.instanceId || "nothing"} (token ${persisted.relayToken ? "present" : "missing"}).`);
-      console.log(`  Re-run \`posse serve --pair\` — the phone-side pairing already exists and will be replaced.${C.reset}\n`);
+      log(`\n  ${C.red}Pair confirmed on the relay but the stored identity does not read back.${C.reset}`);
+      log(`  ${C.dim}Expected instance ${instanceId}; read ${persisted.instanceId || "nothing"} (token ${persisted.relayToken ? "present" : "missing"}).`);
+      log(`  Re-run \`posse serve --pair\` — the phone-side pairing already exists and will be replaced.${C.reset}\n`);
       return { ok: false, reason: "persist_verify_failed" };
     }
-    console.log(`  ${C.green}Paired.${C.reset}`);
-    console.log(`  ${C.dim}Instance:${C.reset} ${instanceLabel} (${instanceId})`);
-    console.log(`  ${C.dim}Compute:${C.reset} ${servedComputeLine()}`);
-    console.log(`  ${C.dim}Relay identity stored for this repo.${C.reset}`);
-    console.log("");
+    log(`  ${C.green}Paired.${C.reset}`);
+    log(`  ${C.dim}Instance:${C.reset} ${instanceLabel} (${instanceId})`);
+    log(`  ${C.dim}Compute:${C.reset} ${servedComputeLine()}`);
+    log(`  ${C.dim}Relay identity stored for this repo.${C.reset}`);
+    log("");
     return { ok: true, paired: true, instance: body.instance };
   };
   let result;
@@ -397,10 +399,10 @@ export async function runPairCommand(
     result = await completePairing();
   } catch (err) {
     if (cancelRequested) {
-      console.log(`\n  ${C.red}Pairing cancelled.${C.reset}\n`);
+      log(`\n  ${C.red}Pairing cancelled.${C.reset}\n`);
       result = { ok: false, reason: "canceled" };
     } else if (Date.now() >= expiresAt) {
-      console.log(`\n  ${C.red}QR expired before pairing completed.${C.reset} Run \`posse serve --pair\` again.\n`);
+      log(`\n  ${C.red}QR expired before pairing completed.${C.reset} Run \`posse serve --pair\` again.\n`);
       result = { ok: false, reason: "qr_token_expired" };
     } else {
       throw err;
