@@ -1325,11 +1325,13 @@ Start remote access from an initialized Posse repository:
 posse serve
 ```
 
-Serve starts the bridge and prints a collaborator invitation immediately,
-without requiring a phone. In the interactive `serve>` console, type `phone`
-to display a phone QR and manual token, `invite` to show the invitation again
-or retry a failed reservation, and `help` for commands. `posse serve --pair`
-opens phone pairing after printing the invitation. Enter skips pairing and
+Serve shows a compact startup display with the local URL, collaborator join
+code and command, then automatically displays the phone QR and manual token
+at an interactive terminal. In the `serve>` console, type `phone` for a fresh
+QR, `invite` to show the invitation again or retry a failed reservation, and
+`help` for more commands. Phone pairing is optional; a failed automatic pairing
+keeps the bridge and collaborator invitation available. `posse serve --pair`
+explicitly opens phone pairing, including in JSON mode. Enter skips pairing and
 Ctrl-C at the phone prompt cancels only that prompt; both keep serving.
 Type `quit` or press Ctrl-C at `serve>` to stop.
 Phones retain account-level

@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import { SERVED_EVENTS } from "../../../catalog/pairing-wire.js";
 import { getBridgeConfig } from "../../bridge/functions/auth.js";
-import { listAllowedBridgeCommands } from "../../bridge/functions/command-dispatch.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
 import { getLivePairingState } from "../functions/state.js";
@@ -34,13 +33,8 @@ export class ServedAccess {
 
   showBridge() {
     const { C, info } = this;
-    this.log(`\n  ${C.green}Posse bridge listening${C.reset}: ${C.cyan}${info.url}${C.reset}`);
-    this.log(`  Instance: ${info.instanceId}\n  Label: ${info.label}`);
-    this.log("  Bearer token: hidden (use --show-token or --show-lan-token)");
-    this.log(`  WebSocket: ${info.url}/v1/stream`);
-    if (info.relayEnabled) this.log(`  Relay: ${info.relayUrl}`);
-    this.log(`  Compute: ${servedComputeLine()}`);
-    this.log(`  Commands: ${listAllowedBridgeCommands().join(", ")}`);
+    this.log(`\n  ${C.green}${C.bold}Posse serving${C.reset} · ${info.label}`);
+    this.log(`  Local URL  ${C.cyan}${info.url}${C.reset}`);
     this.emit({ ok: true, event: SERVED_EVENTS.STARTED, url: info.url, instance_id: info.instanceId });
   }
 
@@ -48,11 +42,9 @@ export class ServedAccess {
     const state = this.invitation ? null : this.activeSession();
     const code = this.invitation?.code || readSessionInviteCode(state);
     if (code) {
-      this.log(`  Clone pairing code: ${code}`);
-      this.log(`  Join from another computer: posse serve join ${code}`);
-      if (this.invitation) this.log("  Shared Git setup waits until a collaborator joins.");
-      this.log("  When they show a countersign, admit <CODE> host uses your compute; admit <CODE> member uses theirs.");
-      this.log("  From another terminal in this repository: posse serve admit <CODE> host (or member)");
+      this.log(`\n  ${this.C.bold}Collaborator${this.C.reset}`);
+      this.log(`  Join code  ${this.C.cyan}${code}${this.C.reset}`);
+      this.log(`  Command    posse serve join ${code}`);
     } else if (state) {
       this.log(`  Already in a collaborative session as ${state.role}. Use posse serve status or posse serve members to inspect it.`);
     } else {
@@ -61,15 +53,20 @@ export class ServedAccess {
   }
 
   showHelp() {
-    this.log("\n  Remote access: share the clone invitation to add another person.");
-    this.log("  phone   add a phone to your account (QR and manual token)");
-    this.log("  invite  show the collaborator invitation, or retry creating it");
-    this.log("  help    show these commands\n  quit    stop serving (also Ctrl-C)\n");
+    this.log(`\n  ${this.C.bold}Serve commands${this.C.reset}`);
+    this.log("  phone      show a fresh phone QR and manual token");
+    this.log("  invite     show or retry the collaborator invitation");
+    this.log("  help       show this help\n  quit       stop serving (also Ctrl-C)");
+    this.log("\n  Share the join command with a collaborator. Git setup starts when they join.");
+    this.log("  In the session console: admit <CODE> host uses your compute; admit <CODE> member uses theirs.");
+    this.log("  From another terminal: posse serve admit <CODE> host (or member)");
+    this.log(`\n  Phone work  ${servedComputeLine()}`);
+    this.log("  LAN token   posse serve --show-lan-token\n");
   }
 
   openConsole() {
     if (!this.interactive || this.json || this.closing || this.hostStarting || this.console) return;
-    this.showHelp();
+    this.log("\n  help  more commands · quit  stop serving\n");
     this.console = this.consoleFactory({
       prompt: "  serve> ",
       onLine: (line) => {
@@ -180,7 +177,7 @@ export class ServedAccess {
     const { C, projectDir, json } = this;
     // Use plain output while the enrollment console is suspended for the QR.
     const log = (...args) => (json ? console.error : console.log)(...args);
-    log("\n  Add a phone to your account. Press Enter at the code prompt to skip and keep serving.");
+    log("\n  Phone pairing · Enter to skip · help for commands after skipping");
     const options = { C, argv, projectDir, json, signal: this.phoneAbort.signal };
     let paired;
     try {
@@ -213,18 +210,17 @@ export class ServedAccess {
   async showRelay() {
     if (this.closing) return;
     if (!this.info.relayEnabled) {
-      this.log("  NOT PAIRED with the relay. Phones and the web portal cannot see this repo.");
       this.log(this.interactive && !this.json
-        ? "  Type phone to link a phone. Collaborator invitations work independently."
-        : "  Run `posse serve --pair` at a terminal to pair it and keep serving. LAN-only clients still work.");
+        ? "  Phone/web  Not paired · Type phone to pair"
+        : "  Phone/web  Not paired · Run `posse serve --pair` at a terminal");
       return;
     }
     if (!this.wait) return;
     const relay = await this.waitForRelayOutcome(this.bridge, { signal: this.shutdownAbort.signal });
     if (this.closing) return;
-    if (relay.state === "online") this.log("  Relay connected — this repo is ONLINE for phones and the web portal.");
-    else if (relay.state === "unauthorized") this.log("  Relay REJECTED this bridge credential. Type phone to repair it, or run posse serve --pair.");
-    else if (relay.state !== "stopped") this.log(`  Relay not connected yet (${relay.state}). Retrying in the background; phones see this repo as offline until it connects.`);
+    if (relay.state === "online") this.log("  Phone/web  Online");
+    else if (relay.state === "unauthorized") this.log("  Phone/web  Credential rejected · Run posse serve --pair to repair");
+    else if (relay.state !== "stopped") this.log(`  Phone/web  Offline (${relay.state}) · Retrying in the background`);
   }
 
   async run() {
@@ -244,15 +240,22 @@ export class ServedAccess {
       if (this.wait && !this.closing) {
         await this.startInvitation();
       }
-      if (this.argv.includes("--pair") && !this.hostStarting && !this.closing) {
+      const explicitPair = this.argv.includes("--pair");
+      const automaticPair = this.wait && this.interactive && !this.json;
+      let phonePaired = false;
+      if ((explicitPair || automaticPair) && !this.hostStarting && !this.closing) {
         const paired = await this.pairPhone({ argv: this.argv });
+        phonePaired = paired.ok;
         if (!paired.ok && !["no_confirmation_code", "canceled"].includes(paired.reason)) {
-          process.exitCode = 1;
-          this.emit(paired);
-          return paired;
+          if (explicitPair) {
+            process.exitCode = 1;
+            this.emit(paired);
+            return paired;
+          }
+          this.log("  Phone pairing unavailable. Type phone to retry; serving continues.");
         }
       }
-      await this.showRelay();
+      if (!phonePaired) await this.showRelay();
       if (!this.wait) {
         transferred = true;
         return { ok: true, bridge: this.bridge, info: this.info };

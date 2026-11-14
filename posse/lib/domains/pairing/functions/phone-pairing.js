@@ -241,18 +241,14 @@ export async function runPairCommand(
     // Step 2: render the QR for the phone to scan.
     const payloadUrl = `posse://pair?token=${encodeURIComponent(qrToken)}`;
     const qrArt = await abortable(renderTerminalQr(payloadUrl), ceremonyAbort.signal);
-    log("");
+    log(`\n  ${C.bold}Phone${C.reset} · Scan in the Posse app → Pair an instance → Scan QR`);
     log(qrArt);
-    log(`  ${C.dim}1.${C.reset} On the Posse phone app, tap "Pair an instance" → "Scan QR".`);
-    log(`  ${C.dim}2.${C.reset} Scan the QR above with your phone's camera.`);
-    log(`  ${C.dim}3.${C.reset} The phone will display a 4-character confirmation code.`);
-    log(`  ${C.dim}4.${C.reset} Type that code below (or admit <CODE> host) to finish pairing.\n`);
     // The phone's "Enter token manually" takes the bare token or the
     // posse://pair URL; a camera that cannot read the terminal needs it in text.
-    log(`  ${C.dim}Can't scan?${C.reset} On the phone tap "Enter token manually" and type this token:`);
+    log(`  ${C.dim}Manual token${C.reset} · On the phone, choose "Enter token manually":`);
     log(`  ${C.bold}${qrToken}${C.reset}\n`);
     if (startBody?.expires_at) {
-      log(`  ${C.dim}QR expires at:${C.reset} ${startBody.expires_at}\n`);
+      log(`  ${C.dim}Expires${C.reset}      ${startBody.expires_at}\n`);
     }
 
     // Step 3: prompt for the confirmation code (or take it from a flag for scripting).
@@ -390,10 +386,8 @@ export async function runPairCommand(
       log(`  Re-run \`posse serve --pair\` — the phone-side pairing already exists and will be replaced.${C.reset}\n`);
       return { ok: false, reason: "persist_verify_failed" };
     }
-    log(`  ${C.green}Paired.${C.reset}`);
-    log(`  ${C.dim}Instance:${C.reset} ${instanceLabel} (${instanceId})`);
-    log(`  ${C.dim}Compute:${C.reset} ${servedComputeLine()}`);
-    log(`  ${C.dim}Relay identity stored for this repo.${C.reset}`);
+    log(`  ${C.green}Phone paired${C.reset} · ${instanceLabel}`);
+    log(`  ${C.dim}Compute${C.reset}      ${servedComputeLine()}`);
     log("");
     return { ok: true, paired: true, instance: body.instance };
   };
