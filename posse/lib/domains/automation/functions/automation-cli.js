@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import { AutomationOwner } from "../classes/AutomationOwner.js";
 import { AutomationOwnerClient, ensureAutomationOwner } from "../classes/AutomationOwnerClient.js";
 import { AutomationServiceManager } from "../classes/AutomationServiceManager.js";
@@ -23,7 +22,7 @@ export async function runAutomationCli(argv = process.argv.slice(3)) {
   }
   if (command === "request") {
     await ensureAutomationOwner();
-    const frame = readRequestFrame(argv.slice(1));
+    const frame = await readRequestFrame(argv.slice(1));
     const operation = String(frame.operation || "").trim();
     if (!operation) throw Object.assign(new Error("Automation request requires operation"), { code: "invalid_request" });
     const client = new AutomationOwnerClient({ operator: true, timeoutMs: Number(frame.timeout_ms) || 30_000 });
@@ -32,9 +31,25 @@ export async function runAutomationCli(argv = process.argv.slice(3)) {
   throw Object.assign(new Error(`Unknown automation command: ${command}`), { code: "invalid_request" });
 }
 
-function readRequestFrame(args) {
+export async function readRequestFrame(args, input = process.stdin) {
   const inline = args.join(" ").trim();
-  const raw = inline || fs.readFileSync(0, { encoding: "utf8", flag: "r" });
+  let raw = inline;
+  if (!inline) {
+    // Bossy sends large draft bodies through a pipe. Node may mark stdin
+    // nonblocking, so a synchronous fd read can fail with EAGAIN between writes.
+    // Await incoming chunks and enforce the byte limit before buffering more.
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of input) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += bytes.length;
+      if (size > MAX_REQUEST_BYTES) {
+        throw Object.assign(new Error("Automation request is too large"), { code: "request_too_large" });
+      }
+      chunks.push(bytes);
+    }
+    raw = Buffer.concat(chunks, size).toString("utf8");
+  }
   if (Buffer.byteLength(raw) > MAX_REQUEST_BYTES) {
     throw Object.assign(new Error("Automation request is too large"), { code: "request_too_large" });
   }
