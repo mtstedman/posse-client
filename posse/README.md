@@ -1325,11 +1325,18 @@ Start remote access from an initialized Posse repository:
 posse serve
 ```
 
-Interactive serve offers the phone QR and manual token (Enter skips pairing),
-then starts the bridge and prints a clone invitation. `posse serve --pair`
-adds another phone and continues serving afterwards. Phones retain account-level
+Serve starts the bridge and prints a collaborator invitation immediately,
+without requiring a phone. In the interactive `serve>` console, type `phone`
+to display a phone QR and manual token, `invite` to show the invitation again
+or retry a failed reservation, and `help` for commands. `posse serve --pair`
+opens phone pairing after printing the invitation. Enter skips pairing and
+Ctrl-C at the phone prompt cancels only that prompt; both keep serving.
+Type `quit` or press Ctrl-C at `serve>` to stop.
+Phones retain account-level
 credentials and the existing account-paired repository access. Adding a phone
 to an existing bridge preserves that repository's identity and credential.
+Phone pairing grants access under the serving owner's account; invite a person
+using their own Posse installation with the collaborator code below.
 Phone commands run on the served computer through its normal queue and execution
 path; phone-only use creates no Git branch or temporary repository.
 
@@ -1342,13 +1349,17 @@ posse session join 'posse://session?token=ABCDE-FG234'
 ```
 
 The join waits while the serving host checks its checkout and provisions the
-session. The host must then be on its clean, up-to-date default branch with
+session. If a phone prompt is open, Posse cancels that prompt before opening the
+session console; `phone` remains available there. The collaborator invitation
+retains its identity even if first-time phone pairing changes the bridge identity.
+The host must then be on its clean, up-to-date default branch with
 no scheduler running. Posse uses the authenticated `gh` CLI to create a private
 throwaway repository, install a host deploy key, and push a unique side branch.
 GitHub remains the only provisioning adapter. Failed preparation is reported to
 both ends; the phone bridge remains available. Fix the reported precondition
-and restart serve for a fresh invitation. `--remote`, `--branch`, `--merge-mode`
-and `--deploy-mode` on serve apply when that Git session is created.
+and type `invite` for a fresh invitation (or restart serve). `--remote`,
+`--branch`, `--merge-mode` and `--deploy-mode` on serve apply when that Git
+session is created.
 
 `posse pair` and `posse session host` enter this same serving lifecycle. Session
 management verbs also work under `posse serve`, such as `serve admit AB23 host`

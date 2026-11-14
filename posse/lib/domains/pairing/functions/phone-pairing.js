@@ -138,6 +138,7 @@ export async function runPairCommand(
     processRef = process,
     cancelTimeoutMs = 2_000,
     requestTimeoutMs = 15_000,
+    signal = null,
   } = {},
 ) {
   const log = (...args) => (json ? console.error : console.log)(...args);
@@ -189,6 +190,8 @@ export async function runPairCommand(
     cancelRequested = true;
     ceremonyAbort.abort();
   };
+  signal?.addEventListener("abort", cancelFromSignal, { once: true });
+  if (signal?.aborted) cancelFromSignal();
   for (const signal of cancellationSignals) processRef.on?.(signal, cancelFromSignal);
 
   const cancelRelayPair = async () => {
@@ -273,7 +276,7 @@ export async function runPairCommand(
         ceremonyAbort.signal.throwIfAborted();
       }
       if (!confirmationCode) {
-        log(`\n  ${C.red}Pairing cancelled (no confirmation code).${C.reset}\n`);
+        log(`\n  ${C.dim}Phone pairing skipped; continuing to serve.${C.reset}\n`);
         return { ok: false, reason: cancelRequested ? "canceled" : "no_confirmation_code" };
       }
       if (!isValidConfirmationCode(confirmationCode)) {
@@ -413,6 +416,7 @@ export async function runPairCommand(
       if (qrToken && !relayConsumed) await cancelRelayPair();
     } finally {
       for (const signal of cancellationSignals) processRef.off?.(signal, cancelFromSignal);
+      signal?.removeEventListener("abort", cancelFromSignal);
     }
   }
   // Cleanup is bounded but asynchronous. A stop received during that wait

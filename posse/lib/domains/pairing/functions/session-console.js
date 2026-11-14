@@ -54,8 +54,9 @@ const MEMBER_HELP = Object.freeze([
  * Help lines for the session console. While posse go owns the session the
  * console only observes, so Ctrl+C detaches instead of closing or leaving.
  */
-export function sessionConsoleHelp(role, { observing = false } = {}) {
+export function sessionConsoleHelp(role, { observing = false, phonePairing = false } = {}) {
   const lines = [...(role === "host" ? HOST_HELP : MEMBER_HELP)];
+  if (phonePairing) lines.push("phone         add a phone to this served repository's account");
   if (observing) {
     lines.push("Ctrl+C        detach this console; posse go keeps the session");
   } else {
@@ -77,6 +78,7 @@ export function parseSessionConsoleLine(line, { role = "host" } = {}) {
   const [word, ...rest] = text.split(/\s+/u);
   const command = word.toLowerCase();
   const host = role === "host";
+  if (command === "phone" && rest.length === 0) return { kind: "phone" };
   if (command === "admit" && rest[0]?.toLowerCase() !== "admit") {
     const admission = parseSessionConsoleLine(rest.join(" "), { role });
     return admission.kind === "admit"

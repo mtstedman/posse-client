@@ -1112,6 +1112,7 @@ async function runHost({
   environment,
   signal = null,
   sessionScreenFirst = true,
+  pairPhone = null,
 }) {
   signal?.throwIfAborted();
   const autoMerge = mergeMode === "auto";
@@ -1169,7 +1170,7 @@ async function runHost({
     originalBranch: original.branch,
     originalHead: original.head,
     originalSettings: { ...snapshotPairingSettings(root), origin_ssh_command: readOriginSshCommand(root) },
-    instanceId: ensureBridgeInstanceId(root),
+    instanceId: remoteClient.servedInstanceId || ensureBridgeInstanceId(root),
     originalSshCommand: readLocalSshCommand(root),
   });
   let sessionRemote = remote;
@@ -1243,7 +1244,7 @@ async function runHost({
       });
     }
     started = validatePairingRemoteResponse("sessions", await remoteClient.start({
-      instance_id: ensureBridgeInstanceId(root),
+      instance_id: state.instance_id,
       repository_url: sessionUrl,
       repository_fingerprint: repositoryFingerprint(sessionUrl),
       branch: sharedBranch,
@@ -1292,7 +1293,7 @@ async function runHost({
     const outcome = await monitorPairing(remoteClient, state.id, {
       projectDir: root, C, json, sessionCode: started.code,
       enterSharedRun: sessionScreenFirst && enterSessionScreenFirst({ C, json }),
-      signal,
+      signal, pairPhone,
     });
     if (["graceful_close", "force_close", "draining", "closed", "expired"].includes(outcome.reason)) {
       const liveState = getPairingState(state.id);
@@ -2216,6 +2217,7 @@ export async function runPairingCommand(argv = [], {
   pairingRuntimeCheck = checkPairingRuntimeCommands,
   signal = null,
   sessionScreenFirst = true,
+  pairPhone = null,
 } = {}) {
   const args = parsePairArgs(argv);
   if (["host", "join"].includes(args.action)) {
@@ -2244,7 +2246,7 @@ export async function runPairingCommand(argv = [], {
   }
   if (args.action === "host") return runHost({
     ...args, projectDir, remoteClient: client, C, environment: pairingEnvironment,
-    signal, sessionScreenFirst,
+    signal, sessionScreenFirst, pairPhone,
   });
   if (args.action === "join") return runJoin({
     ...args, projectDir, remoteClient: client, C, environment: pairingEnvironment,

@@ -129,6 +129,7 @@ export class PairingMonitor {
       // so hosting or joining lands there; Ctrl+C then lands in this console.
       enterSharedRun = false,
       signal = null,
+      pairPhone = null,
     } = this.options;
     let sharedRunEntered = false;
     let forceRequested = false;
@@ -201,6 +202,7 @@ export class PairingMonitor {
     // A posse command (`add`, `go`) this console handed the terminal to. Ctrl+C
     // then belongs to that command, never to the session.
     let foreground = null;
+    const phonePairingAbort = new AbortController();
     let gracefulRequested = false;
     let lastTeamHandoffPollAt = 0;
     const seenPeerActivity = new Map();
@@ -341,6 +343,7 @@ export class PairingMonitor {
             : line.startsWith("Next:") ? C.cyan : "";
         log(`  ${color}${line}${color ? C.reset : ""}`);
       });
+      if (pairPhone) log("  Phone access: type phone to add another phone while this session stays open.");
       updatePrompt();
     };
     // The roster: everyone's role, run state, work counts and lease.
@@ -447,7 +450,17 @@ export class PairingMonitor {
         if (parsed.kind === "invalid") {
           log(`  ${C.yellow}${parsed.message}${C.reset}`);
         } else if (parsed.kind === "help") {
-          for (const line of sessionConsoleHelp(role, { observing })) log(`  ${C.dim}${line}${C.reset}`);
+          for (const line of sessionConsoleHelp(role, { observing, phonePairing: Boolean(pairPhone) })) log(`  ${C.dim}${line}${C.reset}`);
+        } else if (parsed.kind === "phone") {
+          if (!pairPhone) {
+            log("  Run posse serve to open phone access for this repository.");
+            return;
+          }
+          sessionConsole?.suspend();
+          try { await pairPhone({ signal: phonePairingAbort.signal }); }
+          finally {
+            for (const line of sessionConsole?.resume() || []) log(line);
+          }
         } else if (parsed.kind === "status") {
           printLanding(state);
         } else if (parsed.kind === "panel") {
@@ -768,6 +781,7 @@ export class PairingMonitor {
       };
     } finally {
       stopping = true;
+      phonePairingAbort.abort();
       // A foreground command (or one queued behind a slow admit) finishes
       // before the prompt closes and before leaving can race it.
       await commandChain.catch(() => {});

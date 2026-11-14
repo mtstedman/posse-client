@@ -66,7 +66,8 @@ const COMMAND_USAGE = {
   serve: () => {
     console.log(`\n  Usage: posse serve [--pair] [--remote origin] [--branch name] | serve join <CODE>`);
     console.log(`  Serve this repository to phones, web clients, and other Posse clones.`);
-    console.log(`  ${C.dim}Shows phone pairing and a clone invite. Shared Git setup waits until a clone joins; phone-only use leaves Git untouched.${C.reset}\n`);
+    console.log(`  ${C.dim}Shows a collaborator invitation immediately. Type phone for a QR, invite to show/retry the invitation, or help.${C.reset}`);
+    console.log(`  ${C.dim}--pair opens phone pairing after the invitation; Enter skips it and keeps serving. Shared Git setup waits for a clone join.${C.reset}\n`);
   },
   pair: () => {
     console.log(`\n  Usage:`);

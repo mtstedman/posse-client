@@ -18,9 +18,6 @@ export class ServedSession {
 
   async start() {
     this.reservation = await this.remoteClient.reserve(this.instanceId);
-    this.log(`  Clone pairing code: ${this.reservation.code}`);
-    this.log(`  Join from another computer: posse serve join ${this.reservation.code}`);
-    this.log("  The shared Git session will be created when a clone joins.\n");
     // Keep the rejection observed even if shutdown arrives during startup.
     this.done = this.run();
     this.done.catch(() => {});
@@ -54,6 +51,9 @@ export class ServedSession {
           const client = {
             ...this.remoteClient,
             reservation: this.reservation,
+            // Phone enrollment can replace the bridge identity while this
+            // invitation stays open. Activation must use its reserved identity.
+            servedInstanceId: this.instanceId,
             activationAttempted: false,
             start: async (metadata) => {
               signal.throwIfAborted();
