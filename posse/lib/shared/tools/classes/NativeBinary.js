@@ -251,6 +251,8 @@ export class NativeBinary {
     this._workerAuthGates = new Map();
     /** Permanent-for-this-artifact route failures. Replacing the handle clears them. */
     this._workerAuthFailures = new Map();
+    /** Routes refused only because scope enforcement is not yet proven. */
+    this._workerRoutesAwaitingScopeProof = new Set();
     this._workerPullManaged = false;
     this._nativeAuthHandshake = null;
     this._nativeAuthHandshakePulseManager = null;
@@ -521,12 +523,16 @@ export class NativeBinary {
       // call that proves enforcement. Deliver each route on its own so the
       // routes that can be minted still reach the worker; the refused route
       // stays fail-closed.
+      if (requested.length === 1 && error?.code === "POSSE_NATIVE_SCOPE_ENFORCEMENT_REQUIRED") {
+        this._workerRoutesAwaitingScopeProof.add(requested[0]);
+      }
       if (requested.length > 1 && error?.code === "POSSE_NATIVE_SCOPE_ENFORCEMENT_REQUIRED") {
         for (const route of requested) {
           try {
             await deliver([route], `${requestId}:${route}`.slice(0, 128));
           } catch (routeError) {
             if (isUnsupportedNativeVersionError(routeError)) this._workerAuthFailures.set(route, routeError);
+            if (routeError?.code === "POSSE_NATIVE_SCOPE_ENFORCEMENT_REQUIRED") this._workerRoutesAwaitingScopeProof.add(route);
             recordFailure([route], routeError);
           }
         }
@@ -624,7 +630,17 @@ export class NativeBinary {
     const granted = await pulled;
     timer?.clear();
     if (granted) return true;
-    if (this._workerPullManaged) return this.#awaitWorkerAuthHandoff(route);
+    if (this._workerPullManaged) {
+      if (await this.#awaitWorkerAuthHandoff(route)) return true;
+      // The boot handoff may have refused this route while a precondition was
+      // still unproven (scoped mutation awaiting the scope-enforcement proof).
+      // Once the precondition holds, mint it directly; the pulse manager
+      // re-applies every check, so a still-refused route stays fail-closed.
+      if (!this._workerRoutesAwaitingScopeProof.has(route)) return false;
+      const seeded = await this.#seedWorkerRouteDirect(route, daemon, fallbackPulse);
+      if (seeded) this._workerRoutesAwaitingScopeProof.delete(route);
+      return seeded;
+    }
     // Rollout bridge for an already-released worker that predates pull: seed it
     // once over the same private pipe. New workers request this themselves.
     try {
@@ -645,6 +661,31 @@ export class NativeBinary {
     if (!daemon.sendControl(this.#refreshControlFrame(fallbackPulse))) return false;
     this.#noteWorkerPulse(route, fallbackPulse);
     return true;
+  }
+
+  /**
+   * Mint one route and hand it to the worker over its private control pipe.
+   * Never throws: any refusal leaves the route undelivered (fail-closed).
+   *
+   * @param {string} route
+   * @param {any} daemon
+   * @param {unknown} [fallbackPulse]
+   * @returns {Promise<boolean>}
+   */
+  async #seedWorkerRouteDirect(route, daemon, fallbackPulse = null) {
+    try {
+      let pulse = fallbackPulse;
+      if (!isValidPulseEnvelope(pulse)) {
+        pulse = await this.#pulseManager().getPulseEnvelope(this.#versionedPulseOptions(route));
+      }
+      if (!isValidPulseEnvelope(pulse) || String(pulse?.route || "") !== route) return false;
+      if (!daemon.sendControl(this.#refreshControlFrame(pulse))) return false;
+      this.#noteWorkerPulse(route, pulse);
+      return true;
+    } catch (error) {
+      if (isUnsupportedNativeVersionError(error)) this._workerAuthFailures.set(route, error);
+      return false;
+    }
   }
 
   /** @param {string} reason @param {string | null} [method] */

@@ -45,7 +45,7 @@ import { INDEXABLE_EXTENSIONS as INDEXABLE_EXTENSIONS_FROM_MODULE, buildSmartPre
 import { classifyFileRisk as classifyFileRiskFromModule, isHighRiskPath as isHighRiskPathFromModule, looksLikeConcreteRequestedFile, parseFileRequest as parseFileRequestFromModule, splitFileRequestsByRisk as splitFileRequestsByRiskFromModule } from "./helpers/file-request.js";
 import { extractResearcherFiles as extractResearcherFilesFromModule, normalizeResearcherCitationTriage as normalizeResearcherCitationTriageFromModule, normalizeResearcherFilePriorities as normalizeResearcherFilePrioritiesFromModule, normalizeResearcherKeySymbols as normalizeResearcherKeySymbolsFromModule, parseResearcherStructuredOutput as parseResearcherStructuredOutputFromModule, researcherOutputNeedsHuman as researcherOutputNeedsHumanFromModule, sanitizeResearcherStructuredOutput as sanitizeResearcherStructuredOutputFromModule, researcherPacketToStructuredOutput as researcherPacketToStructuredOutputFromModule } from "./helpers/researcher-output.js";
 import { detectPendingMergeAsync as detectPendingMergeAsyncFromModule } from "./helpers/merge-state.js";
-import { buildMemoryPrefetchNotice as buildMemoryPrefetchNoticeFromModule, buildStep0Context as buildStep0ContextFromModule, loadMemorySurfaceAsync as loadMemorySurfaceAsyncFromModule, loadRelevantInsightsAsync as loadRelevantInsightsAsyncFromModule, loadRelevantInsights as loadRelevantInsightsFromModule } from "./helpers/insights-step0.js";
+import { buildMemoryPrefetchNotice as buildMemoryPrefetchNoticeFromModule, buildStep0Context as buildStep0ContextFromModule, loadMemorySurfaceAsync as loadMemorySurfaceAsyncFromModule, memorySurfaceInputKey, loadRelevantInsightsAsync as loadRelevantInsightsAsyncFromModule, loadRelevantInsights as loadRelevantInsightsFromModule } from "./helpers/insights-step0.js";
 import { assertHandoffScopePreflight as assertHandoffScopePreflightFromModule, hasWritableScope as hasWritableScopeFromModule, isZeroEditCodeTask as isZeroEditCodeTaskFromModule } from "./helpers/scope-preflight.js";
 import { attachAtlasAssessorPrefetch as attachAtlasAssessorPrefetchFromModule, attachAtlasDbPrefetch as attachAtlasDbPrefetchFromModule, attachAtlasPlannerSlice as attachAtlasPlannerSliceFromModule, attachAtlasResearcherPrefetch as attachAtlasResearcherPrefetchFromModule, classifyAtlasPrefetchCoverage as classifyAtlasPrefetchCoverageFromModule, collectAtlasCoveredFiles as collectAtlasCoveredFilesFromModule, renderAtlasHandoffSectionsWithMeta as renderAtlasHandoffSectionsWithMetaFromModule, resolveAtlasHandoffState as resolveAtlasHandoffStateFromModule } from "./helpers/atlas-context.js";
 import { materializeRenderedLifecycleCoverage } from "./helpers/lifecycle-prefetch.js";
@@ -1643,6 +1643,23 @@ export async function handoff(input, { providerName = null, reviewerChildIdentit
   let atlasPrefetchStepError = null;
   const atlasPrefetchPacket = { ...packet };
   const atlasHandoffPrefetchPolicy = _atlasHandoffPrefetchAllowed(packet);
+  // The assessor's slice/prefetch never feeds the memory lookup (only the
+  // planner/researcher/dev slice does), so its lookup can overlap the ATLAS
+  // prefetch instead of queueing behind it. The result is reused only when the
+  // lookup's inputs are unchanged once the prefetch finishes.
+  let earlyMemorySurface = null;
+  if (recipient === "assessor" && atlasHandoffPrefetchPolicy.allowed) {
+    try {
+      const earlyKey = memorySurfaceInputKey(packet);
+      const earlyKaizenTelemetry = {};
+      const promise = runWithObservationContext(prefetchCtx,
+        () => _loadMemorySurfaceAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: earlyKaizenTelemetry }))
+        .catch(() => null);
+      earlyMemorySurface = { key: earlyKey, promise, telemetry: earlyKaizenTelemetry };
+    } catch {
+      earlyMemorySurface = null;
+    }
+  }
   if (atlasHandoffPrefetchPolicy.allowed) {
     await timeHandoffStep(packet, "atlas.prefetch", () => runWithObservationContext(prefetchCtx, async () => {
       await Promise.all([
@@ -1855,8 +1872,18 @@ export async function handoff(input, { providerName = null, reviewerChildIdentit
   const kaizenTelemetry = {};
   packet.run_insights = await timeHandoffStep(packet, "insights.load", () => runWithObservationContext(prefetchCtx,
     () => _loadRelevantInsightsAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry })));
-  packet.memory_surface = await timeHandoffStep(packet, "memory.surface", () => runWithObservationContext(prefetchCtx,
-    () => _loadMemorySurfaceAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry })));
+  const reuseEarlySurface = earlyMemorySurface && earlyMemorySurface.key === memorySurfaceInputKey(packet);
+  packet.memory_surface = await timeHandoffStep(packet, "memory.surface", async () => {
+    if (reuseEarlySurface) {
+      const early = await earlyMemorySurface.promise;
+      if (early) {
+        Object.assign(kaizenTelemetry, earlyMemorySurface.telemetry);
+        return early;
+      }
+    }
+    return runWithObservationContext(prefetchCtx,
+      () => _loadMemorySurfaceAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry }));
+  });
   await timeHandoffStep(packet, "insights.memory_prefetch_notice", () => _applyMemoryPrefetchNotice(packet));
   await timeHandoffStep(packet, "insights.log", () => _logSurfacedInsights(packet, recipient, kaizenTelemetry));
 

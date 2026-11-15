@@ -14,6 +14,7 @@ import { validatePlannerTestCommandForRepository } from "../../../verification/f
 import { testCommandCapability } from "../../../verification/functions/test-capability.js";
 import { TEST_CAPABILITY_PRUNED_REASON, TEST_RUNNER_REMOVED_REASON, TEST_REQUIRED_FILE_MISSING_REASON } from "../../../../catalog/verification.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
+import { acquireTestWorktreeSlot } from "./test-worktree-slot.js";
 
 export const MAX_STREAM_CHARS = 256 * 1024;
 
@@ -66,7 +67,22 @@ export function killProcessTree(child, {
 /** @param {string} command
  * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string, filesToCreate?: string[]}} options
  */
-export async function runCommand(command, {
+export async function runCommand(command, options = {}) {
+  const release = await acquireTestWorktreeSlot(options?.cwd || process.cwd(), {
+    signal: options?.signal || null,
+    onWait: () => log.info("verification", "Waiting for another job's verification run in this checkout", { command, cwd: options?.cwd }),
+  });
+  try {
+    return await runCommandInSlot(command, options);
+  } finally {
+    release();
+  }
+}
+
+/** @param {string} command
+ * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string, filesToCreate?: string[]}} options
+ */
+async function runCommandInSlot(command, {
   cwd,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   idleTimeoutMs = null,

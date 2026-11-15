@@ -46,6 +46,15 @@ function collectInsightFilePaths(payload) {
   return [...new Set(paths)];
 }
 
+/**
+ * Stable identity of what `memory.surface` would be asked about for a packet.
+ * Lets a caller start the lookup early and reuse it only if nothing the lookup
+ * reads has changed by the time it would normally run.
+ */
+export function memorySurfaceInputKey(payload) {
+  return JSON.stringify([collectInsightFilePaths(payload), collectInsightSymbolIds(payload)]);
+}
+
 function collectInsightSymbolIds(payload) {
   const ids = [];
   const push = (value) => {
