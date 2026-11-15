@@ -29,6 +29,15 @@ export function ownComputeOwner(state) {
   return normalizeComputeOwner(state.compute_owner) || defaultSessionComputeOwner(state.compute_policy);
 }
 
+/**
+ * True for a clone whose lease names the session host: in an active session it
+ * is not the host, so its routable work runs on the host's machine and never
+ * here. Such a clone needs no local ATLAS index for that work.
+ */
+export function leasedToSessionHost(state) {
+  return state?.phase === "active" && state.role !== "host" && ownComputeOwner(state) === HOST;
+}
+
 /** Who runs a peer's routable work, as the issuer's Remote reports it. */
 export function peerComputeOwner(peer, computePolicy) {
   if (!peer) return null;

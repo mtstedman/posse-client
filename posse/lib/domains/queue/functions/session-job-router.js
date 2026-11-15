@@ -14,7 +14,7 @@ import { casPushSharedTrunkClaimNative } from "../../git/functions/shared-trunk-
 import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
-import { normalizeComputeOwner, offersSessionWorkTo, ownComputeOwner } from "../../pairing/functions/compute-lease.js";
+import { leasedToSessionHost, normalizeComputeOwner, offersSessionWorkTo, ownComputeOwner } from "../../pairing/functions/compute-lease.js";
 import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
 import { createJob, createWorkItem, getWorkItem, logEvent, refreshWorkItemStatus, updateJobProvider, updateJobStatus, updateWorkItemStatus } from "./queue-store.js";
 import { now, runImmediateTransaction } from "./common.js";
@@ -209,8 +209,7 @@ export async function casRef({ projectDir, remote, namespace, key, expectedOldOi
  * @param {any} job
  */
 export function sessionMustWaitForHost(state, job) {
-  return state?.phase === "active" && state.role !== "host"
-    && ownComputeOwner(state) === SESSION_COMPUTE_OWNERS.HOST
+  return leasedToSessionHost(state)
     && ROUTABLE_JOB_TYPES.has(job?.job_type)
     && !parseJson(job?.payload_json).session_delegation;
 }

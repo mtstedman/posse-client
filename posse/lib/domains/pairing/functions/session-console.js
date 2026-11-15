@@ -10,7 +10,7 @@ import { createSessionPanel } from "./session-panel.js";
 // countersign can never be read as a command (or the reverse).
 const COUNTERSIGN_PATTERN = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$/u;
 
-const HOST_ONLY_COMMANDS = new Set(["members", "m", "close", "kick", "lease", "merge", "deploy", "auto"]);
+const HOST_ONLY_COMMANDS = new Set(["members", "m", "close", "kick", "lease", "merge", "deploy", "auto", "trees", "purge"]);
 // Disconnect words. None is four pairing-alphabet symbols (I, L are absent).
 const LEAVE_COMMANDS = new Set(["leave", "quit", "exit", "disconnect"]);
 // For the host these close the session, as `close` does.
@@ -41,7 +41,9 @@ const HOST_HELP = Object.freeze([
   "merge         squash the team's work into your branch; the session keeps running",
   "deploy        push your branch to origin (merging first); the session keeps running",
   "auto merge|deploy on|off   trusted teams: run it as work lands, without asking",
-  "close         end the session for everyone; you approve its work before it is published (also: quit)",
+  "trees         list your session trees (every posse/pair-* branch) and whether their work is in the trunk",
+  "purge <tree> [force]   delete a session tree: its branch, kept GitHub repo and recovery refs (not the live one)",
+  "close         end the session for everyone; you approve its work before it is published (also: quit); you are asked whether to leave the tree up or purge it",
 ]);
 
 const MEMBER_HELP = Object.freeze([
@@ -116,6 +118,14 @@ export function parseSessionConsoleLine(line, { role = "host" } = {}) {
   const countersign = COUNTERSIGN_PATTERN.test(word.toUpperCase()) && (rest.length === 0 || admitLease);
   if (!host && (HOST_ONLY_COMMANDS.has(command) || countersign)) {
     return { kind: "invalid", message: "Only the session host can admit, list or remove members, change their lease, merge, deploy or close the session." };
+  }
+  if (command === "trees" && rest.length === 0) return { kind: "trees" };
+  if (command === "purge") {
+    const force = rest.some((word) => word.toLowerCase() === "force" || word === "--force");
+    const target = rest.filter((word) => word.toLowerCase() !== "force" && word !== "--force")[0];
+    return target && rest.length <= 2
+      ? { kind: "purge", target, force }
+      : { kind: "invalid", message: "Usage: purge <tree> [force]  (see `trees`)" };
   }
   if (["members", "m"].includes(command)) return { kind: "members" };
   if (command === "close") return { kind: "close" };

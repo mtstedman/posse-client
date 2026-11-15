@@ -30,6 +30,7 @@ import { formatSessionRosterLines, sessionRosterPanelView } from "../functions/s
 import { readSessionRoster } from "../functions/session-roster-source.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { newPendingSessionJobLines } from "../functions/pending-session-jobs.js";
+import { collectSessionTrees, describeTree, purgeTrees } from "../functions/session-trees-command.js";
 import { createSessionJobRouter } from "../../queue/classes/SessionJobRouter.js";
 import { sessionSyncFeedLabel } from "../functions/sync-state.js";
 import {
@@ -487,6 +488,14 @@ export class PairingMonitor {
           printLanding(state);
         } else if (parsed.kind === "panel") {
           printRoster();
+        } else if (parsed.kind === "trees") {
+          const trees = collectSessionTrees(projectDir);
+          if (trees.length === 0) log("  No session trees.");
+          for (const tree of trees) log(`  ${describeTree(tree)}`);
+          if (trees.length > 0) log(`  ${C.dim}purge <tree> removes one; the live session's tree is never removed${C.reset}`);
+        } else if (parsed.kind === "purge") {
+          const result = purgeTrees(projectDir, { target: parsed.target, force: parsed.force });
+          for (const line of result.lines) log(`  ${result.ok ? C.green : C.yellow}[trees]${C.reset} ${line}`);
         } else if (parsed.kind === "add") {
           // Word by word, as a shell would pass them, so `add --oneshot fix it`
           // reaches posse add as a flag and a task.

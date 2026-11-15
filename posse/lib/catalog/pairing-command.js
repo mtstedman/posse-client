@@ -30,6 +30,7 @@ export const PAIRING_ACTION_ARITY = readonlyMap([
   ["integrate", [1, 1]], ["abandon-integration", [1, 1]],
   ["hold", [1, Number.MAX_SAFE_INTEGER]], ["resume", [1, 1]],
   ["merge", [1, 1]], ["deploy", [1, 1]], ["auto", [1, 3]],
+  ["trees", [1, 3]],
 ]);
 
 // Options whose space-separated form takes the next argument as its value.

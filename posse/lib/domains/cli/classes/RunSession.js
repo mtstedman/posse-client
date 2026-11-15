@@ -8,6 +8,7 @@ import { noteGoWindow } from "../../pairing/functions/session-owner-launch.js";
 import { pairingSessionLive, sharedRunEligible, sharedRunTerminalAttached, workItemsSettledForSeeding } from "../../pairing/functions/shared-run.js";
 import { SESSION_OWNER_CHILD_ENV } from "../../../catalog/session-sync.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
+import { leasedToSessionHost } from "../../pairing/functions/compute-lease.js";
 import { describeModelCatalogWarning, validateConfiguredModels } from "../../providers/functions/model-catalog-validate.js";
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
@@ -1596,6 +1597,24 @@ export class RunSession {
     // the TUI. startAtlasWarmupPhase() is invoked post-scheduler.boot below; it
     // is intentionally NOT pushed into bootWarmups.
     startAtlasWarmupPhase = () => {
+    // A clone whose lease names the session host never runs routable work
+    // itself, so it has nothing to index ATLAS for.
+    let leasedToHost = false;
+    try { leasedToHost = leasedToSessionHost(getLivePairingState()); } catch { /* a normal clone */ }
+    if (atlasWarmupBootConfig?.enabled !== false && leasedToHost) {
+      updateBootStep("ATLAS warmup", {
+        status: "skipped", detail: "the session host runs this clone's jobs", showDetail: true, force: true,
+      });
+      return Promise.resolve({
+        label: "ATLAS warmup",
+        ok: true,
+        fatal: false,
+        result: {
+          atlasBoot: { attempted: false, skipped: "host_leased_member" },
+          atlasRuntime: { attempted: false, skipped: "host_leased_member", ok: true, backend: "atlas-v2" },
+        },
+      });
+    }
     if (atlasWarmupBootConfig?.enabled === false) {
       // ATLAS disabled at the config level — mark the step skipped and return a
       // resolved sentinel in the shape the bootWarmup would produce, rather than

@@ -3,7 +3,9 @@ import { withPairingGitProgress } from "./git-progress.js";
 import { DependencyProgress } from "../../cli/classes/DependencyProgress.js";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { execFileSync } from "node:child_process";
 import { PAIRING_ACTION_ARITY } from "../../../catalog/pairing-command.js";
+import { resolveTrunkRef, runSessionTreesCommand } from "./session-trees-command.js";
 import { ADMISSION_POLL_INTERVAL_MS, ADMISSION_MAX_CONSECUTIVE_FAILURES } from "../../../catalog/pairing-wire.js";
 import { STARTUP_UPDATE_FLAGS } from "../../../catalog/cli-flags.js";
 import { SESSION_CONSOLE_FIRST_ENV, SESSION_PUBLISH_DECLINED_EXIT_CODE } from "../../../catalog/shared-run.js";
@@ -75,7 +77,9 @@ import {
   setSessionHold,
   SESSION_HOLD_STATES,
 } from "./session-hold.js";
-import { askToPublishPromotion, printPromotionForApproval } from "./approval-prompt.js";
+import { askRejoinTree, askToPublishPromotion, askTreeAction, printPromotionForApproval } from "./approval-prompt.js";
+import { keptTreeProblem, rejoinKeptBranch } from "./session-tree-rejoin.js";
+import { clearTreeIntent, purgeSessionTree, readKeptTrees, readTreeIntent, registerKeptTree, setTreeIntent } from "./session-trees.js";
 import {
   describeSessionPublishModes,
   recordUnattendedFailure,
@@ -272,6 +276,9 @@ export function parsePairArgs(argv = []) {
   let hasRemoteFlag = false;
   let hasBranchFlag = false;
   let keepBranch = false;
+  const treeFlags = new Set();
+  /** @type {"keep"|"purge"|null} */
+  let treeAction = null;
   let historyPreserving = false;
   let approvedSourceOid = null;
   let approvedOriginOid = null;
@@ -348,6 +355,18 @@ export function parsePairArgs(argv = []) {
       unattended = true;
       continue;
     }
+    if (arg === "--force" || arg === "--merged") {
+      if (treeFlags.has(arg)) throw Object.assign(new Error(`${arg} may only be specified once`), { code: "pairing_option_duplicate" });
+      treeFlags.add(arg);
+      continue;
+    }
+    if (arg === "--keep-tree" || arg === "--purge-tree") {
+      if (treeAction) {
+        throw Object.assign(new Error("--keep-tree and --purge-tree may only be specified once, and not together"), { code: "pairing_option_duplicate" });
+      }
+      treeAction = arg === "--keep-tree" ? "keep" : "purge";
+      continue;
+    }
     if (arg === "--history-preserving") {
       if (historyPreserving) throw Object.assign(new Error("--history-preserving may only be specified once"), {
         code: "pairing_option_duplicate",
@@ -406,12 +425,13 @@ export function parsePairArgs(argv = []) {
     }
     parsed = {
       action: first === "close" ? "leave" : first,
-      code: positional[1] && !["hold", "auto"].includes(first) ? inviteToken(positional[1]) : null,
+      code: positional[1] && !["hold", "auto", "trees"].includes(first) ? inviteToken(positional[1]) : null,
       json,
       remote,
       branch,
     };
     if (keepBranch) parsed.keepBranch = true;
+    if (treeAction) parsed.treeAction = treeAction;
     if (historyPreserving) parsed.historyPreserving = true;
     if (approvedSourceOid && approvedOriginOid) parsed.approval = {
       sourceOid: approvedSourceOid, originOid: approvedOriginOid,
@@ -419,6 +439,11 @@ export function parsePairArgs(argv = []) {
     if (first === "hold") {
       const reason = positional.slice(1).join(" ").trim();
       if (reason) parsed.reason = reason;
+    } else if (first === "trees") {
+      if (positional[1]) parsed.which = positional[1];
+      if (positional[2]) parsed.value = positional[2];
+      if (treeFlags.has("--force")) parsed.force = true;
+      if (treeFlags.has("--merged")) parsed.merged = true;
     } else if (first === "auto") {
       if (positional.length === 2) {
         throw Object.assign(new Error("Usage: posse session auto <merge|deploy> <on|off>"), { code: "pairing_argument_required" });
@@ -447,6 +472,12 @@ export function parsePairArgs(argv = []) {
     throw Object.assign(new Error("--here is only valid with session join"), {
       code: "pairing_option_not_allowed",
     });
+  }
+  if (treeFlags.size > 0 && first !== "trees") {
+    throw Object.assign(new Error(`${[...treeFlags][0]} is only valid with session trees`), { code: "pairing_option_not_allowed" });
+  }
+  if (treeAction && first !== "close") {
+    throw Object.assign(new Error(`--${treeAction}-tree is only valid with session close`), { code: "pairing_option_not_allowed" });
   }
   if (keepBranch && first !== "close") {
     throw Object.assign(new Error("--keep-branch is only valid with session close"), {
@@ -546,7 +577,9 @@ async function restoreLocalPairing(projectDir, state) {
         });
       }
     });
-    if (state.credential_directory) removeSessionCredentialDirectory(state.credential_directory);
+    // A tree the host chose to leave up keeps its key: rejoining needs it.
+    const keepTreeKey = readTreeIntent(projectDir, [state.id, state.remote_session_id]) === "keep";
+    if (state.credential_directory && !keepTreeKey) removeSessionCredentialDirectory(state.credential_directory);
     markPairingPhase(state.id, "left");
     retireEndedSessionQueueRows([{ branch: state.shared_branch, remote: state.remote_name }]);
     pulseTokenManager.setSessionContext(null);
@@ -915,6 +948,55 @@ function revokeSessionMemberKeys(root, state) {
   }
 }
 
+/**
+ * The end of a session's repository once its work is published: delete it (as
+ * always), or, if the host chose on quit, leave the whole tree up for a later
+ * rejoin or purge the branch and recovery refs along with the repository.
+ */
+function finishSessionRepository(root, { state = null, journal = null, C = {}, json = false } = {}) {
+  const ids = [state?.id, state?.remote_session_id, journal?.session_id].filter(Boolean);
+  const intent = readTreeIntent(root, ids);
+  const repository = state?.temporary_repository || journal?.temporary_repository || null;
+  const branch = state?.shared_branch || journal?.source_branch || null;
+  if (intent === "keep" && branch) {
+    registerKeptTree(root, {
+      branch,
+      sessionId: state?.id || journal?.session_id || "",
+      remoteSessionId: state?.remote_session_id || null,
+      repository,
+      remoteUrl: state?.remote_url || journal?.source_url || null,
+      credentialDirectory: state?.credential_directory || null,
+      trunkOid: journal?.target_base_sha || null,
+    });
+    clearTreeIntent(root, ids);
+    if (!json) {
+      console.log(`  ${C.green}Left the tree up:${C.reset} ${branch}${repository ? ` and its private repo ${repository}` : ""} are kept. `
+        + "Rejoin it the next time you host, or remove it with `posse session trees purge`.");
+    }
+    return { ok: true, deleted: false, kept: true, repository, branch };
+  }
+  const cleanup = repository ? cleanupGitHubSessionRepository(repository, { cwd: root }) : null;
+  if (intent === "purge" && branch) {
+    clearTreeIntent(root, ids);
+    if (cleanup && !cleanup.ok) return cleanup;
+    const purged = purgeSessionTree(root, branch, {
+      trunkRef: resolveTrunkRef(root),
+      activeBranch: null,
+      sessionIdsFor: () => ids,
+      deleteRepository: () => ({ ok: true }),
+      removeCredentials: removeSessionCredentialDirectory,
+    });
+    if (!json) {
+      console.log(purged.ok
+        ? `  ${C.green}Purged the tree:${C.reset} ${(purged.removed || []).join(", ") || branch}`
+        : `  ${C.yellow}The tree was not purged:${C.reset} ${purged.message || (purged.problems || []).join("; ")}`);
+    }
+    return { ...(cleanup || { ok: true }), purged };
+  }
+  if (intent) clearTreeIntent(root, ids);
+  return cleanup;
+}
+
 async function closeClaimedHostSession(root, remoteClient, state, {
   graceful,
   C,
@@ -1055,9 +1137,7 @@ async function closeClaimedHostSession(root, remoteClient, state, {
   if (!restored.ok) {
     throw Object.assign(new Error(restored.message), { code: restored.code || "pairing_restore_blocked" });
   }
-  const cleanup = state.temporary_repository
-    ? cleanupGitHubSessionRepository(state.temporary_repository, { cwd: root })
-    : null;
+  const cleanup = finishSessionRepository(root, { state, journal, C, json });
   if (!json && promoted.skipped === "already_up_to_date") {
     console.log(`  ${C.green}Session closed.${C.reset} It added nothing ${promoted.targetBranch} lacks, so there was nothing to integrate.\n`);
   } else if (!json && publish) {
@@ -1100,6 +1180,41 @@ async function preparePairingEnvironment(root, environment, {
   }
 }
 
+/**
+ * The kept tree's repository, in the shape provisioning returns: its key is
+ * rebuilt from the credentials left on disk, and any member key that survived
+ * is revoked so nobody but the host can write to it.
+ */
+function reopenKeptRepository(root, tree, { defaultBranch }) {
+  const problem = keptTreeProblem(root, tree);
+  if (problem) {
+    throw Object.assign(new Error(`${tree.branch} cannot be rejoined: ${problem}`), { code: "pairing_rejoin_unavailable" });
+  }
+  try {
+    execFileSync("gh", ["repo", "view", tree.repository, "--json", "name"], {
+      cwd: root, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", timeout: 60_000,
+    });
+  } catch (error) {
+    throw Object.assign(new Error(
+      `${tree.repository} is not reachable (${safeError(error)}); purge the tree with \`posse session trees purge ${tree.branch}\` and start a new one`,
+    ), { code: "pairing_rejoin_repository_missing" });
+  }
+  try {
+    revokeGitHubMemberDeployKeys(tree.repository, { cwd: root });
+  } catch (error) {
+    throw Object.assign(new Error(
+      `Could not clear old member keys on ${tree.repository}: ${safeError(error)}. Fix GitHub CLI access (\`gh auth status\`) and try again.`,
+    ), { code: "pairing_rejoin_keys_not_revoked" });
+  }
+  return {
+    provider: "github",
+    repository: tree.repository,
+    remoteUrl: tree.remoteUrl || `git@github.com:${tree.repository}.git`,
+    defaultBranch,
+    identity: prepareSessionSshIdentity(root, tree.sessionId),
+  };
+}
+
 async function runHost({
   projectDir,
   remoteClient,
@@ -1136,11 +1251,21 @@ async function runHost({
         + "Run `posse session integrate` to publish it, or `posse session abandon-integration` to drop it, then start the session again.",
     ), { code: "pairing_promotion_already_pending" });
   }
+  // Trees left up on an earlier quit: offer to rejoin one instead of
+  // uploading the whole history to a new repository. Only at a terminal, and
+  // never when a branch was named explicitly.
+  let resumeTree = null;
+  if (!branch && !json) {
+    const entries = readKeptTrees(root).map((tree) => ({ tree, problem: keptTreeProblem(root, tree) }));
+    if (entries.length > 0) resumeTree = await askRejoinTree(C, entries);
+  }
   const original = currentCheckout(root);
-  const sharedBranch = validateBranchName(
-    root,
-    branch || `posse/pair-${randomUUID().replaceAll("-", "").slice(0, 10)}`,
-  );
+  const sharedBranch = resumeTree
+    ? resumeTree.branch
+    : validateBranchName(
+      root,
+      branch || `posse/pair-${randomUUID().replaceAll("-", "").slice(0, 10)}`,
+    );
   const { url } = assertPairingRemoteTargets(root, remote);
   const defaultBranch = remoteDefaultBranch(root, remote);
   if (original.branch !== defaultBranch) {
@@ -1183,15 +1308,22 @@ async function runHost({
       // Record the repository before creating it, so a host killed in between
       // still leaves recovery the name to delete.
       updatePairingEnrollment(state.id, {
-        temporaryRepository: githubSessionRepositoryName(githubOwner, state.id),
+        temporaryRepository: resumeTree ? resumeTree.repository : githubSessionRepositoryName(githubOwner, state.id),
       });
-      provisioned = provisionGitHubSessionRepository({
-        projectDir: root,
-        sessionId: state.id,
-        originRemoteUrl: url,
-        defaultBranch,
-        owner: githubOwner,
-      });
+      if (resumeTree) {
+        // The kept key must survive a refused rejoin: record the choice so the
+        // rollback's restore does not delete it, and clear it once we are up.
+        setTreeIntent(root, [state.id], "keep");
+        provisioned = reopenKeptRepository(root, resumeTree, { defaultBranch });
+      } else {
+        provisioned = provisionGitHubSessionRepository({
+          projectDir: root,
+          sessionId: state.id,
+          originRemoteUrl: url,
+          defaultBranch,
+          owner: githubOwner,
+        });
+      }
       sessionRemote = pairingTemporaryRemoteName(root, state.id);
       sessionUrl = provisioned.remoteUrl;
       addPairingRemote(root, sessionRemote, sessionUrl);
@@ -1213,16 +1345,20 @@ async function runHost({
       const retryNetwork = (operation, onWait = (_attempt, waitMs) => {
         if (!json) console.log(`  ${C.dim}Waiting for GitHub to accept this host's session key (retry in ${Math.round(waitMs / 1000)}s)...${C.reset}`);
       }) => retryWhileSessionKeyPropagates(operation, { onWait });
-      publishedOid = await withPairingGitProgress((onProgress) => createAndPublishPairingBranch(root, {
-        remote: sessionRemote,
-        branch: sharedBranch,
-        expectedUrl: sessionUrl,
-        baseBranch: provisioned ? defaultBranch : null,
-      }, {
-        retryNetwork: (operation) => retryNetwork(operation, (_attempt, waitMs) =>
-          onProgress(`Waiting for GitHub to accept this host's session key (retry in ${Math.round(waitMs / 1000)}s)...`)),
-        onProgress,
-      }), { silent: json });
+      publishedOid = await withPairingGitProgress((onProgress) => (resumeTree
+        ? rejoinKeptBranch(root, {
+          branch: sharedBranch, remote: sessionRemote, defaultBranch, trunkRef: defaultBranch,
+        }, { onProgress })
+        : createAndPublishPairingBranch(root, {
+          remote: sessionRemote,
+          branch: sharedBranch,
+          expectedUrl: sessionUrl,
+          baseBranch: provisioned ? defaultBranch : null,
+        }, {
+          retryNetwork: (operation) => retryNetwork(operation, (_attempt, waitMs) =>
+            onProgress(`Waiting for GitHub to accept this host's session key (retry in ${Math.round(waitMs / 1000)}s)...`)),
+          onProgress,
+        })), { silent: json });
       // The session repository's default is the trunk it was cut from; the
       // shared branch stays a side branch, as shared-trunk preflight requires.
       if (provisioned) setGitHubDefaultBranch(provisioned.repository, defaultBranch, { cwd: root });
@@ -1254,6 +1390,9 @@ async function runHost({
       fingerprint: repositoryFingerprint(sessionUrl),
       branch: sharedBranch,
     }, started.repository);
+    // Up on the kept tree: the choice made to protect a failed rejoin is spent,
+    // so quitting this session asks again.
+    if (resumeTree) clearTreeIntent(root, [state.id]);
     updatePairingEnrollment(state.id, {
       remoteSessionId: started.session_id,
       relayToken: started.host_token,
@@ -1298,6 +1437,12 @@ async function runHost({
     if (["graceful_close", "force_close", "draining", "closed", "expired"].includes(outcome.reason)) {
       const liveState = getPairingState(state.id);
       const hostAtTerminal = !json && (outcome.reason === "graceful_close" || outcome.interrupted === true);
+      // Quitting at the terminal: ask whether to leave the tree up or purge it.
+      // Enter (or no terminal) keeps today's behavior.
+      if (hostAtTerminal && !readTreeIntent(root, [liveState.id, liveState.remote_session_id])) {
+        const choice = await askTreeAction(C, { branch: sharedBranch, repository: liveState.temporary_repository });
+        if (choice) setTreeIntent(root, [liveState.id, liveState.remote_session_id], choice);
+      }
       const promotion = await finishHostShutdown(root, remoteClient, liveState, {
         graceful: ["graceful_close", "draining"].includes(outcome.reason),
         C,
@@ -1345,7 +1490,8 @@ async function runHost({
         + "run any posse command here to recover, then `posse session integrate`.";
       throw error;
     }
-    if (publishedOid) {
+    // A refused rejoin never deletes the kept branch or repository.
+    if (publishedOid && !resumeTree) {
       try {
         await withWorktreeLockAsync(root, root, () => deletePublishedPairingBranch(root, {
           remote: sessionRemote,
@@ -1357,9 +1503,10 @@ async function runHost({
       }
     }
     const restored = await restoreLocalPairing(root, getPairingState(state.id));
-    const cleanup = provisioned
+    const cleanup = provisioned && !resumeTree
       ? cleanupGitHubSessionRepository(provisioned.repository, { cwd: root })
       : null;
+    if (resumeTree) clearTreeIntent(root, [state.id]);
     // Report whatever rollback could not undo, with the command to finish it.
     const unfinished = [];
     if (!restored.ok) unfinished.push(`automatic restore blocked: ${restored.message}`);
@@ -2167,9 +2314,7 @@ async function runPendingIntegration({
   }
   const state = getLivePairingState();
   const restored = state ? await restoreLocalPairing(root, state) : { ok: true, alreadyLeft: true };
-  const cleanup = journal.temporary_repository
-    ? cleanupGitHubSessionRepository(journal.temporary_repository, { cwd: root })
-    : null;
+  const cleanup = finishSessionRepository(root, { state, journal, C, json: json || silent });
   const result = { ...promoted, restored, cleanup };
   if (!silent && json) console.log(JSON.stringify(result));
   else if (!silent && promoted.skipped === "already_up_to_date") {
@@ -2207,6 +2352,8 @@ export async function approvePairingPromotion({ projectDir = process.cwd(),
   }
 }
 
+export { finishSessionRepository as __testFinishSessionRepository };
+
 export async function runPairingCommand(argv = [], {
   projectDir = process.cwd(),
   C = new Proxy({}, { get: () => "" }),
@@ -2235,6 +2382,7 @@ export async function runPairingCommand(argv = [], {
     }
   }
   let client = remoteClient;
+  if (args.action === "trees") return runSessionTreesCommand({ ...args, projectDir, C });
   if (!client && !["status", "integrate", "abandon-integration", "hold", "resume", "merge", "deploy", "auto"]
     .includes(args.action)) {
     try {
@@ -2285,6 +2433,11 @@ export async function runPairingCommand(argv = [], {
   const state = getLivePairingState();
   const root = repositoryRoot(projectDir);
   let result;
+  // Recorded before the close starts so whichever process finishes the
+  // integration applies it.
+  if (args.treeAction && state?.role === "host") {
+    setTreeIntent(root, [state.id, state.remote_session_id], args.treeAction);
+  }
   if (state?.role === "host" && !args.keepBranch && state.close_action !== "keep-branch") {
     const blocked = await sessionClosePreflight(root, state, { historyPreserving: args.historyPreserving });
     if (blocked) throw Object.assign(new Error(`Not closing: ${blocked}`), { code: "pairing_close_refused" });

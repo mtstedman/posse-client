@@ -1484,6 +1484,24 @@ relay has lost touch with them, `joining` before their first heartbeat,
   feed as a block on each such change. `POSSE_SESSION_PANEL=block` forces the
   block, `=pinned` also pins on Windows, and `=off` silences it.
 
+#### Session trees: leave them up, rejoin, purge
+
+A session's shared branch (`posse/pair-*`) and its private GitHub repository
+are a **tree**. Quitting a hosted session at the terminal asks what to do with
+it: `k` leaves the tree up (the branch, the private repo and its key are kept),
+`p` purges it (the branch, repo and recovery refs are deleted once the work is
+published), and Enter keeps the earlier behavior (delete the repo, keep the
+local branch). `posse session close --keep-tree` / `--purge-tree` answer that
+for a scripted close. The next time you host, trees left up are offered:
+rejoin one, which only publishes what changed since, or make a new tree. A
+rejoin merges the trunk into the tree (never rewriting history), clears any
+member keys left on the repo, and refuses, changing nothing, if the tree and its
+repository have diverged or the trunk conflicts. `posse session trees` lists
+every tree and whether its work is in the trunk; `posse session trees purge
+<tree>` (or `purge --merged`, or the console's `trees` / `purge <tree>`)
+removes one. The live session's tree is never removed, and a tree holding work
+the trunk lacks needs `--force`.
+
 #### Compute leases: serve and session are one route
 
 `posse serve` and `posse session` differ only in which end owns the work. The

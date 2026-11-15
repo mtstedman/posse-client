@@ -99,7 +99,8 @@ const COMMAND_USAGE = {
     console.log(`    posse session resume`);
     console.log(`    posse session merge|deploy`);
     console.log(`    posse session auto [merge|deploy on|off]`);
-    console.log(`    posse session leave|close [--keep-branch|--history-preserving]`);
+    console.log(`    posse session leave|close [--keep-branch|--history-preserving] [--keep-tree|--purge-tree]`);
+    console.log(`    posse session trees [purge <tree>|purge --merged] [--force]`);
     console.log(`    posse session integrate [--approve-source-oid SHA --approve-origin-oid SHA]`);
     console.log(`    posse session abandon-integration`);
     console.log(`\n  Compatibility alias for serve. Hosting reserves an invitation; a clone join creates the shared Git session.`);
@@ -109,7 +110,9 @@ const COMMAND_USAGE = {
     console.log(`  A join runs in ~/posse-sessions/<CODE>; --here explicitly joins in this clone instead.`);
     console.log(`  hold keeps this checkout where it is (fetches continue) until resume or 30 minutes pass.`);
     console.log(`  merge squashes the team's work into your branch and deploy pushes it to origin; the session keeps running.`);
-    console.log(`  Each asks for your approval unless you turn it on with auto (trusted teams).\n`);
+    console.log(`  Each asks for your approval unless you turn it on with auto (trusted teams).`);
+    console.log(`  Quitting a session at the terminal asks whether to leave its tree up (branch, private repo and key kept) or purge it;`);
+    console.log(`  --keep-tree / --purge-tree answer that for a scripted close. trees lists every posse/pair-* tree and purge removes one.\n`);
     console.log(`  Startup offers a client update; use ${STARTUP_UPDATE_FLAGS.update} to accept automatically or ${STARTUP_UPDATE_FLAGS.skip} to skip.\n`);
   },
   unpair: () => {

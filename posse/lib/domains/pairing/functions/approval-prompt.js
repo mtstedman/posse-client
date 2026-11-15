@@ -62,3 +62,68 @@ export async function askToPublishPromotion(C, summary, {
     prompt.close();
   }
 }
+
+// What to do with the session's tree on quit. Returns "keep" or "purge" for an
+// explicit answer, and null for Enter (today's behavior) or when there is no
+// one to ask, so a closed terminal never changes what close does.
+export async function askTreeAction(C, { branch, repository = null }, {
+  input = process.stdin,
+  output = process.stdout,
+} = {}) {
+  if (!input?.isTTY || !output?.isTTY || input.readableEnded) return null;
+  if (input.isRaw) input.setRawMode(false);
+  const prompt = createInterface({ input, output });
+  const closed = new Promise((resolve) => prompt.once("close", () => resolve(null)));
+  output.write(`\n  ${C.bold}What should happen to this session's tree${C.reset} (${branch}${repository ? ` and its private repo ${repository}` : ""})?\n`
+    + `    ${C.cyan}k${C.reset}  leave it up: keep the branch, the private repo and its key so you can rejoin it later\n`
+    + `    ${C.cyan}p${C.reset}  purge it: delete the branch, the repo and the recovery refs once its work is published\n`
+    + `    ${C.dim}Enter  as before: delete the repo, keep the local branch${C.reset}\n`);
+  const asked = prompt.question("  [k/p/Enter]: ");
+  asked.catch(() => {});
+  try {
+    const answer = await Promise.race([asked, closed]);
+    const choice = answer === null ? "" : String(answer).trim().toLowerCase();
+    if (["k", "keep", "leave", "up"].includes(choice)) return "keep";
+    if (["p", "purge", "delete"].includes(choice)) return "purge";
+    return null;
+  } catch (error) {
+    if (error?.name === "AbortError") return null;
+    throw error;
+  } finally {
+    prompt.close();
+  }
+}
+
+// Offered when hosting and trees were left up: rejoin one, or make a new one.
+// Returns the chosen tree, or null for a new tree (Enter, or no one to ask).
+export async function askRejoinTree(C, entries, {
+  input = process.stdin,
+  output = process.stdout,
+} = {}) {
+  const usable = entries.filter((entry) => !entry.problem);
+  if (usable.length === 0 || !input?.isTTY || !output?.isTTY || input.readableEnded) return null;
+  if (input.isRaw) input.setRawMode(false);
+  const prompt = createInterface({ input, output });
+  const closed = new Promise((resolve) => prompt.once("close", () => resolve(null)));
+  let number = 0;
+  const lines = entries.map((entry) => {
+    if (entry.problem) return `    ${C.dim}-  ${entry.tree.branch}  cannot be rejoined: ${entry.problem}${C.reset}`;
+    number += 1;
+    const kept = entry.tree.keptAt ? `kept ${String(entry.tree.keptAt).slice(0, 10)}` : "kept";
+    return `    ${C.cyan}${number}${C.reset}  ${entry.tree.branch}  ${C.dim}${kept} · ${entry.tree.repository}${C.reset}`;
+  });
+  output.write(`\n  ${C.bold}You have session trees left up.${C.reset} Rejoin one (no new upload) or make a new one?\n${lines.join("\n")}\n`
+    + `    ${C.dim}Enter  make a new tree${C.reset}\n`);
+  const asked = prompt.question(`  [1${usable.length > 1 ? `-${usable.length}` : ""}/Enter]: `);
+  asked.catch(() => {});
+  try {
+    const answer = await Promise.race([asked, closed]);
+    const choice = Number.parseInt(String(answer ?? "").trim(), 10);
+    return Number.isInteger(choice) && choice >= 1 && choice <= usable.length ? usable[choice - 1].tree : null;
+  } catch (error) {
+    if (error?.name === "AbortError") return null;
+    throw error;
+  } finally {
+    prompt.close();
+  }
+}

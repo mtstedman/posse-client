@@ -21,6 +21,8 @@ import {
 import { ledgerBranchForWi } from "../../functions/v2/runtime-paths.js";
 import { getAtlasIntegrationConfig } from "../../../integrations/functions/atlas/config.js";
 import { normalizeAtlasV2Mode } from "../../../integrations/functions/atlas-v2-mode.js";
+import { getLivePairingState } from "../../../pairing/functions/state.js";
+import { leasedToSessionHost } from "../../../pairing/functions/compute-lease.js";
 import { getRetrievalCache } from "./RetrievalCache.js";
 import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 import {
@@ -911,7 +913,31 @@ export function emitEmbeddingsResume({ payload, jobId = null, maxSymbols = null,
  * @param {Record<string, unknown> | null} [config]
  * @returns {boolean}
  */
-export function isAtlasV2EmissionEnabled(config = null) {
+export function isAtlasV2EmissionEnabled(config = null, { pairingState = undefined } = {}) {
   const cfg = config || getAtlasIntegrationConfig();
-  return normalizeAtlasV2Mode(String(cfg?.atlasV2Mode || "")) !== "off";
+  if (normalizeAtlasV2Mode(String(cfg?.atlasV2Mode || "")) === "off") return false;
+  // A clone whose lease names the session host never runs routable work, so
+  // its background ATLAS warms (main refresh, WI views, restage) feed nothing.
+  return !localAtlasUnneeded(pairingState);
+}
+
+let hostLeaseCache = { at: 0, value: false };
+const HOST_LEASE_CACHE_MS = 2_000;
+
+/**
+ * True while this clone's lease names the session host. Read through a short
+ * cache: every ATLAS event asks, and the lease only changes on a heartbeat.
+ *
+ * @param {any} [pairingState] a state to judge instead of the live one (tests)
+ */
+export function localAtlasUnneeded(pairingState = undefined) {
+  if (pairingState !== undefined) return leasedToSessionHost(pairingState);
+  const nowMs = Date.now();
+  if (nowMs - hostLeaseCache.at < HOST_LEASE_CACHE_MS) return hostLeaseCache.value;
+  let value = false;
+  try {
+    value = leasedToSessionHost(getLivePairingState());
+  } catch { /* no readable pairing state means a normal clone */ }
+  hostLeaseCache = { at: nowMs, value };
+  return value;
 }
