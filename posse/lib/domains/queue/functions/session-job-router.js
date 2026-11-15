@@ -198,6 +198,23 @@ export async function casRef({ projectDir, remote, namespace, key, expectedOldOi
   return result;
 }
 
+/**
+ * A member whose lease names the session host never runs routable work itself:
+ * the host runs it on the host's machine and provider account, and when the
+ * host is unavailable the job waits. Only an active session carries a lease,
+ * and a job that was itself delegated to this clone is the executor's, not
+ * the originator's.
+ *
+ * @param {any} state the live pairing state
+ * @param {any} job
+ */
+export function sessionMustWaitForHost(state, job) {
+  return state?.phase === "active" && state.role !== "host"
+    && ownComputeOwner(state) === SESSION_COMPUTE_OWNERS.HOST
+    && ROUTABLE_JOB_TYPES.has(job?.job_type)
+    && !parseJson(job?.payload_json).session_delegation;
+}
+
 export async function offerSessionJob(job, {
   projectDir = process.cwd(),
   state = getLivePairingState(),
@@ -210,13 +227,13 @@ export async function offerSessionJob(job, {
   const executors = sessionJobExecutors(state, job, peers, { localCanRun });
   const target = executors[0];
   if (!target) {
-    // A host lease whose host cannot take this job right now still runs it
-    // here, on this clone's account (fail-local). Say so to the caller.
-    const leasedToHost = state?.phase === "active" && state.role !== "host"
-      && ownComputeOwner(state) === SESSION_COMPUTE_OWNERS.HOST
-      && ROUTABLE_JOB_TYPES.has(job?.job_type)
-      && !parseJson(job?.payload_json).session_delegation;
-    return { delegated: false, reason: leasedToHost ? "host_unavailable" : "local_execution" };
+    // A host lease whose host cannot take this job right now does NOT run it
+    // here: the caller holds the job until the host can (see
+    // sessionMustWaitForHost). Say so to the caller.
+    return {
+      delegated: false,
+      reason: sessionMustWaitForHost(state, job) ? "host_unavailable" : "local_execution",
+    };
   }
   const workItem = getWorkItem(job.work_item_id);
   if (!workItem) return { delegated: false, reason: "missing_work_item" };

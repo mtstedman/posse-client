@@ -43,9 +43,11 @@ export const SESSION_ROSTER_PRESENCE = Object.freeze({
 
 // How the session console shows the roster.
 export const SESSION_PANEL_MODES = Object.freeze({
-  // Pinned under the prompt in a terminal scroll region (opt-in).
+  // Pinned under the prompt in a terminal scroll region and repainted in place
+  // (the default on a POSIX terminal that can hold it).
   PINNED: "pinned",
-  // Printed into the feed as a block when membership or leases change (default).
+  // Printed into the feed as a block when membership or leases change (the
+  // fallback for pipes, dumb terminals and Windows, or when forced).
   BLOCK: "block",
   // Not shown (JSON output).
   OFF: "off",
@@ -53,7 +55,7 @@ export const SESSION_PANEL_MODES = Object.freeze({
 
 export const SESSION_PANEL_MODE_VALUES = Object.freeze(Object.values(SESSION_PANEL_MODES));
 
-// `pinned` opts in to the pinned panel, `off` silences the block.
+// `block` forces the feed block, `pinned` also pins on Windows, `off` silences it.
 export const SESSION_PANEL_ENV = "POSSE_SESSION_PANEL";
 
 export const SESSION_PANEL_LAYOUT = Object.freeze({

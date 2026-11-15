@@ -31,6 +31,7 @@ import {
   fetchNamespace,
   importPacket,
   offerSessionJob,
+  sessionMustWaitForHost,
   packetMatchesOffer,
   resultOid,
   SESSION_REF_FETCH_LIMIT,
@@ -105,29 +106,29 @@ export class SessionJobRouter {
   }
 
   /**
-   * The lease promised the host would run this job; the scheduler calls this
-   * when it dispatches the job here instead, on this clone's provider account
-   * (`offer` answered `host_unavailable`). One event per job: an offer that is
-   * only scanned, or a job that later reaches the host, records nothing, and
-   * a job already recorded (this run or an earlier one) is not recorded again.
+   * The lease promises the host runs this job, and the host cannot take it now
+   * (offline, no matching provider, or no headroom). The job waits; it never
+   * runs on this clone. One event per job, so a job held across many laps (or
+   * across restarts) records nothing more than once.
    */
-  recordLeaseFallback(job) {
+  recordAwaitingHost(job) {
     if (!job?.id || this._leaseFallbackLogged.has(job.id)) return false;
     this._leaseFallbackLogged.add(job.id);
     try {
       if (getDb().prepare("SELECT 1 FROM events WHERE job_id = ? AND event_type = ? LIMIT 1")
-        .get(job.id, EVENT_TYPES.SESSION_JOB_LEASE_FALLBACK)) return false;
+        .get(job.id, EVENT_TYPES.SESSION_JOB_AWAITING_HOST)) return false;
       logEvent({
         work_item_id: job.work_item_id,
         job_id: job.id,
-        event_type: EVENT_TYPES.SESSION_JOB_LEASE_FALLBACK,
+        event_type: EVENT_TYPES.SESSION_JOB_AWAITING_HOST,
         actor_type: EVENT_ACTORS.SCHEDULER,
-        message: `Job #${job.id} runs here: this clone's lease names the session host, `
-          + "but the host cannot take this job now (offline, no matching provider, or no headroom)",
+        message: `Job #${job.id} is waiting for the session host: this clone's lease names the host, `
+          + "so the job never runs here. It starts when the host can take it "
+          + "(the host can run `posse session lease <member-id> member` to let this clone run its own work)",
       });
       return true;
     } catch {
-      return false; // the event is advisory; dispatch continues
+      return false; // the event is advisory; the hold stands
     }
   }
 
@@ -277,7 +278,7 @@ export class SessionJobRouter {
     }
     this._unimportedClaims = unimportedClaims;
     await this._publishCompletions(state, self, jobRefs);
-    await this._recallExpiredOffers(state, jobRefs);
+    await this._recallExpiredOffers(state, jobRefs, snapshot);
     const expiredClaims = await this._expireOrphanedClaims(state, jobRefs, self, snapshot);
     if (importError) throw importError;
     return { attempted: true, imported, reconciled, expiredClaims };
@@ -349,13 +350,29 @@ export class SessionJobRouter {
     }
   }
 
-  async _recallExpiredOffers(state, refs) {
+  // An offer whose job a host lease promises to the host stands for as long as
+  // an eligible executor is in the session (or the peer snapshot is unknown):
+  // withdrawing and re-sending it every TTL only churned the session repo and
+  // flipped the job between blocked and queued while the host's scheduler was
+  // not running yet. It is withdrawn once no eligible executor remains.
+  _offerStandsForPresentHost(state, row, offer, snapshot) {
+    let job = null;
+    try { job = getDb().prepare("SELECT * FROM jobs WHERE id=?").get(row.origin_job_id); } catch { return false; }
+    if (!job || !sessionMustWaitForHost(state, job)) return false;
+    if (!snapshot || !Array.isArray(snapshot.peers)) return true;
+    const present = new Set(snapshot.peers.map((peer) => peer?.instance_id).filter(Boolean));
+    const eligible = Array.isArray(offer?.eligible_instance_ids) ? offer.eligible_instance_ids : [];
+    return eligible.some((id) => present.has(id));
+  }
+
+  async _recallExpiredOffers(state, refs, snapshot = null) {
     const refsByKey = new Map(refs.map((row) => [row.key, row]));
     const cutoff = new Date(this._nowMs() - SESSION_JOB_OFFER_TTL_MS).toISOString();
     const rows = getDb().prepare(`SELECT * FROM work_item_delegations WHERE state='offered' AND created_at < ?`).all(cutoff);
     for (const row of rows) {
       const remote = refsByKey.get(row.offer_key);
       if (!remote || remote.payload?.state !== "offered") continue;
+      if (this._offerStandsForPresentHost(state, row, remote.payload, snapshot)) continue;
       const result = await casRef({
         projectDir: this.projectDir, remote: state.remote_name, namespace: "jobs",
         key: row.offer_key, expectedOldOid: remote.oid, payload: null, casPush: this._casPush,

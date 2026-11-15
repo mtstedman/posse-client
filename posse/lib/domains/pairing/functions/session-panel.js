@@ -1,7 +1,9 @@
-// The session console's roster panel. By default it is a block printed into
-// the feed when membership or leases change (the run screen's Session mode is
-// the live view). Setting POSSE_SESSION_PANEL=pinned opts in to a few lines
-// that stay on screen under the prompt while the feed scrolls above them:
+// The session console's roster panel. On a POSIX terminal that can hold it, a
+// few lines stay on screen under the prompt while the feed scrolls above them,
+// and are repainted in place when the roster changes. Anywhere else (a pipe,
+// a dumb terminal, Windows unless asked) it is a block printed into the feed
+// when membership or leases change. POSSE_SESSION_PANEL=block forces the
+// block, =off silences it, =pinned also pins on Windows:
 //
 // Pinning uses the terminal's scroll region (DECSTBM): the region is every row
 // but the last few, so the feed and the prompt scroll inside it, lines that
@@ -60,9 +62,11 @@ export function sessionPanelMode({
 } = {}) {
   const forced = String(env?.[SESSION_PANEL_ENV] || "").trim().toLowerCase();
   if (forced === OFF) return OFF;
-  if (forced !== PINNED || !input?.isTTY || !output?.isTTY) return BLOCK;
+  if (forced === BLOCK || !input?.isTTY || !output?.isTTY) return BLOCK;
   const term = String(env?.TERM || "").toLowerCase();
   if (term === "dumb" || (!term && platform !== "win32")) return BLOCK;
+  // Pinning is exercised on POSIX terminals; Windows keeps blocks unless asked.
+  if (forced !== PINNED && platform === "win32") return BLOCK;
   return PINNED;
 }
 

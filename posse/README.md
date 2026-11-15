@@ -1477,10 +1477,12 @@ relay has lost touch with them, `joining` before their first heartbeat,
   check stays in the command and the Remote. A **member's** Session view only
   shows: it lists no actions, and the keys do nothing there.
 - In the session console (`posse session host` / `join`), `who` (or `panel`)
-  prints the roster, and it is printed again when someone joins, leaves, is
-  admitted, or has their lease changed. `POSSE_SESSION_PANEL=pinned` keeps it
-  pinned under the prompt instead (a terminal scroll region; exercised on
-  Linux terminals only), and `POSSE_SESSION_PANEL=off` silences it.
+  prints the roster. On a POSIX terminal the roster stays pinned under the
+  prompt (a terminal scroll region) and is repainted in place when someone
+  joins, leaves, is admitted, or has their lease changed. Where it cannot be
+  pinned (a pipe, a dumb or too-small terminal, Windows) it is printed into the
+  feed as a block on each such change. `POSSE_SESSION_PANEL=block` forces the
+  block, `=pinned` also pins on Windows, and `=off` silences it.
 
 #### Compute leases: serve and session are one route
 

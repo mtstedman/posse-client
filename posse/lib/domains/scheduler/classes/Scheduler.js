@@ -54,7 +54,7 @@ import { recoverHeadlessHumanTimeouts, recoverOrphanedReviewJobs } from "../func
 import { createSharedTrunkPoller } from "./SharedTrunkPoller.js";
 import { pollTrunkWithinBudget } from "../functions/trunk-poll-budget.js";
 import { createSessionEventFeed, createSessionMonitor } from "./SessionMonitor.js";
-import { sessionOriginatorConcurrencyBlocked } from "../../queue/functions/session-job-router.js";
+import { sessionMustWaitForHost, sessionOriginatorConcurrencyBlocked } from "../../queue/functions/session-job-router.js";
 import { createSessionJobRouter } from "../../queue/classes/SessionJobRouter.js";
 import { tickSessionAutoPublish } from "../../pairing/functions/session-auto-publish.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
@@ -2342,6 +2342,13 @@ export class Scheduler {
               skipJobIds.add(job.id);
               continue;
             }
+            // A host-leased member never runs routable work itself, whether the
+            // host declined it or session routing is unavailable right now.
+            if (sessionMustWaitForHost(getLivePairingState(), job)) {
+              this._sessionJobRouter?.recordAwaitingHost?.(job);
+              skipJobIds.add(job.id);
+              continue;
+            }
             if (sessionOriginatorConcurrencyBlocked(
               getLivePairingState(),
               job,
@@ -2595,9 +2602,6 @@ export class Scheduler {
           } // race, try next
 
           clearFileLaneWaitsForJob(job.id, "lane_acquired");
-          // A host-leased job the host could not take is now running here.
-          if (sessionRoute?.reason === "host_unavailable") this._sessionJobRouter?.recordLeaseFallback?.(job);
-
           // Track file scope AFTER successful lease — prevents polluting
           // the lock set when lease acquisition fails (race with another scheduler).
           if (jobNeedsWriteLocks(job)) {
