@@ -44,13 +44,14 @@ function missingRootTerminator(text) {
 }
 
 // A batch can contain the same redundant call terminator accepted for a
-// single request. Remove exactly one unmatched brace after a complete array
+// single request. Remove at most one unmatched brace per complete array
 // member, never a delimiter inside arguments. The entire repaired batch must
 // then parse strictly as tool calls; authorization remains the caller's job.
 function redundantBatchTerminator(text) {
   if (!text.startsWith("[") || !text.endsWith("]") || !REQUEST_ENVELOPE.test(text)) return null;
   const stack = [];
-  let quoted = false, escaped = false, removed = -1, previous = "";
+  const removed = new Set();
+  let quoted = false, escaped = false, previous = "";
   for (let index = 0; index < text.length; index++) {
     const char = text[index];
     if (quoted) {
@@ -65,13 +66,13 @@ function redundantBatchTerminator(text) {
     else if (char === "}" || char === "]") {
       if (stack.at(-1) === char) stack.pop();
       else if (char === "}" && stack.length === 1 && stack[0] === "]" &&
-          removed < 0 && previous === "}" && /^\s*[,\]]/.test(text.slice(index + 1))) removed = index;
+          previous === "}" && /^\s*[,\]]/.test(text.slice(index + 1))) removed.add(index);
       else return null;
     }
     if (!/\s/.test(char)) previous = char;
   }
-  if (quoted || stack.length || removed < 0) return null;
-  return exactToolCalls(text.slice(0, removed) + text.slice(removed + 1));
+  if (quoted || stack.length || !removed.size) return null;
+  return exactToolCalls(text.split("").filter((_, index) => !removed.has(index)).join(""));
 }
 
 // A tool request preceded by commentary is still an unexecuted request, not
@@ -98,7 +99,9 @@ function callsAfterCommentary(text) {
   const index = text.search(/[\[{]/);
   if (index <= 0) return null;
   const prefix = text.slice(0,index);
-  if (/[\[\]{}<>`]/.test(prefix)) return null;
+  // Inline-code punctuation in progress text does not introduce another
+  // decision. Fences and structured prefixes remain ambiguous and rejected.
+  if (/[\[\]{}<>]/.test(prefix) || /`{3}|~{3}/.test(prefix)) return null;
   const suffix = text.slice(index);
   const exact = exactToolCalls(suffix) || missingRootTerminator(suffix) || redundantBatchTerminator(suffix);
   if (exact) return exact;
