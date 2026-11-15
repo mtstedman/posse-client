@@ -162,6 +162,7 @@ export const EVENT_TYPES = Object.freeze({
   SHARED_TRUNK_PROVENANCE_BLOCKED: "shared_trunk.provenance_blocked",
   SESSION_JOB_OFFERED: "session.job_offered",
   SESSION_JOB_LEASE_FALLBACK: "session.job_lease_fallback",
+  SESSION_JOB_RECOVERED: "session.job_recovered",
   SESSION_JOB_MERGED: "session.job_merged",
   SHARED_TRUNK_PUSH_RECOVERED: "shared_trunk.push_recovered",
   SHARED_TRUNK_PUSH_REJECTED: "shared_trunk.push_rejected",

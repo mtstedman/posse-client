@@ -56,6 +56,9 @@ export class SessionJobRouter {
     this._nowMs = nowMs;
     this._nextDueAt = 0;
     this._inFlight = null;
+    // offer_key -> ms an executor was first seen missing from the peer snapshot
+    // while holding a claim; a claim is only orphaned after a continuous absence.
+    this._claimAbsentSince = new Map();
     this._leaseFallbackLogged = new Set();
     // Claims this instance holds whose import has not landed yet. They have
     // no delegation row, so they alone keep routing on until they import.
@@ -207,6 +210,7 @@ export class SessionJobRouter {
           reconciled += 1;
         } else if (["succeeded", "failed"].includes(offer.state)) {
           const nextState = offer.state === "succeeded" ? "running" : "failed";
+          if (offer.state === "succeeded" && row.state === "failed") this._recoverFalselyFailedOrigin(row);
           if (row.state !== nextState) {
             if (offer.state === "failed") updateJobStatus(row.origin_job_id, "failed", { expectedStatuses: ["blocked"] });
             getDb().prepare(`UPDATE work_item_delegations SET state=?, claim_oid=?, completed_at=?, updated_at=? WHERE offer_key=?`)
@@ -321,6 +325,25 @@ export class SessionJobRouter {
       if (resultOutcome(result) !== "lost_race" && (claimHeld || (!remote && refs.length >= SESSION_REF_FETCH_LIMIT))) continue;
       // A completion this executor already published (local write lost) keeps its outcome.
       const published = remote?.executor_instance_id === self && remote.state === "succeeded";
+      // The originator expired this claim while the job ran, but the job
+      // finished. Publish the success again under the vacated key so the
+      // originator can take back its false failure instead of replanning
+      // work that is already done. Only from a complete fetch that shows the
+      // ref gone; any other state is the originator's decision.
+      if (!published && payload.state === "succeeded" && !remote && refs.length < SESSION_REF_FETCH_LIMIT) {
+        let republished = null;
+        try {
+          republished = await casRef({
+            projectDir: this.projectDir, remote: state.remote_name, namespace: "jobs",
+            key: row.offer_key, expectedOldOid: null, payload, casPush: this._casPush,
+          });
+        } catch { /* settled as failed below, as before */ }
+        if (resultOutcome(republished) === "applied") {
+          getDb().prepare(`UPDATE work_item_delegations SET state='running', claim_oid=?, completed_at=?, updated_at=? WHERE offer_key=? AND state='imported'`)
+            .run(resultOid(republished), now(), now(), row.offer_key);
+          continue;
+        }
+      }
       getDb().prepare(`UPDATE work_item_delegations SET state=?, completed_at=?, updated_at=? WHERE offer_key=? AND state='imported'`)
         .run(published ? "running" : "failed", now(), now(), row.offer_key);
     }
@@ -351,16 +374,54 @@ export class SessionJobRouter {
     }
   }
 
+  // The executor finished a job this instance had already failed (its claim
+  // was expired while the job ran). Take the failure back only while nothing
+  // has acted on it: the origin job is still failed and no recovery replan has
+  // been created for the work item.
+  _recoverFalselyFailedOrigin(row) {
+    try {
+      const replanned = getDb().prepare(`
+        SELECT 1 FROM jobs
+        WHERE work_item_id=? AND id>? AND payload_json LIKE '%replan_after_failure_recovery%' LIMIT 1
+      `).get(row.origin_work_item_id, row.origin_job_id);
+      if (replanned) return false;
+      if (!updateJobStatus(row.origin_job_id, "succeeded", { expectedStatuses: ["failed"] })) return false;
+      refreshWorkItemStatus(row.origin_work_item_id);
+      logEvent({
+        work_item_id: row.origin_work_item_id,
+        job_id: row.origin_job_id,
+        event_type: EVENT_TYPES.SESSION_JOB_RECOVERED,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        message: `Job #${row.origin_job_id} did not fail: its executor finished it after the claim was expired; the failure was withdrawn`,
+      });
+      return true;
+    } catch {
+      return false; // recovery is best effort; the failure stands
+    }
+  }
+
   async _expireOrphanedClaims(state, refs, self, snapshot) {
+    // An unavailable or stale peer snapshot says nothing about who is present:
+    // treating it as "everyone is gone" expired live claims (a plan that runs
+    // longer than the claim TTL was failed while its executor was working).
+    if (!snapshot || !Array.isArray(snapshot.peers)) {
+      this._claimAbsentSince.clear();
+      return 0;
+    }
     const refsByKey = new Map(refs.map((row) => [row.key, row]));
-    const present = new Set([self, ...(snapshot?.peers || [])
+    const present = new Set([self, ...snapshot.peers
       .map((peer) => peer?.instance_id)
       .filter(Boolean)]);
-    const cutoffMs = this._nowMs() - SESSION_JOB_CLAIM_TTL_MS;
+    const nowMs = this._nowMs();
+    const cutoffMs = nowMs - SESSION_JOB_CLAIM_TTL_MS;
     const rows = getDb().prepare(`
       SELECT * FROM work_item_delegations
       WHERE session_id=? AND originator_instance_id=? AND state='claimed'
     `).all(state.remote_session_id, self);
+    const heldKeys = new Set(rows.map((row) => row.offer_key));
+    for (const key of this._claimAbsentSince.keys()) {
+      if (!heldKeys.has(key)) this._claimAbsentSince.delete(key);
+    }
     let expired = 0;
     for (const row of rows) {
       const remote = refsByKey.get(row.offer_key);
@@ -368,14 +429,22 @@ export class SessionJobRouter {
       const claimedAtMs = Date.parse(String(claim?.claimed_at || ""));
       if (claim?.state !== "claimed"
         || claim.executor_instance_id !== row.executor_instance_id
-        || present.has(row.executor_instance_id)
-        || !Number.isFinite(claimedAtMs)
-        || claimedAtMs > cutoffMs) continue;
+        || present.has(row.executor_instance_id)) {
+        this._claimAbsentSince.delete(row.offer_key);
+        continue;
+      }
+      // Claim age is not liveness: require the executor to stay missing for a
+      // full TTL window, observed continuously, before failing its job.
+      if (!this._claimAbsentSince.has(row.offer_key)) this._claimAbsentSince.set(row.offer_key, nowMs);
+      if (!Number.isFinite(claimedAtMs)
+        || claimedAtMs > cutoffMs
+        || nowMs - this._claimAbsentSince.get(row.offer_key) < SESSION_JOB_CLAIM_TTL_MS) continue;
       const result = await casRef({
         projectDir: this.projectDir, remote: state.remote_name, namespace: "jobs",
         key: row.offer_key, expectedOldOid: remote.oid, payload: null, casPush: this._casPush,
       });
       if (resultOutcome(result) !== "applied") continue;
+      this._claimAbsentSince.delete(row.offer_key);
       getDb().prepare(`
         UPDATE work_item_delegations
         SET state='failed', completed_at=?, updated_at=?
