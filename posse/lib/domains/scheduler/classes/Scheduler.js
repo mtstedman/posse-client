@@ -52,6 +52,7 @@ import { WORKTREE_TYPES, createHeldQueueLockIndex } from "../functions/held-lock
 import { atlasWarmConcurrencyKey, formatSchedulerLockDuration, formatStaleHeartbeatReason, schedulerLockTiming } from "../functions/lock-timing.js";
 import { recoverHeadlessHumanTimeouts, recoverOrphanedReviewJobs } from "../functions/headless-recovery.js";
 import { createSharedTrunkPoller } from "./SharedTrunkPoller.js";
+import { pollTrunkWithinBudget } from "../functions/trunk-poll-budget.js";
 import { createSessionEventFeed, createSessionMonitor } from "./SessionMonitor.js";
 import { sessionOriginatorConcurrencyBlocked } from "../../queue/functions/session-job-router.js";
 import { createSessionJobRouter } from "../../queue/classes/SessionJobRouter.js";
@@ -194,6 +195,8 @@ export class Scheduler {
     this._lockLossKillCallback = null;
     this._lockLost = false;
     this._lockLostKilledJobIds = new Set();
+    /** A shared-trunk poll the run loop stopped waiting on (see trunk-poll-budget.js). */
+    this._trunkPollBudgetState = { pending: null };
     this.onlyWorkItemIds = Array.isArray(opts.onlyWorkItemIds)
       ? opts.onlyWorkItemIds.map((id) => Number(id)).filter((id) => Number.isSafeInteger(id) && id > 0)
       : [];
@@ -1417,6 +1420,7 @@ export class Scheduler {
     this._sharedTrunkPoller = createSharedTrunkPoller({
       projectDir: this.projectDir,
     });
+    this._trunkPollBudgetState = { pending: null };
     this._sessionMonitor = createSessionMonitor({
       projectDir: this.projectDir,
     });
@@ -1630,9 +1634,16 @@ export class Scheduler {
         const trunkHints = sessionPoll?.status
           ? pairingPeerTrunkHints(sessionPoll.status.peers || [])
           : (sessionPoll?.skipped === "no_active_session" ? [] : undefined);
-        const trunkPoll = pairingDrainRequested ? null : await this._sharedTrunkPoller.poll({
+        const trunkPoll = pairingDrainRequested ? null : await pollTrunkWithinBudget(this._sharedTrunkPoller, {
           idle: activeWorkers.size === 0 && idleCount > 0,
           ...(trunkHints ? { hints: trunkHints } : {}),
+        }, {
+          state: this._trunkPollBudgetState,
+          onLate: (late) => {
+            if (late?.advanced && onTeamSubmissionChange) {
+              this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
+            }
+          },
         });
         if (!this._lockController.canDispatch()) {
           if (!this._running) break;
@@ -2289,7 +2300,14 @@ export class Scheduler {
           // runnable job can lease; the poller remains a cheap cadence no-op
           // when the last fetch is already fresh enough.
           if (candidateCount === 0) {
-            const activeTrunkPoll = await this._sharedTrunkPoller.poll({ idle: false });
+            const activeTrunkPoll = await pollTrunkWithinBudget(this._sharedTrunkPoller, { idle: false }, {
+              state: this._trunkPollBudgetState,
+              onLate: (late) => {
+                if (late?.advanced && onTeamSubmissionChange) {
+                  this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
+                }
+              },
+            });
             if (!this._lockController.canDispatch() || pairingDrainRequested) break;
             if (activeTrunkPoll?.advanced && onTeamSubmissionChange) {
               this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
