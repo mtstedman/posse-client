@@ -37,8 +37,8 @@ import { listScipFiles } from "../../atlas/functions/v2/scip/ingester.js";
 import { scopePathsForScipSourceLanguages } from "../../atlas/functions/v2/scip/source-scope.js";
 import { scipBasenameSourceLanguages } from "../../atlas/functions/v2/scip-progress.js";
 import { openViewWithMeta, viewFreshness } from "../../atlas/functions/v2/view-health.js";
-import { readAtlasMainIntakeState } from "../../atlas/functions/v2/main-intake-state.js";
-import { withAtlasMainSourceProofLock } from "../../atlas/functions/v2/main-generation.js";
+import { mainIntakeStatePath, readAtlasMainIntakeState } from "../../atlas/functions/v2/main-intake-state.js";
+import { adoptPublishedAtlasMainGeneration, withAtlasMainSourceProofLock } from "../../atlas/functions/v2/main-generation.js";
 import { runSqliteWrite } from "../../../shared/concurrency/functions/sqlite-gate.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
@@ -2113,6 +2113,55 @@ async function seedSessionBaselineFromMain(storage, baselineBranch, config) {
   }
 }
 
+/**
+ * A freshly seeded session trunk is a clone of main's exact view, but the
+ * single main-intake lifecycle record still describes main's own generation,
+ * so the boot source-walk proof rejected it (`main_intake_generation_mismatch`)
+ * and every new session rehashed the whole checkout. Re-publish the intake as
+ * complete for the session trunk through the existing legacy-adoption path,
+ * which itself re-proves a clean checkout at the target OID and a view that
+ * already publishes exactly that Git generation. Fail-closed throughout: only
+ * a *complete* record of another trunk is replaced (and restored if adoption
+ * is refused); partial, failed, running, or interrupted state is never touched,
+ * and every other boot proof (SCIP, layers, ledger head) still runs after.
+ *
+ * @param {{ storage: any, baselineBranch: string, config: any, signal?: AbortSignal | null }} args
+ */
+async function adoptSeededSessionGeneration({ storage, baselineBranch, config, signal = null }) {
+  const intake = readAtlasMainIntakeState(storage.repoRoot);
+  const intakeFile = mainIntakeStatePath(storage.repoRoot);
+  let backup = null;
+  if (intake) {
+    if (intake.status !== "complete") return { adopted: false, reason: `intake_${intake.status || "incomplete"}` };
+    if (intake.generation?.target_branch === baselineBranch) return { adopted: false, reason: "intake_current" };
+    try { backup = await fs.promises.readFile(intakeFile, "utf8"); } catch { return { adopted: false, reason: "intake_unreadable" }; }
+    await fs.promises.rm(intakeFile, { force: true });
+  }
+  let ledger = null;
+  try {
+    ledger = Ledger.openReadOnly({ dbPath: storage.ledgerDbPath });
+    await adoptPublishedAtlasMainGeneration({
+      repoRoot: storage.repoRoot,
+      targetBranch: baselineBranch,
+      viewPath: storage.mainViewDbPath,
+      ledger,
+      treeCompressionMode: config?.treeCompressionMode,
+      signal,
+    });
+    return { adopted: true };
+  } catch (err) {
+    if (backup != null && !readAtlasMainIntakeState(storage.repoRoot)) {
+      try { await fs.promises.writeFile(intakeFile, backup, "utf8"); } catch { /* the next warm rewrites it */ }
+    }
+    if (isAbortLikeAtlasError(err)) throw err;
+    return { adopted: false, reason: String(err?.code || "adopt_failed") };
+  } finally {
+    try { ledger?.close?.(); } catch { /* best effort */ }
+  }
+}
+
+export { adoptSeededSessionGeneration as __testAdoptSeededSessionGeneration };
+
 export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
   const config = opts?.config || getAtlasIntegrationConfig();
   const frozen = verifyFrozenResearchFixture({ cwd: opts?.cwd });
@@ -2157,6 +2206,16 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
         stage: "index",
         text: `ATLAS session trunk seeded from ${seed.parent_branch} at seq ${seed.parent_seq}`,
       });
+      const adoption = await adoptSeededSessionGeneration({ storage, baselineBranch, config, signal: opts?.signal || null });
+      try {
+        writeRunTelemetry("runtime", {
+          event: "atlas.session_baseline.adopt",
+          component: "atlas",
+          branch: baselineBranch,
+          adopted: adoption.adopted,
+          reason: adoption.reason || null,
+        });
+      } catch { /* startup telemetry is observational */ }
     }
   }
   const bootSourceWalk = await inspectAtlasBootSourceWalkSkip({

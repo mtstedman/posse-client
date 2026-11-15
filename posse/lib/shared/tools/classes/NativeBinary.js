@@ -479,12 +479,13 @@ export class NativeBinary {
     this._workerPullManaged = true;
     for (const route of requested) this.#claimWorkerAuthWaiters(route);
     const deliveredRoutes = [];
-    try {
+    const requestId = String(message?.requestId || `native-${this.name}-${Date.now()}`);
+    const deliver = async (routes, id) => {
       const grant = await this.#nativeAuthHandshake().issue({
         protocol: message?.protocol,
-        requestId: String(message?.requestId || `native-${this.name}-${Date.now()}`),
+        requestId: id,
         capability: "native.pulse",
-        scopes: requested,
+        scopes: routes,
       });
       const pulses = grant.artifacts.tokens.pulses || {};
       for (const route of grant.scopes) {
@@ -495,19 +496,44 @@ export class NativeBinary {
         this.#resolveWorkerAuthWaiters(route, true);
         deliveredRoutes.push(route);
       }
-    } catch (error) {
-      if (isUnsupportedNativeVersionError(error)) {
-        for (const route of requested) this._workerAuthFailures.set(route, error);
-      }
-      for (const route of requested) this.#resolveWorkerAuthWaiters(route, false);
+    };
+    const recordFailure = (routes, error) => {
       appendRunTelemetry("diagnostics", {
         kind: "native.capability_handoff_failed",
         binary: this.name,
-        routes: requested,
+        routes,
         code: String(error?.code || "POSSE_CAPABILITY_HANDOFF_FAILED"),
         remote_code: String(error?.remoteCode || "") || null,
         status: Number(error?.status) || null,
       });
+    };
+    try {
+      await deliver(requested, requestId);
+    } catch (error) {
+      if (isUnsupportedNativeVersionError(error)) {
+        for (const route of requested) this._workerAuthFailures.set(route, error);
+      }
+      recordFailure(requested, error);
+      // The handshake is all-or-nothing, so one refused route (for example
+      // `git:mutate` while scope enforcement is still unproven) would also
+      // withhold the read route. Only this recoverable code is split (any other
+      // refusal stays all-or-nothing). That deadlocks the very `git.capabilities`
+      // call that proves enforcement. Deliver each route on its own so the
+      // routes that can be minted still reach the worker; the refused route
+      // stays fail-closed.
+      if (requested.length > 1 && error?.code === "POSSE_NATIVE_SCOPE_ENFORCEMENT_REQUIRED") {
+        for (const route of requested) {
+          try {
+            await deliver([route], `${requestId}:${route}`.slice(0, 128));
+          } catch (routeError) {
+            if (isUnsupportedNativeVersionError(routeError)) this._workerAuthFailures.set(route, routeError);
+            recordFailure([route], routeError);
+          }
+        }
+      }
+      for (const route of requested) {
+        if (!deliveredRoutes.includes(route)) this.#resolveWorkerAuthWaiters(route, false);
+      }
       // The worker keeps its previous live pulse and asks again. Protected work
       // remains fail-closed if no valid grant can be handed down.
     } finally {
