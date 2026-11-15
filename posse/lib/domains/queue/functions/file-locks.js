@@ -1586,6 +1586,40 @@ function logWriteLockBlockedOnce(db, job, ownerId, message, conflict) {
   return true;
 }
 
+/** Payload key recording the same-WI jobs a worktree setup deferred behind. */
+export const SETUP_DEFERRED_BEHIND_KEY = "_setup_deferred_behind_jobs";
+/** When the deferral was recorded; the gate lapses so a stuck sibling can never starve the job. */
+export const SETUP_DEFERRED_SINCE_KEY = "_setup_deferred_since";
+const SETUP_DEFERRAL_GATE_MAX_MS = 120_000;
+
+/**
+ * True while a job whose worktree setup deferred behind same-WI siblings still
+ * has one of those siblings running on an unexpired lease. Once none is live
+ * the job is leasable at once; a wedged sibling's lease expiry releases it too.
+ */
+export function setupDeferredBehindLiveSibling(job, db = getDb()) {
+  let ids;
+  let since;
+  try {
+    const payload = JSON.parse(job?.payload_json || "{}");
+    ids = payload?.[SETUP_DEFERRED_BEHIND_KEY];
+    since = Date.parse(payload?.[SETUP_DEFERRED_SINCE_KEY] || "");
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(ids) || ids.length === 0) return false;
+  // Past the cap, fall back to a normal lease and setup attempt (which re-records).
+  if (!Number.isFinite(since) || Date.now() - since > SETUP_DEFERRAL_GATE_MAX_MS) return false;
+  const live = ids.filter((id) => Number.isSafeInteger(id) && id !== job.id).slice(0, 50);
+  if (live.length === 0) return false;
+  const row = db.prepare(
+    `SELECT 1 FROM jobs WHERE id IN (${live.map(() => "?").join(",")})
+       AND work_item_id = ? AND status IN ('leased', 'running')
+       AND (lease_expires_at IS NULL OR lease_expires_at > ?) LIMIT 1`,
+  ).get(...live, job.work_item_id, now());
+  return !!row;
+}
+
 export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec = null, leaseDurationSec = 900, opts = {}) {
   const db = getDb();
   const hasExplicitScope = scopeOrLeaseDurationSec && typeof scopeOrLeaseDurationSec === "object";
@@ -1604,6 +1638,9 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
     const fresh = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(job.id);
     if (!fresh || fresh.status !== "queued" || isBudgetPaused(fresh.work_item_id, db)) return null;
     if (String(fresh.ready_at || "") > now() || unmetHardDependencyPredecessorJobIdsForJob(fresh, db).size > 0) return null;
+    // A setup that deferred behind live same-WI work cannot make progress until
+    // that work releases the worktree; leasing it again only repeats the setup.
+    if (setupDeferredBehindLiveSibling(fresh, db)) return null;
     // Re-read the authoritative payload inside the lease transaction. A
     // scheduler's cached scope is not authority for newly expanded paths.
     needsWriteLocks = jobNeedsWriteLocks(fresh);

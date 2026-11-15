@@ -16,6 +16,7 @@ import { slugify } from "../../../../shared/format/functions/slug.js";
 import { recordWaitingLaneTelemetry } from "../../../observability/functions/waiting-lane-telemetry.js";
 import { cleanupArtifactDirsAsync, isArtifactMode, contextDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../queue/functions/common.js";
+import { SETUP_DEFERRED_BEHIND_KEY, SETUP_DEFERRED_SINCE_KEY } from "../../../queue/functions/file-locks.js";
 import { clearWaitingLanePreparedAssetProof, completeAttempt, crossWiSyncSourceRejection, getJob, getWaitingLanePreparation, getWorkItem, incrementAndCreateAttempt, logEvent, setJobError, recordWorkItemBranchReset, setWorkItemBranch, poisonWaitingLanePreparation, retireWaitingLanePreparation, rollbackPendingCrossWiSyncHandoffsForJob, storeArtifact, updateJobPayload } from "../../../queue/functions/index.js";
 
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
@@ -1259,7 +1260,24 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       return { ok: false, wtPath: null, branchName: null, sentinelPath: job._activeWorktreeSentinel || null };
     }
     if (gitErr?.code === "WORKTREE_ACTIVE_SIBLING_LOCKS") {
-      const readyAt = new Date(Date.now() + SETUP_DEFER_RETRY_DELAY_MS).toISOString();
+      // Record who we are waiting on so the scheduler leases this job again only
+      // once they release, instead of re-running setup on a fixed timer.
+      const blockers = [...new Set((gitErr.siblingLocks || [])
+        .filter((lock) => lock?.job_status === "running" || lock?.job_status === "leased")
+        .map((lock) => Number(lock.job_id))
+        .filter((id) => Number.isSafeInteger(id) && id !== job.id))].slice(0, 50);
+      let gated = false;
+      if (blockers.length > 0) {
+        try {
+          const payload = JSON.parse(job.payload_json || "{}");
+          payload[SETUP_DEFERRED_BEHIND_KEY] = blockers;
+          payload[SETUP_DEFERRED_SINCE_KEY] = new Date().toISOString();
+          job.payload_json = JSON.stringify(payload);
+          updateJobPayload(job.id, job.payload_json);
+          gated = true;
+        } catch { /* fall back to the timed retry */ }
+      }
+      const readyAt = new Date(Date.now() + (gated ? 1_000 : SETUP_DEFER_RETRY_DELAY_MS)).toISOString();
       if (shouldEmitSetupDeferNotice(job, { id: job.work_item_id }, "retry-queued")) {
         worker.emit(job.id, `${C.yellow}[system] WI#${job.work_item_id} worktree setup deferred behind same-WI work; retrying after active same-WI work releases${C.reset}`);
       }
