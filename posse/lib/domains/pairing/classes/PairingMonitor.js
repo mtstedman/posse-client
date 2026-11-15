@@ -28,6 +28,9 @@ import { formatSessionLanding, sessionPrompt } from "../functions/session-landin
 import { sessionPanelMode } from "../functions/session-panel.js";
 import { formatSessionRosterLines, sessionRosterPanelView } from "../functions/session-roster.js";
 import { readSessionRoster } from "../functions/session-roster-source.js";
+import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
+import { newPendingSessionJobLines } from "../functions/pending-session-jobs.js";
+import { createSessionJobRouter } from "../../queue/classes/SessionJobRouter.js";
 import { sessionSyncFeedLabel } from "../functions/sync-state.js";
 import {
   clearPairingPeerSnapshot,
@@ -378,6 +381,25 @@ export class PairingMonitor {
         const color = index === 0 ? C.bold : index === 1 ? C.dim : "";
         log(`  ${color}${line}${color ? C.reset : ""}`);
       });
+    };
+    // While this console (not posse go) owns the session, it takes members'
+    // offered jobs into the host's queue and says so once, so a member's job
+    // is not left blocked and re-sent for a host that never saw it.
+    const sessionJobRouter = createSessionJobRouter({ projectDir });
+    const announcedPendingJobs = new Set();
+    const takeOffers = async (state) => {
+      if (role !== "host" || observing || stopping) return;
+      try {
+        await sessionJobRouter.poll();
+        const lines = newPendingSessionJobLines({
+          // The identity the router imported under, which is not always the
+          // session record's (a phone enrollment can replace the bridge identity).
+          instanceId: ensureBridgeInstanceId(projectDir),
+          announced: announcedPendingJobs,
+          peers: readPairingPeerSnapshot()?.peers || [],
+        });
+        for (const line of lines) log(`  ${C.yellow}[session]${C.reset} ${line}`);
+      } catch { /* taking offers is best effort; the next lap retries */ }
     };
     // Run a posse command (`add`, `go`) in this terminal, then come back here.
     const runForeground = async (args) => {
@@ -764,6 +786,7 @@ export class PairingMonitor {
         }
         reportSyncTransition(state);
         updatePanel();
+        if (status.status === "active") await takeOffers(state);
         if (status.status !== "active") return { reason: status.status, status };
         await waitForNextLap(heartbeatMs);
       }
