@@ -15,6 +15,8 @@ export function managedNodeVerifiersReady(nodeRoot, sourceRoot = nodeRoot) {
     const manifest = JSON.parse(fs.readFileSync(path.join(sourceRoot, "package.json"), "utf8"));
     const required = Object.entries(MANAGED_NODE_VERIFIER_ENTRIES).filter(([name]) => manifest.dependencies?.[name]);
     if (!required.length) return true;
+    if (manifest.dependencies?.pnpm && !["pnpm-runner.cjs", "bin/pnpm", "bin/pnpm.cmd"]
+      .every(file => fs.statSync(path.join(nodeRoot, file)).isFile())) return false;
     const lock = JSON.parse(fs.readFileSync(path.join(sourceRoot, "package-lock.json"), "utf8"));
     return required.every(([name, entry]) => {
       const root = path.join(nodeRoot, "node_modules", name);

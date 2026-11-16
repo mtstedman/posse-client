@@ -1,7 +1,9 @@
 // Managed baseline tooling lives with the shared Node environment, never in
-// the repository under assessment. Project-installed tools take precedence.
+// the repository under assessment. Project compilers/linters take precedence;
+// pnpm is supplied by Posse so running tests does not need a host installation.
 export const MANAGED_TYPESCRIPT_PACKAGES = Object.freeze(["typescript", "typescript6"]);
 export const MANAGED_NODE_VERIFIER_ENTRIES = Object.freeze({
+  pnpm: "bin/pnpm.cjs",
   typescript: "bin/tsc",
   typescript6: "bin/tsc",
   eslint: "bin/eslint.js",

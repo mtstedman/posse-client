@@ -1,3 +1,5 @@
+import { nodeToolSpawnSpec } from "../../environments/functions/node-package-manager-runtime.js";
+import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
 // Lock-backed dependency readiness for repository verification. These
 // adapters are intentionally narrower than the interactive dependency doctor:
 // they never invent dependencies, update a lockfile, or run lifecycle scripts.
@@ -549,6 +551,7 @@ export function runVerificationPrerequisiteCommand(command, args, {
   windowsVerbatimArguments = false,
   env = {},
   inheritEnv = true,
+  posseRoot = undefined,
   input = null,
   signal = null,
   timeoutMs = 10 * 60 * 1000,
@@ -595,13 +598,18 @@ export function runVerificationPrerequisiteCommand(command, args, {
     };
     const onAbort = () => terminate({ ok: false, status: "cancelled", code: null, reason: "cancelled" });
     try {
-      child = spawn(command, args, {
+      // Explicit isolation (for example database provisioning) must not gain
+      // toolchain paths or package-manager settings from the host installation.
+      const invocation = inheritEnv
+        ? nodeToolSpawnSpec(command, args, { env: { ...process.env, ...env }, posseRoot })
+        : { ...commandSpawnSpec(command, args, { env }), env: { ...env } };
+      child = spawn(invocation.command, invocation.args, {
         cwd,
         detached: process.platform !== "win32",
-        env: inheritEnv ? { ...process.env, ...env } : { ...env },
+        env: invocation.env,
         shell: false,
         windowsHide: true,
-        windowsVerbatimArguments,
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments ?? windowsVerbatimArguments,
         stdio: [input == null ? "ignore" : "pipe", "pipe", "pipe"],
       });
     } catch (error) {
@@ -819,6 +827,7 @@ export async function repairVerificationPrerequisites({
       const run = await runCommand(spec.command, spec.args, {
         cwd: dependencyRoot,
         env: spec.env,
+        posseRoot,
         signal,
         timeoutMs,
       });

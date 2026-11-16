@@ -13,6 +13,21 @@ function statusLabel(receipt) {
 // its header lines are never cut by the per-check budget, only the final cap.
 const MIN_CHECK_OUTPUT_CHARS = 120;
 
+// Build warnings often precede the actual exception. Keep the diagnostic
+// block first, then both ends when it does not fit; never spend the entire
+// repair budget on a successful build's warning preamble.
+function failureOutputExcerpt(value, budget) {
+  const text = String(value).replace(/\x1b\[[0-9;]*m/g, "");
+  if (text.length <= budget) return text;
+  const diagnostic = /^(?:\w*Error(?:\s*\[[^\]]+\])?:|(?:locator|page|expect)\.[^\n]*:|[^\n]*\berror TS\d+:|FAIL\b|[✖✗])/m.exec(text);
+  const relevant = diagnostic ? text.slice(diagnostic.index) : text;
+  if (relevant.length <= budget) return relevant;
+  const marker = "\n… output omitted …\n";
+  const head = Math.max(0, Math.floor((budget - marker.length) * 0.6));
+  const tail = Math.max(0, budget - marker.length - head);
+  return `${relevant.slice(0, head)}${marker}${tail ? relevant.slice(-tail) : ""}`.slice(0, budget);
+}
+
 export function compactTestFailureOutput(receipt) {
   if (!receipt) return "";
   const checks = [...(receipt.check_runs || []), ...(receipt.file_results || [])];
@@ -31,7 +46,7 @@ export function compactTestFailureOutput(receipt) {
     const output = [];
     for (const value of [check.stderr, check.stdout]) {
       if (!value || remaining <= 0) continue;
-      const text = String(value).slice(0, remaining);
+      const text = failureOutputExcerpt(value, remaining);
       remaining -= text.length + 1;
       output.push(text);
     }

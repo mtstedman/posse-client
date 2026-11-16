@@ -5,7 +5,7 @@ import { NodeTestEvidence } from "../../../../shared/tools/classes/NodeTestEvide
 import { exactDeclaredTestInvocation } from "./frozen-test-plan.js";
 import { spawn, spawnSync } from "child_process";
 import path from "node:path";
-import { buildWindowsSpawn } from "../../../providers/functions/shared/windows-spawn.js";
+import { nodeToolEnvironment, nodeToolSpawnSpec } from "../../../environments/functions/node-package-manager-runtime.js";
 import { parseCommandArguments } from "../../../../shared/scope/functions/test-command.js";
 import { TEST_SUBPROCESS_ENV_KEYS, VERIFICATION_PULSE_CAPABILITY_ENV } from "../../../../catalog/process.js";
 import { parentSecretValues, redactExactValues } from "../../../../shared/platform/functions/subprocess-output.js";
@@ -65,7 +65,7 @@ export function killProcessTree(child, {
 }
 
 /** @param {string} command
- * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string, filesToCreate?: string[]}} options
+ * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string, filesToCreate?: string[], posseRoot?: string}} options
  */
 export async function runCommand(command, options = {}) {
   const release = await acquireTestWorktreeSlot(options?.cwd || process.cwd(), {
@@ -80,7 +80,7 @@ export async function runCommand(command, options = {}) {
 }
 
 /** @param {string} command
- * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string, filesToCreate?: string[]}} options
+ * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string, filesToCreate?: string[], posseRoot?: string}} options
  */
 async function runCommandInSlot(command, {
   cwd,
@@ -90,6 +90,7 @@ async function runCommandInSlot(command, {
   signal: abortSignal = null,
   baselineCommit = "HEAD",
   filesToCreate = [],
+  posseRoot = undefined,
 } = {}) {
   abortSignal?.throwIfAborted();
   const validation = !trustedShell && filesToCreate.length && cwd
@@ -99,7 +100,7 @@ async function runCommandInSlot(command, {
       duration_ms: 0, stdout: "", stderr: "The candidate did not create a required test script.",
       stdout_truncated: false, stderr_truncated: false, timeout_kind: null, reason: TEST_REQUIRED_FILE_MISSING_REASON };
   }
-  const unavailable = !trustedShell && testCommandCapability(command, cwd, { baselineCommit, filesToCreate });
+  const unavailable = !trustedShell && testCommandCapability(command, cwd, { baselineCommit, filesToCreate, posseRoot });
   if (unavailable === TEST_RUNNER_REMOVED_REASON) {
     return { status: "failed", ok: false, code: 1, signal: null, timed_out: false,
       duration_ms: 0, stdout: "", stderr: "The candidate removed a test script present at its verification baseline.",
@@ -155,7 +156,7 @@ async function runCommandInSlot(command, {
   } catch (error) { await pulseBroker?.close(); throw error; }
   const result = await new Promise((resolve) => {
     let child;
-    const env = { ...filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS }), ...evidence?.env() };
+    const env = nodeToolEnvironment({ ...filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS }), ...evidence?.env() }, { posseRoot });
     if (pulseBroker) env[VERIFICATION_PULSE_CAPABILITY_ENV] = JSON.stringify(pulseBroker.capability());
     const secrets = [
       ...parentSecretValues(process.env),
@@ -183,7 +184,7 @@ async function runCommandInSlot(command, {
         });
       } else {
         const [executable, ...args] = parseCommandArguments(command);
-        const invocation = buildWindowsSpawn(executable, evidence ? evidence.args(args) : args);
+        const invocation = nodeToolSpawnSpec(executable, evidence ? evidence.args(args) : args, { env, posseRoot });
         child = spawn(invocation.command, invocation.args, {
           cwd,
           detached: process.platform !== "win32",

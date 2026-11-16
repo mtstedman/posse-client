@@ -1,3 +1,4 @@
+import { nodeToolEnvironment } from "../../environments/functions/node-package-manager-runtime.js";
 // Package managers the approved setup tools can run. Each entry knows its
 // manifest, lockfile, ignored install directories and how to build argv, so
 // the installers stay manager-agnostic: Posse builds every command itself
@@ -13,6 +14,7 @@ import { findCommandOnPath } from "../../../shared/platform/functions/command-la
 import { readManifest } from "./environment-paths.js";
 import { inspectPipRequirements, PIP_REQUIREMENT_FILES } from "./pip-requirements.js";
 import { composerLockRepairNames, materializeComposerVendor } from "./composer-install.js";
+import { pnpmWorkspace } from "./pnpm-workspace.js";
 
 const has = (dir, name) => fs.existsSync(path.join(dir, name));
 const readText = (file) => { try { return fs.readFileSync(file, "utf8"); } catch { return ""; } };
@@ -34,10 +36,12 @@ function ancestors(dir) {
 
 function assertNodePackage(name, dir, manifest) {
   // A workspace member's install mutates the workspace root's lockfile.
-  if (manifest.workspaces || has(dir, "pnpm-workspace.yaml")) throw new Error("Workspace installs need a workspace-wide setup plan; this installer supports standalone packages.");
+  if ((manifest.workspaces || has(dir, "pnpm-workspace.yaml")) && name !== "pnpm") throw new Error("Use the declared workspace package manager; workspace setup currently supports pnpm.");
+  if (name === "pnpm" && manifest.workspaces && !has(dir, "pnpm-workspace.yaml")) throw new Error("pnpm workspace setup requires pnpm-workspace.yaml.");
+  if (name === "pnpm") pnpmWorkspace(dir);
   for (const parent of ancestors(dir)) {
     const file = path.join(parent, "package.json");
-    if (has(parent, "pnpm-workspace.yaml") || (fs.existsSync(file) && readManifest(file).workspaces)) throw new Error("Nested workspace installs are not supported.");
+    if (has(parent, "pnpm-workspace.yaml") || (fs.existsSync(file) && readManifest(file).workspaces)) throw new Error("Run dependency installation at the workspace root so every member is included in setup.");
   }
   const declared = String(manifest.packageManager || "").trim().toLowerCase().match(/^(npm|pnpm|yarn|bun)(?:@|$)/u)?.[1];
   if (declared && declared !== name) throw new Error(`package.json declares packageManager ${manifest.packageManager}; use manager ${declared}.`);
@@ -109,8 +113,17 @@ const REGISTRY = {
   }),
   pnpm: node("pnpm", {
     lockfile: () => "pnpm-lock.yaml",
-    install: ({ dir, scripts }) => [{ argv: ["install", "--dir", dir, "--no-frozen-lockfile", "--production=false", "--config.confirmModulesPurge=false", ...(scripts ? [] : ["--ignore-scripts"])] }],
-    add: ({ dir, scripts, dev }, specs) => [{ argv: ["add", "--dir", dir, ...(dev ? ["--save-dev"] : []), "--config.confirmModulesPurge=false", ...(scripts ? [] : ["--ignore-scripts"]), ...specs] }],
+    inputs: (dir) => [...NODE_LOCKS.map(([, lock]) => lock), ...(pnpmWorkspace(dir)?.inputs || [])],
+    shownInputs: (dir) => pnpmWorkspace(dir)?.manifests || [],
+    dependencyDirs: (dir) => pnpmWorkspace(dir)?.dependencyDirs || ["node_modules"],
+    install: ({ dir, scripts }) => [{ argv: ["install", "--dir", dir,
+      has(dir, "pnpm-lock.yaml") ? "--frozen-lockfile" : "--no-frozen-lockfile",
+      "--production=false", "--config.confirmModulesPurge=false", "--config.shared-workspace-lockfile=true",
+      ...(scripts ? [] : ["--ignore-scripts", "--ignore-pnpmfile"])] }],
+    add: ({ dir, scripts, dev }, specs) => [{ argv: ["add", "--dir", dir,
+      ...(pnpmWorkspace(dir) ? ["--workspace-root"] : []), ...(dev ? ["--save-dev"] : []),
+      "--config.confirmModulesPurge=false", "--config.shared-workspace-lockfile=true",
+      ...(scripts ? [] : ["--ignore-scripts", "--ignore-pnpmfile"]), ...specs] }],
   }),
   yarn: node("yarn", {
     lockfile: () => "yarn.lock",
@@ -267,7 +280,7 @@ const REGISTRY = {
 export const PACKAGE_MANAGERS = Object.freeze(Object.fromEntries(ENVIRONMENT_PACKAGE_MANAGERS.map((name) => [name, Object.freeze({
   configFiles: [], writesManifest: false, inputs: () => [], shownInputs: () => [], env: () => ({}), validate: () => {}, verify: () => null,
   validateInstall: () => {}, prepareInstall: () => {},
-  command: () => findCommandOnPath(name), ...REGISTRY[name],
+  command: () => findCommandOnPath(name, { env: nodeToolEnvironment() }), ...REGISTRY[name],
 })])));
 
 // The managers a package directory's manifests and lockfiles call for.
@@ -319,6 +332,12 @@ export function packageCommands(manager, entries, { dir, manifest, command, scri
 // Additional dependency declarations the installer reads, keyed by path.
 export function shownPackageInputs(manager, dir, relative) {
   return Object.fromEntries(manager.shownInputs(dir).map((name) => [relative(name), fs.readFileSync(path.join(dir, name), "utf8")]));
+}
+
+export function packageConfigFiles(manager, dir) {
+  return [...manager.configFiles, ...(manager.name === "pnpm"
+    ? (pnpmWorkspace(dir)?.inputs || []).filter((file) => /(?:^|\/)\.npmrc$|\.pnpmfile\.[cm]js$/.test(file))
+    : [])];
 }
 
 export function readPackageManifest(manager, file) {

@@ -1,3 +1,4 @@
+import { nodeToolSpawnSpec } from "../../environments/functions/node-package-manager-runtime.js";
 import path from "node:path";
 import { normPath } from "../../../shared/scope/functions/path.js";
 import fs from "node:fs";
@@ -60,7 +61,7 @@ export function testFileRemovedSinceBaseline(file, cwd, baselineCommit) {
   catch { return false; }
 }
 
-export function testCommandCapability(command, cwd, { filesToCreate = [], findCommand = findCommandOnPath, baselineCommit = "HEAD", posseRoot } = {}) {
+export function testCommandCapability(command, cwd, { filesToCreate = [], findCommand = findCommandOnPath, baselineCommit = "HEAD", posseRoot = undefined } = {}) {
   if (!cwd || !command) return null;
   const validation = validatePlannerTestCommandForRepository(command, cwd, { filesToCreate, posseRoot });
   if (!validation.ok) {
@@ -79,7 +80,8 @@ export function testCommandCapability(command, cwd, { filesToCreate = [], findCo
   const [executable] = parseCommandArguments(validation.execution_command || command);
   const root = path.resolve(cwd, validation.cwd_relative || ".");
   const candidate = /[/\\]/.test(executable) ? path.resolve(root, executable) : executable;
-  return findCommand(candidate) ? null : "test_executable_unavailable";
+  const invocation = nodeToolSpawnSpec(candidate, [], { posseRoot });
+  return findCommand(invocation.command, { env: invocation.env }) ? null : "test_executable_unavailable";
 }
 
 export function testFileCapability(file, cwd, capability, { findCommand = findCommandOnPath, baselineCommit = "HEAD", posseRoot = undefined } = {}) {

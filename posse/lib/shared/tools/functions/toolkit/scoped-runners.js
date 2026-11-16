@@ -9,11 +9,12 @@ import { inspectManagedPythonTestToolchain } from "../../../../domains/environme
 import { gitCurrentHash } from "../../../../domains/git/functions/utils.js";
 import { groupVerificationFiles, packageManagerRun, verificationReadinessManifest } from "./verification-readiness.js";
 import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../../format/functions/display-paths.js";
-import { commandSpawnSpec } from "../../../platform/functions/command-launch.js";
+import { nodeToolSpawnSpec } from "../../../../domains/environments/functions/node-package-manager-runtime.js";
 import { SpawnedProcessTerminator } from "../../../platform/classes/SpawnedProcessTerminator.js";
 import { typecheckCommand, cleanTypecheckOutput } from "./typecheck-command.js";
 import { fileURLToPath } from "node:url";
 import { managedBaselineLintInvocation } from "../../../../domains/environments/functions/node-verification-runtime.js";
+import { resolvePackageManagerContext } from "../../../../domains/verification/functions/planner-test-command.js";
 
 
 
@@ -159,10 +160,10 @@ function runProcess(command, args, cwd, { timeoutMs = 120000, input = undefined,
   const startedAt = Date.now();
   const env = { ...process.env, ...extraEnv };
   delete env.NODE_TEST_CONTEXT;
-  const spawnSpec = commandSpawnSpec(command, args, { env });
+  const spawnSpec = nodeToolSpawnSpec(command, args, { env });
   const result = spawnSync(spawnSpec.command, spawnSpec.args, {
     cwd,
-    env,
+    env: spawnSpec.env,
     encoding: "utf8",
     windowsHide: true,
     shell: false,
@@ -354,7 +355,16 @@ function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
   const eslint = eslintBin(cwd);
   const lintScript = packageScript(cwd, "lint");
   const projectConfig = hasProjectLintConfig(cwd);
-  const plainEslint = !lintScript || /^eslint(?:\s+\.)?$/u.test(lintScript.trim());
+  const delegated = lintScript && !projectConfig ? resolvePackageManagerContext(lintScript, cwd) : null;
+  const delegatedRoot = delegated?.ok ? path.dirname(delegated.importer) : null;
+  const delegatesElsewhere = delegatedRoot && delegatedRoot !== path.resolve(cwd)
+    && targets.every((file) => {
+      const relative = path.relative(delegatedRoot, path.resolve(cwd, file));
+      return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+    });
+  // A root script forwarding to one workspace does not own root-level files.
+  // Check those with managed baseline rules, not that workspace's whole tree.
+  const plainEslint = !lintScript || delegatesElsewhere || /^eslint(?:\s+\.)?$/u.test(lintScript.trim());
   const managed = plainEslint && (!projectConfig || !eslint)
     ? managedBaselineLintInvocation({ projectConfigRoot: projectConfig ? cwd : null }) : null;
   const packageManager = (() => {
@@ -1002,7 +1012,7 @@ export function runProcessAsync(command, args, cwd, { timeoutMs = 120000, signal
   const startedAt = Date.now();
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
-  const spawnSpec = commandSpawnSpec(command, args, { env });
+  const spawnSpec = nodeToolSpawnSpec(command, args, { env });
   const detached = process.platform !== "win32";
   return new Promise((resolve) => {
     let stdout = "";
@@ -1045,7 +1055,7 @@ export function runProcessAsync(command, args, cwd, { timeoutMs = 120000, signal
     try {
       child = spawn(spawnSpec.command, spawnSpec.args, {
         cwd,
-        env,
+        env: spawnSpec.env,
         detached,
         windowsHide: true,
         shell: false,

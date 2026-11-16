@@ -161,8 +161,8 @@ export function buildPlannerAssessmentReplanContext(payload, { readRoot = "", di
     payload.test_command ? promptLiteral("EXISTING VERIFICATION COMMAND", payload.test_command) : "",
     Array.isArray(payload.baseline_test_debt) && payload.baseline_test_debt.length > 0
       ? [
-        promptLiteral("TEST COMMANDS ALREADY FAILING BEFORE ANY CHANGE (baseline debt)", JSON.stringify(payload.baseline_test_debt)),
-        "Each of these failed at its frozen baseline, before any job changed code, so it cannot verify revised tasks as written. Declare a command that passes on the current branch, or make fixing the pre-existing failure an explicit task.",
+        promptLiteral("BASELINE VERIFICATION DEBT (inspect failed_checks; planner_check_status may be passed)", JSON.stringify(payload.baseline_test_debt)),
+        "These verification plans failed before any job changed code. When planner_check_status is passed, preserve that passing command and use failed_checks to identify the failing required checks. Otherwise the declared command was already failing. Resolve the pre-existing failures explicitly; a failed overall plan is not passing verification.",
       ].join("\n")
       : "",
     promptLiteral("RETAINED WORK", JSON.stringify(payload.retained_work || [])),

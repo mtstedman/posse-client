@@ -11,8 +11,8 @@ import { recordObservation } from "../../observability/functions/observations.js
 import {
   declaredScopeFiles,
   parseTypecheckDiagnostics,
-  runScopedChecks,
 } from "../../../shared/tools/functions/toolkit/scoped-runners.js";
+import { scopedCheckRunner } from "../../verification/classes/ScopedCheckRunner.js";
 import { verificationOutcome } from "../../worker/functions/helpers/verification-outcome.js";
 import { repairVerificationPrerequisites } from "../../verification/functions/prerequisite-adapters.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
@@ -392,7 +392,7 @@ export async function ensureAssessmentScopedCheckEvidence({
   cwd,
   assessmentContext = null,
   cleanupWorktree = null,
-  runScopedChecksImpl = runScopedChecks,
+  runScopedChecksImpl = (options) => scopedCheckRunner.run(options),
   repairPrerequisitesImpl = repairVerificationPrerequisites,
   readSettingImpl = getSetting,
   siblingScopeOwners = null,
@@ -465,7 +465,7 @@ export async function ensureAssessmentScopedCheckEvidence({
           scope: { files },
         },
       });
-      result = runOnce();
+      result = await runOnce();
       // A fresh worktree carries no installed dependencies, so the verifier
       // binaries can be missing even though the code is correct. Repair the
       // worktree once through the same adapter the frozen test path uses,
@@ -508,7 +508,7 @@ export async function ensureAssessmentScopedCheckEvidence({
           summary: `Scoped-check dependency repair ${dependencyRepair.ok ? "succeeded" : `did not complete (${dependencyRepair.status || "unknown"})`}`,
           detail: dependencyRepair,
         });
-        if (dependencyRepair.ok) result = runOnce();
+        if (dependencyRepair.ok) result = await runOnce();
         else if (dependencyRepair.reason === VERIFICATION_DEPENDENCY_LOCK_INVALID) {
           result = {
             ...result,

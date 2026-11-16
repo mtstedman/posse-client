@@ -1,3 +1,4 @@
+import { nodeToolEnvironment } from "../../../../domains/environments/functions/node-package-manager-runtime.js";
 import { JEST_RUNNER_ERROR_REASON, SKIP_DIRS, TEST_HELPER_DIRS, MAX_OUTPUT_CHARS, MAX_SOURCE_SNIFF_BYTES, DEFAULT_TIMEOUT_MS, PHPUNIT_CONFIG_NAMES, OUTCOME_STATUS } from "../../../../catalog/unit-test-runner.js";
 import { browserLaunchFailuresExplainTestOutput, missingDeclaredNodeDependency, missingJestTransformDependency } from "./node-test-failure.js";
 import { javascriptTestRunner } from "./javascript-test-runner.js";
@@ -550,8 +551,8 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
         shell: false,
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS }),
-          ...evidence?.env() },
+        env: nodeToolEnvironment({ ...filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS }),
+          ...evidence?.env() }, { posseRoot }),
       });
     } catch (error) {
       evidence?.close();

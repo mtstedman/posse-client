@@ -29,6 +29,10 @@ export function baselineTestDebtFromReceipt(receipt) {
   if (!receipt || receipt.phase !== "baseline" || receipt.source !== "planner") return null;
   const outcome = receipt.verification_outcome || verificationOutcome(receipt);
   if (outcome?.type !== "baseline_debt") return null;
+  const checks = Array.isArray(receipt.check_runs) ? receipt.check_runs : [];
+  const plannerPassed = checks.some(check => check.command === receipt.command && check.status === "passed");
+  const failedChecks = checks.filter(check => check.required !== false && check.status !== "passed")
+    .map(check => ({ check_id: check.check_id, command: check.command, status: check.status, exit_code: check.exit_code ?? null }));
   return {
     schema_version: 1,
     command: receipt.command || null,
@@ -38,6 +42,7 @@ export function baselineTestDebtFromReceipt(receipt) {
     test_counts: receipt.test_counts || null,
     failure_fingerprint: receipt.failure_fingerprint || null,
     detected_at: receipt.created_at || new Date().toISOString(),
+    ...(plannerPassed && failedChecks.length ? { planner_check_status: "passed", failed_checks: failedChecks } : {}),
   };
 }
 
@@ -64,7 +69,9 @@ export function recordBaselineTestDebt(worker, job, receipt, {
       sibling?.id !== job.id
       && debtKey(parseJobPayload(sibling)?.[BASELINE_TEST_DEBT_PAYLOAD_KEY] || {}) === debtKey(debt)
     ));
-    const message = `Planner test command \`${debt.command}\` already fails before any change (exit ${debt.exit_code ?? "unknown"}); it cannot verify this work item`;
+    const message = debt.planner_check_status === "passed"
+      ? `Baseline verification failed in required checks: ${debt.failed_checks.map(check => check.check_id || check.command).join(", ")}. Planner test command \`${debt.command}\` passed; the overall plan is not passing evidence`
+      : `Planner test command \`${debt.command}\` already fails before any change (exit ${debt.exit_code ?? "unknown"}); it cannot verify this work item`;
     if (!alreadyWarned) {
       emitEvent({
         work_item_id: job.work_item_id,
@@ -92,6 +99,15 @@ function countsText(debt) {
 export function renderBaselineTestDebt(payload = {}) {
   const debt = payload?.[BASELINE_TEST_DEBT_PAYLOAD_KEY];
   if (!debt?.command) return null;
+  if (debt.planner_check_status === "passed" && debt.failed_checks?.length) {
+    return [
+      "REQUIRED VERIFICATION CHECKS ALREADY FAILING (baseline debt):",
+      `  Planner test command \`${debt.command}\` passed before this job changed anything.`,
+      ...debt.failed_checks.map(check => `  Required check ${check.check_id || check.command}: \`${check.command}\` was ${check.status} (exit ${check.exit_code ?? "unknown"}).`),
+      "  The overall plan is not passing evidence. Preserve the passing planner result and assess the required failures separately; do not attribute them to that command.",
+      "",
+    ].join("\n");
+  }
   return [
     "PLANNER TEST COMMAND ALREADY FAILING (baseline debt):",
     `  \`${debt.command}\` failed at ${String(debt.commit_hash || "the pre-change commit").slice(0, 12)} before this job changed anything (exit ${debt.exit_code ?? "unknown"}${countsText(debt)}).`,
@@ -113,6 +129,7 @@ export function collectBaselineTestDebt(jobs = []) {
       commit_hash: debt.commit_hash || null,
       exit_code: debt.exit_code ?? null,
       job_id: debt.job_id ?? job?.id ?? null,
+      ...(debt.planner_check_status === "passed" ? { planner_check_status: debt.planner_check_status, failed_checks: debt.failed_checks } : {}),
     });
     if (byKey.size >= MAX_REPLAN_DEBTS) break;
   }

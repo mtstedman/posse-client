@@ -1,7 +1,8 @@
+import { isMainThread } from "node:worker_threads";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getAccountRepoSetting } from "../../settings/functions/account-settings.js";
 import { SETTINGS_DEFAULTS } from "../../settings/functions/catalog.js";
-import { resolveRepoSettingPath } from "../../settings/functions/repository-settings.js";
+import { getSetting, resolveRepoSettingPath } from "../../settings/functions/repository-settings.js";
 import { normalizeProjectDir } from "../../runtime/functions/paths.js";
 import { REVIEWED_HANDOFF_SETTING } from "../../../catalog/reviewed-handoffs.js";
 
@@ -10,6 +11,11 @@ import { REVIEWED_HANDOFF_SETTING } from "../../../catalog/reviewed-handoffs.js"
 // invalidated value on every decision, including the lease transaction.
 export class ReviewedHandoffSettings {
   enabled() {
+    // Boot recovery reconciles file lanes in a worker. Its parent already
+    // resolved this repository's settings; account storage stays parent-owned.
+    if (!isMainThread) {
+      return (getSetting(REVIEWED_HANDOFF_SETTING) ?? SETTINGS_DEFAULTS[REVIEWED_HANDOFF_SETTING]) === "on";
+    }
     const db = getDb();
     const projectDir = process.env.POSSE_PROJECT_DIR || normalizeProjectDir();
     if (this.db !== db || this.projectDir !== projectDir) {

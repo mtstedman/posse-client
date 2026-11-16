@@ -3,7 +3,7 @@ import { ROOT_MARKERS, PACKAGE_DISCOVERY_SKIP_DIRS, MAX_DISCOVERED_PACKAGE_ROOTS
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { commandSpawnSpec } from "../../../platform/functions/command-launch.js";
+import { nodeToolSpawnSpec } from "../../../../domains/environments/functions/node-package-manager-runtime.js";
 
 
 
@@ -155,13 +155,14 @@ export function executableReady(command, root, {
   platform = process.platform,
   env = process.env,
   spawnSyncImpl = spawnSync,
+  posseRoot = undefined,
 } = {}) {
   if (!command) return false;
-  const spawnSpec = commandSpawnSpec(command, ["--version"], { platform, env, spawnSyncImpl });
+  const spawnSpec = nodeToolSpawnSpec(command, ["--version"], { platform, env, spawnSyncImpl, posseRoot });
   try {
     const result = spawnSyncImpl(spawnSpec.command, spawnSpec.args, {
       cwd: root,
-      env,
+      env: spawnSpec.env,
       stdio: "ignore",
       shell: false,
       timeout: 10_000,

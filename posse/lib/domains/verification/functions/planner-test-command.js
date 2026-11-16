@@ -148,6 +148,7 @@ export function validatePlannerTestCommand(command) {
   const safeTaskPattern = /^(?:test|tests|check|typecheck|lint|verify|spec)(?::|$)/;
 
   let ok = false;
+  let repositoryRunnerRequired = false;
   if (vitestArgs) {
     if (args.some((arg) => arg === "-w")) {
       return { ok: false, reason: "test_command_contains_interactive_flag" };
@@ -180,9 +181,13 @@ export function validatePlannerTestCommand(command) {
     }
     ok = runner !== "rake" || runnerArgs.some((arg) => /^(?:test|tests|check|spec)$/.test(arg));
   } else if (["node", "node.exe"].includes(executable)) {
+    // Selectors belong to a repository runner, not to Node. Admit their shape
+    // only provisionally; repository validation must match the complete argv
+    // to a committed unit_test_runners declaration before execution.
+    repositoryRunnerRequired = args.length > 1 && isSafeDirectNodeTestScriptArgs(args.slice(0, 1));
     ok = hasArg("--test")
       || args.some((arg) => arg.startsWith("--test="))
-      || isSafeDirectNodeTestScriptArgs(args);
+      || isSafeDirectNodeTestScriptArgs(args) || repositoryRunnerRequired;
   } else if (/^(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?$/.test(executable)) {
     const moduleIndex = args.indexOf("-m");
     ok = moduleIndex >= 0 && ["pytest", "unittest"].includes(args[moduleIndex + 1]);
@@ -243,6 +248,7 @@ export function validatePlannerTestCommand(command) {
         reason: null,
         execution_command: executableCommand,
         cwd_relative: invocation.cwd_relative,
+        ...(repositoryRunnerRequired ? { repository_runner_required: true } : {}),
         ...(directShellScript ? {
           direct_script_relative: directShellScript,
           direct_script_interpreter: directShellInterpreter,

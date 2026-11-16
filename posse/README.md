@@ -1050,6 +1050,14 @@ bootstrap and test path; application dependencies still belong to the repository
 Repositories that require another PHPUnit version can install it locally. Test
 execution itself never downloads PHPUnit or changes Composer files.
 
+Node setup (`posse doctor`) also installs Posse's pinned pnpm in the managed
+Node toolchain. Declared `pnpm test` / `pnpm run` commands, prerequisite setup,
+and test scripts that invoke pnpm use this copy without requiring a global
+pnpm or Corepack install. Arguments, workspace filters, and failure exit codes
+are preserved. Test execution does not download a project-declared pnpm version;
+strict version requirements remain enforced by pnpm. Project application and
+test dependencies still need to be installed in the project.
+
 Without a legacy planner `test_command`, Posse derives a versioned ordered plan
 from known `package.json` test/lint/typecheck scripts. Repositories can instead
 commit `posse.verification.json`:
@@ -1085,6 +1093,12 @@ development:
   ]
 }
 ```
+
+An explicit Node wrapper command with selectors, such as
+`node tests/run.cjs --file tests/example.mjs`, is also a verification command
+when its script and complete argument list match a committed
+`unit_test_runners` declaration. Unregistered arguments are rejected; selecting
+a wrapper does not remove the repository's required checks.
 
 Patterns and scripts are relative to the repository root. Supported runtimes
 are `node`, `php`, and `python`; arguments are literal strings, with no shell

@@ -12,7 +12,7 @@ import { runVerificationPrerequisiteCommand } from "../../verification/functions
 import { splitSqlStatements } from "../../../shared/tools/functions/toolkit/project-db/permissions.js";
 import { readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { ENVIRONMENT_PACKAGE_MANAGERS, ENVIRONMENT_SETUP_INSTALL_BUDGET_MS, ENVIRONMENT_SETUP_LOCK_WAIT_MS, ENVIRONMENT_SETUP_STEP_TIMEOUT_MS } from "../../../catalog/tools/environment-setup.js";
-import { PACKAGE_MANAGERS, detectPackageManagers, packageCommands, packageScriptsLine, readPackageManifest, resolvePackageManager, shownPackageInputs } from "./package-managers.js";
+import { PACKAGE_MANAGERS, detectPackageManagers, packageCommands, packageConfigFiles, packageScriptsLine, readPackageManifest, resolvePackageManager, shownPackageInputs } from "./package-managers.js";
 import { prepareDatabaseConnectionFile } from "./database-connection-file.js";
 import { PROJECT_DB_TYPES } from "../../../catalog/project-db.js";
 import { LOCAL_DATABASE_PLATFORMS, LOCAL_DATABASE_ENGINES } from "../../../catalog/local-database-provisioning.js";
@@ -85,7 +85,7 @@ export async function prepareEnvironmentSetup(tool, args, context) {
     for (const name of manager.inputs(directory)) capture(relative(name));
     const lock = manager.lockfile(directory);
     const lockFile = lock ? capture(relative(lock)) : null;
-    const configFiles = manager.configFiles.filter((name) => fs.existsSync(capture(relative(name)))).map(relative);
+    const configFiles = packageConfigFiles(manager, directory).filter((name) => fs.existsSync(capture(relative(name)))).map(relative);
     if (manager.writesManifest) assertWritable(manifestFile, context);
     if (lockFile) assertWritable(lockFile, context);
     const dependencyDirs = manager.dependencyDirs(directory, manifest).map(relative);

@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { FAILED_JOB_STATUSES } from "../../../catalog/job.js";
 import { ENVIRONMENT_PACKAGE_MANAGERS, ENVIRONMENT_SETUP_INSTALL_BUDGET_MS, ENVIRONMENT_SETUP_LOCK_WAIT_MS, ENVIRONMENT_SETUP_STEP_TIMEOUT_MS } from "../../../catalog/tools/environment-setup.js";
 import { localPath, fingerprint, readManifest } from "./environment-paths.js";
-import { PACKAGE_MANAGERS, packageCommands, packageScriptsLine, packageSpecs, readPackageManifest, shownPackageInputs } from "./package-managers.js";
+import { PACKAGE_MANAGERS, packageCommands, packageConfigFiles, packageScriptsLine, packageSpecs, readPackageManifest, shownPackageInputs } from "./package-managers.js";
 import { getJob, getWorkItem, listJobsByWorkItem } from "../../queue/functions/index.js";
 import { primaryCheckoutFor, runVerificationPrerequisiteCommand } from "../../verification/functions/prerequisite-adapters.js";
 import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
@@ -94,7 +94,7 @@ export async function preparePlanningEnvironment(args, context) {
     const installDirs = manager.dependencyDirs(directory, manifest);
     const dependencyDirs = installDirs.map(rel);
     for (const dir of dependencyDirs) localPath(cwd, dir, { dependencyDirectory: true });
-    const configFiles = manager.configFiles.filter((name) => fs.existsSync(capture(rel(name)))).map(rel);
+    const configFiles = packageConfigFiles(manager, directory).filter((name) => fs.existsSync(capture(rel(name)))).map(rel);
     const specs = packageSpecs(manager, step.packages || []);
     const command = manager.command();
     if (!command) throw new Error(`${manager.label} is unavailable. Install ${manager.toolchain} and restart Posse before requesting setup.`);

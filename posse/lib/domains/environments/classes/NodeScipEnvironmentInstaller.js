@@ -25,7 +25,8 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
   async preparePackageRoot() {
     if (this.nodeDir === this.sourceNodeDir || this.dryRun) return;
     await fs.promises.mkdir(this.nodeDir, { recursive: true });
-    for (const name of ["package.json", "package-lock.json", "patch-scip-python.mjs"]) {
+    for (const name of ["package.json", "package-lock.json", "patch-scip-python.mjs", "pnpm-runner.cjs", "bin/pnpm", "bin/pnpm.cmd"]) {
+      await fs.promises.mkdir(path.dirname(path.join(this.nodeDir, name)), { recursive: true });
       await fs.promises.copyFile(path.join(this.sourceNodeDir, name), path.join(this.nodeDir, name));
     }
   }

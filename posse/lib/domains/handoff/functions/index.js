@@ -228,7 +228,10 @@ function _looksLikeReadOnlyCopySourceMention(source, candidate) {
 }
 
 function _extractFixInstructionEditTargets(text = "") {
-  const source = String(text || "");
+  // A failed command is execution evidence, not an instruction to edit its
+  // runner. Otherwise generic "repair the change" prose near a receipt
+  // acquires the shared runner's write lane for every unrelated feature.
+  const source = String(text || "").replace(/^\s*(?:Command|Working directory):[^\r\n]*$/gm, "");
   if (!source.trim()) return [];
   const lowerSource = source.toLowerCase();
   const targets = [];
