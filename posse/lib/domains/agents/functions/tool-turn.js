@@ -75,6 +75,28 @@ function redundantBatchTerminator(text) {
   return exactToolCalls(text.split("").filter((_, index) => !removed.has(index)).join(""));
 }
 
+// Codex batches show envelope slips the single-call path already forgives:
+// one stray "}" after the closed array, a final "}" in place of the array's
+// "]", a missing final "]", and the identical batch written twice. Each candidate changes
+// only the outer envelope and must then parse strictly as tool calls, so
+// argument values and nested delimiters are never filled in or altered.
+function batchEnvelopeSlip(text) {
+  if (!text.startsWith("[") || !REQUEST_ENVELOPE.test(text)) return null;
+  const candidates = [];
+  if (/\]\s*\}$/.test(text)) candidates.push(text.replace(/\s*\}$/, ""));
+  if (/\}$/.test(text) && !/\]\s*\}$/.test(text)) candidates.push(text.slice(0, -1) + "]", text + "]");
+  const half = text.length >> 1;
+  for (let cut = half - 2; cut <= half + 2; cut++) {
+    const first = text.slice(0, cut).trim();
+    if (first.endsWith("]") && first === text.slice(cut).trim()) candidates.push(first);
+  }
+  for (const candidate of candidates) {
+    const calls = exactToolCalls(candidate) || redundantBatchTerminator(candidate);
+    if (calls) return calls;
+  }
+  return null;
+}
+
 // A tool request preceded by commentary is still an unexecuted request, not
 // a final answer. Skip complete non-call objects so JSON artifacts containing
 // nested examples are not mistaken for requests.
@@ -103,7 +125,7 @@ function callsAfterCommentary(text) {
   // decision. Fences and structured prefixes remain ambiguous and rejected.
   if (/[\[\]{}<>]/.test(prefix) || /`{3}|~{3}/.test(prefix)) return null;
   const suffix = text.slice(index);
-  const exact = exactToolCalls(suffix) || missingRootTerminator(suffix) || redundantBatchTerminator(suffix);
+  const exact = exactToolCalls(suffix) || missingRootTerminator(suffix) || redundantBatchTerminator(suffix) || batchEnvelopeSlip(suffix);
   if (exact) return exact;
   const trailing = leadingJsonObject(suffix);
   if (!trailing || trailing.rest && trailing.rest !== trailing.body && trailing.rest !== "}") return null;
@@ -114,7 +136,7 @@ function callsAfterCommentary(text) {
 /** Accept one or more exact tool calls, or salvage a call before fabricated results. */
 export function parseAgentToolTurn(output) {
   const text = String(output || "").trim();
-  const exact = exactToolCalls(text) || missingRootTerminator(text) || redundantBatchTerminator(text);
+  const exact = exactToolCalls(text) || missingRootTerminator(text) || redundantBatchTerminator(text) || batchEnvelopeSlip(text);
   if (exact) return { calls: exact, malformed: false };
   const afterCommentary = callsAfterCommentary(text);
   if (afterCommentary) return { calls: afterCommentary, malformed: false };
