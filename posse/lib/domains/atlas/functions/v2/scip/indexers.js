@@ -61,6 +61,11 @@ const DEFAULT_POSSE_ROOT = path.resolve(THIS_DIR, "..", "..", "..", "..", "..", 
  * }} ScipIndexerLookup
  */
 
+// scip-typescript silently skips any file over 1 MB unless told otherwise, so
+// a batch of larger sources staged nothing and failed as "no files got
+// indexed". The limit matches the portable adapter's.
+const SCIP_TYPESCRIPT_DEFAULT_ARGS = Object.freeze(["index", "--infer-tsconfig", "--max-file-byte-size", "8mb", "--output", "{output}"]);
+
 /** @type {readonly Readonly<ScipIndexerCandidate>[]} */
 const SCIP_INDEXERS = Object.freeze([
   Object.freeze({
@@ -69,7 +74,7 @@ const SCIP_INDEXERS = Object.freeze([
     outputName: "typescript.scip",
     markers: ["tsconfig.json", "package.json"],
     sourceExtensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
-    args: ["index", "--infer-tsconfig", "--output", "{output}"],
+    args: [...SCIP_TYPESCRIPT_DEFAULT_ARGS],
   }),
   Object.freeze({
     id: "python",
@@ -287,7 +292,7 @@ export function describeScipIndexerLookup(lookup) {
  */
 export function defaultArgsForCommand(command) {
   const base = path.basename(command).toLowerCase().replace(/\.(exe|cmd|bat)$/u, "");
-  if (base === "scip-typescript") return ["index", "--infer-tsconfig", "--output", "{output}"];
+  if (base === "scip-typescript") return [...SCIP_TYPESCRIPT_DEFAULT_ARGS];
   if (base === "scip-rust") return ["--output", "{output}", "."];
   return ["--output", "{output}"];
 }

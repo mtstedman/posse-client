@@ -5,15 +5,15 @@
   "main": "index.js",
   "private": true,
   "scripts": {
-    "postinstall": "node patch-scip-python.mjs"
+    "postinstall": "node patch-scip-python.mjs && node patch-scip-typescript.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "UNLICENSED",
   "type": "commonjs",
   "dependencies": {
-    "@sourcegraph/scip-python": "^0.6.6",
-    "@sourcegraph/scip-typescript": "^0.4.0",
+    "@sourcegraph/scip-python": "^0.6.8",
+    "@sourcegraph/scip-typescript": "^0.6.2",
     "@typescript-eslint/parser": "8.72.0",
     "eslint": "10.3.0",
     "pnpm": "10.10.0",

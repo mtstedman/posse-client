@@ -11,11 +11,11 @@ import {
   runCommand,
 } from "../../functions/scip-install-runtime.js";
 
-const SCIP_CLANG_VERSION = "v0.4.0";
+const SCIP_CLANG_VERSION = "v0.4.1";
 const SCIP_CLANG_MAX_BYTES = 200 * 1024 * 1024;
 export const SCIP_CLANG_SHA256 = Object.freeze({
-  "scip-clang-arm64-darwin": "ff042fbc8a029f09f4b69fc7692e290e21c52923593207ee52d4e7439473ec64",
-  "scip-clang-x86_64-linux": "06fd18c576f979a726c651594644ec4a35db4f471f2160b3f72eb89fa6001784",
+  "scip-clang-arm64-darwin": "34a2eb7a5ef9bbe9849cded59f4eb22a2331bd5b64a5cec2b17ee09b8aa515de",
+  "scip-clang-x86_64-linux": "a434d26a079fd80e1996ba79276cb1ef86b2b2ad28b13e24386285db32c59046",
 });
 
 export class ClangScipEnvironmentInstaller extends ScipLanguageEnvironmentInstaller {

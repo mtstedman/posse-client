@@ -25,10 +25,20 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
   async preparePackageRoot() {
     if (this.nodeDir === this.sourceNodeDir || this.dryRun) return;
     await fs.promises.mkdir(this.nodeDir, { recursive: true });
-    for (const name of ["package.json", "package-lock.json", "patch-scip-python.mjs", "pnpm-runner.cjs", "bin/pnpm", "bin/pnpm.cmd"]) {
+    for (const name of ["package.json", "package-lock.json", "patch-scip-python.mjs", "patch-scip-typescript.mjs", "pnpm-runner.cjs", "bin/pnpm", "bin/pnpm.cmd"]) {
       await fs.promises.mkdir(path.dirname(path.join(this.nodeDir, name)), { recursive: true });
       await fs.promises.copyFile(path.join(this.sourceNodeDir, name), path.join(this.nodeDir, name));
     }
+  }
+
+  // The postinstall patches are part of the shipped indexer. An install made
+  // before a patch existed stays unpatched until npm install runs them again.
+  indexerPatchesApplied() {
+    const indexer = path.join(this.nodeDir, "node_modules", "@sourcegraph", "scip-typescript", "dist", "src", "FileIndexer.js");
+    if (!fs.existsSync(indexer)) return true;
+    try {
+      return fs.readFileSync(indexer, "utf8").includes("posseReferenceDeclarations");
+    } catch { return false; }
   }
 
   get commandSegments() {
@@ -52,7 +62,8 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
     const packageJson = path.join(this.nodeDir, "package.json");
     const existingCommand = this.findCommandPath(this.commandSegments, this.commandName);
     const reuseExisting = !this.force && Boolean(existingCommand)
-      && managedNodeVerifiersReady(this.nodeDir, this.sourceNodeDir);
+      && managedNodeVerifiersReady(this.nodeDir, this.sourceNodeDir)
+      && this.indexerPatchesApplied();
     const totalSteps = reuseExisting ? 2 : (this.dryRun ? 3 : this.installPlan().length);
     const manifest = await this.runStep(1, "check managed Node package root", async () => {
       const sourcePackageJson = path.join(this.sourceNodeDir, "package.json");
@@ -96,12 +107,18 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
     if (!managedNodeVerifiersReady(this.nodeDir, this.sourceNodeDir)) {
       return this.failed("managed Node verification tools need installation; run posse doctor");
     }
+    if (!this.indexerPatchesApplied()) {
+      return this.failed("managed SCIP Node indexers need reinstallation; run posse doctor");
+    }
     return this.statusForInstalledCommand(this.commandSegments, this.commandName);
   }
 
   async validateCommand() {
     if (!managedNodeVerifiersReady(this.nodeDir, this.sourceNodeDir)) {
       return { ok: false, message: "managed Node verification tools are missing or stale" };
+    }
+    if (!this.indexerPatchesApplied()) {
+      return { ok: false, message: "managed SCIP Node indexers are missing their Posse patches" };
     }
     const command = this.findCommandPath(this.commandSegments, this.commandName);
     if (!command) {
