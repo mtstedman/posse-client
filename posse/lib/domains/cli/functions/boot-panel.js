@@ -369,10 +369,9 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
   //   ╰────────────────────────╯
   // The width is fixed (never bounces as detail streams) and every glyph is
   // colour-guarded so partial `C` maps (tests) render plain instead of "undefined".
-  // Filled bar glyph: one eighth short of a full cell, so bars stacked on
-  // consecutive rows keep a hairline of background between them instead of
-  // fusing into one block.
-  const BAR_FILL = "▇";
+  // Filled bar glyph. The full block is the one every terminal font draws
+  // correctly; partial-height blocks render as garbage in some.
+  const BAR_FILL = "█";
   const col = (k) => C[k] || "";
   const clamp = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
   const animFrame = () => Math.floor((Date.now() - startedAt) / SPINNER_FRAME_MS);
