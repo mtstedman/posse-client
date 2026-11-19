@@ -1989,6 +1989,33 @@ function normalizeAssessmentDiffPath(value) {
   return unprefixed.replace(/\\/g, "/");
 }
 
+// Git C-quotes a path in diff headers and name listings when it holds
+// non-ASCII bytes (default core.quotePath), '"', '\' or control characters:
+// "b/caf\303\251.js". Decode the escaped bytes back to the UTF-8 name.
+const GIT_QUOTED_PATH_ESCAPES = Object.freeze({ a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, "\"": 34, "\\": 92 });
+
+function gitOutputPath(value) {
+  const raw = String(value || "").trim();
+  if (raw.length < 2 || !raw.startsWith("\"") || !raw.endsWith("\"")) return normalizeAssessmentDiffPath(raw);
+  const chars = [...raw.slice(1, -1)];
+  const bytes = [];
+  for (let index = 0; index < chars.length; index += 1) {
+    const octal = chars.slice(index + 1, index + 4).join("");
+    if (chars[index] !== "\\") {
+      bytes.push(...Buffer.from(chars[index], "utf8"));
+    } else if (/^[0-3][0-7]{2}$/.test(octal)) {
+      bytes.push(Number.parseInt(octal, 8));
+      index += 3;
+    } else if (Object.hasOwn(GIT_QUOTED_PATH_ESCAPES, chars[index + 1])) {
+      bytes.push(GIT_QUOTED_PATH_ESCAPES[chars[index + 1]]);
+      index += 1;
+    } else {
+      return normalizeAssessmentDiffPath(raw);
+    }
+  }
+  return normalizeAssessmentDiffPath(Buffer.from(bytes).toString("utf8"));
+}
+
 function mergeAssessmentSourceRanges(ranges = []) {
   const byIdentity = new Map();
   for (const range of ranges) {
@@ -2038,7 +2065,7 @@ export function assessmentInlineDiffSourceRanges(rawDiff, {
   let currentPath = "";
   for (const line of String(rawDiff || "").split(/\r?\n/)) {
     if (line.startsWith("+++ ")) {
-      currentPath = normalizeAssessmentDiffPath(line.slice(4));
+      currentPath = gitOutputPath(line.slice(4));
       continue;
     }
     if (!currentPath) continue;
@@ -2139,7 +2166,7 @@ function dependencyDiffRange(attempt) {
 function assessmentDependencyPathList(raw = "") {
   return [...new Set(String(raw || "")
     .split(/\r?\n/)
-    .map(normalizeAssessmentDiffPath)
+    .map(gitOutputPath)
     .filter(Boolean))]
     .slice(0, ASSESSMENT_DEPENDENCY_MAX_FILES);
 }
@@ -2188,21 +2215,21 @@ function attachAssessmentDependencyDiffs(assessmentContext, cwd) {
     const range = dependencyDiffRange(candidate.attempt);
     if (!range) continue;
     try {
-      const paths = assessmentDependencyPathList(gitExec(["diff", "--name-only", range], cwd, {
+      const paths = assessmentDependencyPathList(gitExec(["diff", "--relative", "--name-only", range], cwd, {
         timeoutMs: 15000,
         maxBuffer: 1024 * 1024 * 2,
       }));
       if (paths.length === 0) continue;
-      const diff = gitExec(["diff", "--unified=6", range, "--", ...paths], cwd, {
+      const diff = gitExec(["diff", "--relative", "--unified=6", range, "--", ...paths], cwd, {
         timeoutMs: 15000,
         maxBuffer: 1024 * 1024 * 8,
       });
-      const stat = gitExec(["diff", "--stat", "--summary", range, "--", ...paths], cwd, {
+      const stat = gitExec(["diff", "--relative", "--stat", "--summary", range, "--", ...paths], cwd, {
         timeoutMs: 15000,
         maxBuffer: 1024 * 1024 * 2,
       });
       const currentChanges = currentHead
-        ? gitExec(["diff", "--name-only", `${candidate.attempt.commit_hash}..${currentHead}`, "--", ...paths], cwd, {
+        ? gitExec(["diff", "--relative", "--name-only", `${candidate.attempt.commit_hash}..${currentHead}`, "--", ...paths], cwd, {
             timeoutMs: 15000,
             maxBuffer: 1024 * 1024 * 2,
           })
@@ -2235,23 +2262,23 @@ async function attachAssessmentDependencyDiffsAsync(assessmentContext, cwd) {
     const range = dependencyDiffRange(candidate.attempt);
     if (!range) continue;
     try {
-      const rawPaths = await gitExecAsync(["diff", "--name-only", range], cwd, {
+      const rawPaths = await gitExecAsync(["diff", "--relative", "--name-only", range], cwd, {
         timeoutMs: 15000,
         maxBuffer: 1024 * 1024 * 2,
       });
       const paths = assessmentDependencyPathList(rawPaths);
       if (paths.length === 0) continue;
       const [diff, stat, currentChanges] = await Promise.all([
-        gitExecAsync(["diff", "--unified=6", range, "--", ...paths], cwd, {
+        gitExecAsync(["diff", "--relative", "--unified=6", range, "--", ...paths], cwd, {
           timeoutMs: 15000,
           maxBuffer: 1024 * 1024 * 8,
         }),
-        gitExecAsync(["diff", "--stat", "--summary", range, "--", ...paths], cwd, {
+        gitExecAsync(["diff", "--relative", "--stat", "--summary", range, "--", ...paths], cwd, {
           timeoutMs: 15000,
           maxBuffer: 1024 * 1024 * 2,
         }),
         currentHead
-          ? gitExecAsync(["diff", "--name-only", `${candidate.attempt.commit_hash}..${currentHead}`, "--", ...paths], cwd, {
+          ? gitExecAsync(["diff", "--relative", "--name-only", `${candidate.attempt.commit_hash}..${currentHead}`, "--", ...paths], cwd, {
               timeoutMs: 15000,
               maxBuffer: 1024 * 1024 * 2,
             })
@@ -2323,8 +2350,8 @@ export function attachAssessmentDiffContext(assessmentContext = null, cwd = null
     return assessmentContext;
   }
   try {
-    const diffArgs = ["diff", "--unified=6", diffRange, "--", ...scopedPaths];
-    const statArgs = ["diff", "--stat", "--summary", diffRange, "--", ...scopedPaths];
+    const diffArgs = ["diff", "--relative", "--unified=6", diffRange, "--", ...scopedPaths];
+    const statArgs = ["diff", "--relative", "--stat", "--summary", diffRange, "--", ...scopedPaths];
     const diff = gitExec(diffArgs, cwd, {
       timeoutMs: 15000,
       maxBuffer: 1024 * 1024 * 8,
@@ -2358,11 +2385,11 @@ export async function attachAssessmentDiffContextAsync(assessmentContext = null,
   }
   try {
     const [stdout, stat] = await Promise.all([
-      gitExecAsync(["diff", "--unified=6", diffRange, "--", ...scopedPaths], cwd, {
+      gitExecAsync(["diff", "--relative", "--unified=6", diffRange, "--", ...scopedPaths], cwd, {
         timeoutMs: 15000,
         maxBuffer: 1024 * 1024 * 8,
       }),
-      gitExecAsync(["diff", "--stat", "--summary", diffRange, "--", ...scopedPaths], cwd, {
+      gitExecAsync(["diff", "--relative", "--stat", "--summary", diffRange, "--", ...scopedPaths], cwd, {
         timeoutMs: 15000,
         maxBuffer: 1024 * 1024 * 2,
       }),

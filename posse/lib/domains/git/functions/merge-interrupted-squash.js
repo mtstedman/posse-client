@@ -121,10 +121,15 @@ export function removeTemporaryMergeWorktrees(exec, cwd) {
 /**
  * Repair the target checkout after an interrupted merge gate. Returns
  * { action, marker, removedWorktrees, snapshotRef?, error? } where action is
- * none (no marker), unstaged, commit_kept, nothing_staged, head_moved, or
- * failed (the marker stays so later guards still refuse to commit).
+ * none (no marker), unstaged, commit_kept, nothing_staged, head_moved,
+ * kept_staged, or failed (the marker stays so later guards still refuse to
+ * commit). A marker alone cannot prove that what is staged is the
+ * interrupted squash rather than an operator's own staging, so `keepStaged`
+ * (startup_dirty_tree_policy=block, decision E8) reports staged changes as
+ * kept_staged, marker in place, without a snapshot or reset; the caller's
+ * dirty-tree check then stops on them.
  */
-export function recoverInterruptedSquash({ cwd, exec, preserveSnapshot = null, log = () => {} } = {}) {
+export function recoverInterruptedSquash({ cwd, exec, preserveSnapshot = null, log = () => {}, keepStaged = false } = {}) {
   const marker = readMergeInProgressMarker(exec, cwd);
   const result = { action: "none", marker, removedWorktrees: [] };
   if (marker) {
@@ -135,7 +140,10 @@ export function recoverInterruptedSquash({ cwd, exec, preserveSnapshot = null, l
       if (head === preMergeHead) {
         const staged = lines(exec, cwd, ["diff", "--cached", "--name-only"]);
         const unmerged = lines(exec, cwd, ["diff", "--name-only", "--diff-filter=U"]);
-        if (staged.length > 0 || unmerged.length > 0) {
+        if ((staged.length > 0 || unmerged.length > 0) && keepStaged) {
+          result.action = "kept_staged";
+          result.stagedFiles = [...new Set([...staged, ...unmerged])].slice(0, 50);
+        } else if (staged.length > 0 || unmerged.length > 0) {
           // The working tree may hold edits made after the interrupt; keep a
           // copy before resetting the index.
           let snapshotRef = null;
@@ -150,7 +158,7 @@ export function recoverInterruptedSquash({ cwd, exec, preserveSnapshot = null, l
         } else {
           result.action = "nothing_staged";
         }
-        fs.rmSync(squashMessage, { force: true });
+        if (result.action !== "kept_staged") fs.rmSync(squashMessage, { force: true });
       } else {
         let parent = "";
         let subject = "";
@@ -164,7 +172,7 @@ export function recoverInterruptedSquash({ cwd, exec, preserveSnapshot = null, l
           result.action = "head_moved";
         }
       }
-      removeMergeInProgressMarker(exec, cwd);
+      if (result.action !== "kept_staged") removeMergeInProgressMarker(exec, cwd);
     } catch (error) {
       result.action = "failed";
       result.error = firstGitLine(error);
@@ -177,6 +185,7 @@ export function recoverInterruptedSquash({ cwd, exec, preserveSnapshot = null, l
       commit_kept: `kept the squash commit of ${marker?.branch || "a work-item branch"} that landed before the interrupt`,
       nothing_staged: "cleared an interrupted merge marker with nothing staged",
       head_moved: "cleared an interrupted merge marker; the target head has moved since",
+      kept_staged: `left the staged changes under an interrupted merge marker for ${marker?.branch || "a work-item branch"} untouched; review them before starting again`,
       failed: `could not repair an interrupted merge gate (${result.error})`,
       none: "removed temporary merge checkouts",
     }[result.action];

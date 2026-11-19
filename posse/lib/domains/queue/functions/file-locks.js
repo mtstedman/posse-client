@@ -1110,6 +1110,7 @@ function findOrdinaryWriteLockConflict(job, scope = getJobWriteScope(job), snaps
     ...(ignoreHardDependencyPredecessors ? unmetHardDependencyPredecessorJobIdsForJob(job, db) : []),
     ...queuedCohortJobIdsForJob(job, db),
     ...queuedDependentJobIdsForJob(job, db),
+    ...queuedYoungerJobIdsForJob(job, db),
   ]);
   const jobConflict = locksConflict(scope, sameWorkItemJobLocks, {
     allowJobId: job.id,
@@ -1274,6 +1275,24 @@ export function queuedDependentJobIdsForJob(job, db = getDb()) {
     }
   }
   return ids;
+}
+
+// The older of two queued jobs of one work item leases first (K1): a queued
+// lock holder never holds an older queued job of its work item off a lane.
+// Without this, a queued fix whose scope reached a requeued sibling's file,
+// or two queued fixes of different parents sharing a path, each counted the
+// other as the active holder and neither ever leased. Only queued holders are
+// skipped; a younger job that leased holds a real lock.
+export function queuedYoungerJobIdsForJob(job, db = getDb()) {
+  if (!job?.id || job.status !== "queued" || job.work_item_id == null) return new Set();
+  const rows = db.prepare(`
+    SELECT id FROM jobs
+    WHERE work_item_id = ?
+      AND id > ?
+      AND status = 'queued'
+      AND job_type IN (${QUEUE_LOCKING_JOB_TYPES_SQL})
+  `).all(Number(job.work_item_id), Number(job.id), ...QUEUE_LOCKING_JOB_TYPES_LIST);
+  return new Set(rows.map((row) => Number(row.id)));
 }
 
 function insertMissingWiLocks(db, job, scope, ts, source = "scheduler_handoff", leaseToken = null) {

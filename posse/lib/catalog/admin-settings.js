@@ -35,7 +35,7 @@ export const PROJECT_DB_SETTING_DEFS = Object.freeze([
   Object.freeze({ key: "project_db_permissions", default: "", options: PROJECT_DB_PERMISSION_OPTIONS, multi: true }),
   Object.freeze({ key: "project_db_database", default: "" }),
   Object.freeze({ key: "project_db_host", default: "" }),
-  Object.freeze({ key: "project_db_port", default: "", numeric: Object.freeze({ integer: true, min: 0 }) }),
+  Object.freeze({ key: "project_db_port", default: "", numeric: Object.freeze({ integer: true, min: 1, max: 65535 }) }),
   Object.freeze({ key: "project_db_username", default: "" }),
   Object.freeze({ key: "project_db_password", default: "", sensitive: true }),
 ]);

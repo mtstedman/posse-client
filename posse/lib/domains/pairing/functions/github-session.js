@@ -214,7 +214,11 @@ const GITHUB_SSH_HOST_KEYS = Object.freeze([
 
 export function prepareSessionSshIdentity(projectDir, sessionId, options = {}) {
   const platform = options.platform || process.platform;
-  const directory = path.join(projectDir, ".posse", "session-credentials", safeSessionPart(sessionId));
+  // A kept tree's key stays in the directory of the session that made it: the
+  // repository trusts that key, so a rejoin names the directory it recorded.
+  const directory = options.directory
+    ? path.resolve(options.directory)
+    : path.join(projectDir, ".posse", "session-credentials", safeSessionPart(sessionId));
   const privateKey = path.join(directory, "id_ed25519");
   const publicKey = `${privateKey}.pub`;
   const configFile = path.join(directory, "ssh_config");
@@ -393,13 +397,37 @@ export function revokeGitHubMemberDeployKeys(repository, options = {}) {
   return { revoked: removeGitHubDeployKeysTitled(repository, MEMBER_DEPLOY_KEY_PREFIX, options), absent: false };
 }
 
+// A 404 alone is not proof of absence for a private GitHub repository: GitHub
+// uses it for resources the current credential cannot access as well. A
+// session repository lives in its host's own account, and a classic token with
+// the full `repo` scope sees every repository its owner has, so a 404 to the
+// owner's own lookup through that token means the repository is gone.
+function githubRepositoryAbsent(repository, options) {
+  const [owner = "", name = "", ...rest] = String(repository || "").split("/");
+  if (!owner || !name || rest.length > 0) return false;
+  let identity;
+  try {
+    identity = parseIncludedResponse(run("gh", ["api", "user", "--include"], options));
+  } catch {
+    return false;
+  }
+  if (String(identity.body?.login || "").toLowerCase() !== owner.toLowerCase()) return false;
+  const scopes = identity.header("x-oauth-scopes");
+  if (scopes === null || !scopes.split(",").map((scope) => scope.trim()).includes("repo")) return false;
+  try {
+    run("gh", ["api", `repos/${owner}/${name}`, "--include"], options);
+    return false;
+  } catch (error) {
+    return /^HTTP\/\S+ 404\b/mu.test(String(error?.stdout || ""));
+  }
+}
+
 export function cleanupGitHubSessionRepository(repository, options = {}) {
   try {
     run("gh", ["repo", "delete", repository, "--yes"], options);
     return { ok: true, deleted: true, repository };
   } catch (error) {
-    // A 404 is not proof of absence for a private GitHub repository: GitHub
-    // uses it for resources the current credential cannot access as well.
+    if (githubRepositoryAbsent(repository, options)) return { ok: true, deleted: false, absent: true, repository };
     return {
       ok: false,
       deleted: false,

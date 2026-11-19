@@ -1,7 +1,7 @@
 import { normalizeResearcherTypedActionArgs, researcherWorkflowActions } from "../../../domains/integrations/functions/deterministic-mcp/researcher-dispatcher.js";
 import { fetchHashRefEvidenceForContext, issueHashRefTraversalForContext } from "../../../domains/queue/functions/hash-refs.js";
 import { atlasDescriptorSchemaForAction } from "../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
-import { usesResearcherAtlasReadSurface, sessionToolPolicy, requestedToolPolicyName } from "./mcp-owner-tool-policy.js";
+import { usesResearcherAtlasReadSurface, sessionToolPolicy, requestedToolPolicyName, toolAllowedByPolicy } from "./mcp-owner-tool-policy.js";
 import { resolveAtlasSymbolHandle, atlasSymbolSourcePath } from "./mcp-owner-symbol-handles.js";
 import { firstStructuredJsonValue } from "./mcp-owner-source-transport.js";
 import { normalizeTypedSymbolBodyRoute, normalizeTypedFilenameWindowAnchor, normalizeTypedFileWindowOrientation, normalizeTypedAnchoredFileWindowBudget } from "./mcp-owner-atlas-window-args.js";
@@ -82,6 +82,14 @@ function normalizePromotedTraversalAlias(session, action, supplied = {}) {
   };
 }
 
+// A route that changes the action runs after the entry check, like the
+// owner's recoveries: it applies only when the session was granted the
+// target action, and otherwise the call runs as the caller asked.
+function grantedActionRoute(policy, action, supplied, route) {
+  if (route.action === action || toolAllowedByPolicy(policy, `atlas.${route.action}`)) return route;
+  return { action, supplied, transforms: [] };
+}
+
 export function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, session = null) {
   const transforms = [];
   const requested = requestedToolPolicyName(toolName, toolArgs);
@@ -102,7 +110,7 @@ export function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, s
     });
   }
   const symbolBodyRoute = usesResearcherAtlasReadSurface(policy)
-    ? normalizeTypedSymbolBodyRoute(action, supplied)
+    ? grantedActionRoute(policy, action, supplied, normalizeTypedSymbolBodyRoute(action, supplied))
     : { action, supplied, transforms: [] };
   let routedAction = symbolBodyRoute.action;
   supplied = symbolBodyRoute.supplied;
@@ -110,7 +118,12 @@ export function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, s
   const filenameAnchorCleanup = normalizeTypedFilenameWindowAnchor(routedAction, supplied);
   supplied = filenameAnchorCleanup.supplied;
   transforms.push(...filenameAnchorCleanup.transforms);
-  const fileWindowCleanup = normalizeTypedFileWindowOrientation(routedAction, supplied);
+  const fileWindowCleanup = grantedActionRoute(
+    policy,
+    routedAction,
+    supplied,
+    normalizeTypedFileWindowOrientation(routedAction, supplied),
+  );
   routedAction = fileWindowCleanup.action;
   supplied = fileWindowCleanup.supplied;
   transforms.push(...fileWindowCleanup.transforms);

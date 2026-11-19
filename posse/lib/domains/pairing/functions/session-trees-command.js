@@ -2,15 +2,16 @@
 // `posse session trees` and the console's `trees` / `purge`: list the host's
 // session trees and remove the ones no longer needed.
 
-import { execFileSync } from "node:child_process";
+import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getLivePairingState } from "./state.js";
 import { cleanupGitHubSessionRepository, removeSessionCredentialDirectory } from "./github-session.js";
-import { listSessionTrees, purgeSessionTree } from "./session-trees.js";
+import { listSessionTrees, purgeSessionTree, readKeptTrees } from "./session-trees.js";
 
 function git(args, cwd) {
-  return String(execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 }) || "").trim();
+  // An operator surface: system Git through the sanctioned direct adapter.
+  return String(adminGitExec(args, cwd, { timeoutMs: 60_000 }) || "").trim();
 }
 
 /** The ref a tree's work is compared against: the repository's trunk. */
@@ -90,7 +91,10 @@ export function purgeTrees(projectDir, { target = null, merged = false, force = 
   let branches = [];
   if (merged) branches = trees.filter((tree) => tree.status === "integrated").map((tree) => tree.branch);
   else {
-    const resolved = resolveTree(trees, target);
+    // A kept tree whose branch is already gone still names a repository and
+    // credentials to remove, so a failed purge of it can be retried.
+    const branchless = readKeptTrees(projectDir).filter((kept) => !trees.some((tree) => tree.branch === kept.branch));
+    const resolved = resolveTree([...trees, ...branchless], target);
     if (resolved.error) return { ok: false, lines: [`Cannot purge: ${resolved.error}`], results: [] };
     branches = [resolved.tree.branch];
   }

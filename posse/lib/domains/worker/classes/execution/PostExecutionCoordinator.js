@@ -17,11 +17,10 @@ import { recordObservation } from "../../../observability/functions/observations
 import { gitCurrentHashAsync, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
 import { gitCommitAllAsync as gitCommitAllAsyncFromModule } from "../../../git/functions/commit-scope.js";
 import { listAttemptCommittedFilesAsync } from "../../../git/functions/attempt-committed-files.js";
-import { snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule } from "../../../git/functions/worktree.js";
+import { snapshotAndResetSharedWorktreeAsync as snapshotAndResetSharedWorktreeAsyncFromModule } from "../../functions/helpers/shared-worktree-reset.js";
 import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
-import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
 import { isTransientCommitInfraFailure } from "../../functions/helpers/commit-infra.js";
 import { filterFileRequestsToOutOfScope, validateDeclaredOutputContract } from "../../functions/execution/declared-output-contract.js";
 import { formatCommitFailureDetail, formatCommitFailureSummary, worktreeLockTimeoutInfoAsync } from "../../functions/execution/commit-diagnostics.js";
@@ -607,25 +606,27 @@ export async function handlePostExecutionForWorker({
           if (!isLeaseValid(job.id, leaseToken)) {
             this.emit(job.id, `${C.red}[stale-lease] WI#${job.work_item_id} job #${job.id} — lease lost before commit${C.reset}`);
             try {
-              if (await gitHasChangesAsync(wtPath)) {
-                const siblingLocks = activeSiblingWriteLocks(job);
-                if (siblingLocks.length > 0) {
-                  logEvent({
-                    work_item_id: job.work_item_id,
-                    job_id: job.id,
-                    attempt_id: attempt.id,
-                    event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
-                    actor_type: EVENT_ACTORS.WORKER,
-                    message: `Deferred stale-lease dirty cleanup; ${siblingLocks.length} same-WI job lock(s) still active`,
-                    event_json: JSON.stringify({ locks: siblingLocks.slice(0, 20) }),
-                  });
-                } else {
-                  await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
-                    reason: `stale-lease-job-${job.id}`,
-                    branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-                    wiId: job.work_item_id,
-                  });
-                }
+              // The job's own locks are not a sibling's, so the shared reset
+              // cannot tell that another worker has re-leased the job and is
+              // working in this tree. Like the lease-lost stash, clean up only
+              // a job that went back to the queue with no owner.
+              const current = getJob(job.id);
+              if (current?.status === "queued" && current?.lease_owner == null) {
+                await snapshotAndResetSharedWorktreeAsyncFromModule(job, wtPath, this.projectDir, {
+                  reason: `stale-lease-job-${job.id}`,
+                  label: "stale-lease",
+                  attemptId: attempt.id,
+                });
+              } else if (await gitHasChangesAsync(wtPath)) {
+                logEvent({
+                  work_item_id: job.work_item_id,
+                  job_id: job.id,
+                  attempt_id: attempt.id,
+                  event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+                  actor_type: EVENT_ACTORS.WORKER,
+                  message: `Deferred stale-lease dirty cleanup; job is ${current?.status || "missing"}${current?.lease_owner ? ` under ${current.lease_owner}` : ""}`,
+                  event_json: JSON.stringify({ status: current?.status || null, lease_owner: current?.lease_owner || null }),
+                });
               }
             } catch { /* best effort */ }
             completeAttempt(attempt.id, {
@@ -699,10 +700,10 @@ export async function handlePostExecutionForWorker({
                   actor_type: EVENT_ACTORS.WORKER,
                   message: discardMsg,
                 });
-                await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
+                await snapshotAndResetSharedWorktreeAsyncFromModule(job, wtPath, this.projectDir, {
                   reason: `db-mode-noop-job-${job.id}`,
-                  branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-                  wiId: job.work_item_id,
+                  label: "db-mode",
+                  attemptId: attempt.id,
                 });
               }
             } catch { /* best effort — the reset is defensive, not load-bearing */ }
@@ -1465,56 +1466,41 @@ export async function handlePostExecutionForWorker({
             // forensic; orphan stashes otherwise accumulate across failures.
             if (wtPath) {
               try {
-                if (await gitHasChangesAsync(wtPath)) {
-                  const siblingLocks = activeSiblingWriteLocks(job);
-                  if (siblingLocks.length > 0) {
-                    logEvent({
-                      work_item_id: job.work_item_id,
-                      job_id: job.id,
-                      attempt_id: attempt.id,
-                      event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
-                      actor_type: EVENT_ACTORS.WORKER,
-                      message: `Deferred commit-failure dirty cleanup; ${siblingLocks.length} same-WI job lock(s) still active`,
-                      event_json: JSON.stringify({ locks: siblingLocks.slice(0, 20) }),
+                try {
+                  const { snapshotDir } = await snapshotAndResetSharedWorktreeAsyncFromModule(job, wtPath, this.projectDir, {
+                    reason: `commit-failed-job-${job.id}`,
+                    label: "commit-failure",
+                    attemptId: attempt.id,
+                  });
+                  linkSiblingDirtyRecoverySnapshot({
+                    workItemId: job.work_item_id,
+                    snapshotDir,
+                    jobId: job.id,
+                    reason: `commit-failed-job-${job.id}`,
+                    ownerJobIds: [job.id],
+                  });
+                } catch (resetErr) {
+                  if (resetErr?.snapshotDir) {
+                    linkSiblingDirtyRecoverySnapshot({
+                      workItemId: job.work_item_id,
+                      snapshotDir: resetErr.snapshotDir,
+                      jobId: job.id,
+                      reason: `commit-failed-job-${job.id}-reset-incomplete`,
+                      ownerJobIds: [job.id],
                     });
-                  } else {
-                    try {
-                      const snapshotDir = await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
-                        reason: `commit-failed-job-${job.id}`,
-                        branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-                        wiId: job.work_item_id,
-                      });
-                      linkSiblingDirtyRecoverySnapshot({
-                        workItemId: job.work_item_id,
-                        snapshotDir,
-                        jobId: job.id,
-                        reason: `commit-failed-job-${job.id}`,
-                        ownerJobIds: [job.id],
-                      });
-                    } catch (resetErr) {
-                      if (resetErr?.snapshotDir) {
-                        linkSiblingDirtyRecoverySnapshot({
-                          workItemId: job.work_item_id,
-                          snapshotDir: resetErr.snapshotDir,
-                          jobId: job.id,
-                          reason: `commit-failed-job-${job.id}-reset-incomplete`,
-                          ownerJobIds: [job.id],
-                        });
-                      }
-                      // Snapshot refused or failed — leave the dirt for the
-                      // next job's setup recovery rather than wiping the only
-                      // copy of the failed attempt's work.
-                      logEvent({
-                        work_item_id: job.work_item_id,
-                        job_id: job.id,
-                        attempt_id: attempt.id,
-                        event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
-                        actor_type: EVENT_ACTORS.WORKER,
-                        message: `Left commit-failure dirty state in place; snapshot/reset failed: ${resetErr?.message || String(resetErr)}`,
-                        event_json: JSON.stringify({ reason: `commit-failed-job-${job.id}` }),
-                      });
-                    }
                   }
+                  // Snapshot refused or failed — leave the dirt for the
+                  // next job's setup recovery rather than wiping the only
+                  // copy of the failed attempt's work.
+                  logEvent({
+                    work_item_id: job.work_item_id,
+                    job_id: job.id,
+                    attempt_id: attempt.id,
+                    event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+                    actor_type: EVENT_ACTORS.WORKER,
+                    message: `Left commit-failure dirty state in place; snapshot/reset failed: ${resetErr?.message || String(resetErr)}`,
+                    event_json: JSON.stringify({ reason: `commit-failed-job-${job.id}` }),
+                  });
                 }
               } catch { /* ignore */ }
             }

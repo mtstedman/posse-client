@@ -5,7 +5,7 @@ import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getJob, getWorkItem, forceUpdateJobStatus, effectiveMergedEvidence, refreshWorkItemStatus, reholdPostMergeDbTasksForWorkItem, runInTransaction, updateJobPayload } from "./queue-store.js";
 import { beginJobRetryGeneration, setAssessmentLifecycle } from "./attempts.js";
-import { parseJobPayload } from "./payload.js";
+import { parseJobPayload, resetJobPayloadForReexecution } from "./payload.js";
 import { rewireDependency } from "./dependencies.js";
 import { clearFileLaneWaitsForJob } from "./file-locks.js";
 import { clearPeerClaimDeferralsForJob } from "./cross-instance-claims.js";
@@ -89,7 +89,7 @@ export function applyOperatorRepair(args) {
         getDb().prepare("UPDATE jobs SET state_version=state_version+1 WHERE id=?").run(id);
       } else {
         if (action === REPAIR_ACTIONS.RETRY_JOB) {
-          delete payload._assess_only;
+          resetJobPayloadForReexecution(payload);
           beginJobRetryGeneration(id, { payload });
           getDb().prepare(`UPDATE jobs SET ready_at=?, assessor_verdict='not_assessed', assessor_confidence=NULL,
             last_error=NULL, result_json=NULL, assessment_completed_at=NULL,

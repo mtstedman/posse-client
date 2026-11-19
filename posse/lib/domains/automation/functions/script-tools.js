@@ -6,6 +6,7 @@ import {
   SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER, SCRIPT_TOOL_MEDIA_TIMEOUT_SECONDS, SCRIPT_TOOL_NEW_TEMPLATES, SCRIPT_TOOL_RESERVED_ENV,
   SCRIPT_TOOL_RESERVED_ENV_PREFIXES, SCRIPT_TOOL_SCHEMA, SCRIPT_TOOL_AGENT_TEMPLATE,
 } from "../../../catalog/custom-tools.js";
+import { AGENT_LIMITS } from "../../../catalog/agent.js";
 import { LOCAL_BRIDGE_MODELS } from "../../../catalog/local-model.js";
 import { IMAGE_MODEL_CHOICES_INTERNAL } from "../../../catalog/provider-model-defaults.js";
 import { assertValidSchema, demand, object } from "./policy.js";
@@ -14,7 +15,7 @@ import { redactLiteralValues } from "../../../shared/platform/functions/subproce
 export const EMPTY_SCRIPT_PARAMS = Object.freeze({ type: "object", additionalProperties: false, properties: {} });
 const NAME_RE = /^[a-z][a-z0-9-]{0,39}(\.[a-z][a-z0-9_-]{0,39})?$/;
 const ENV_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
-const MANIFEST_KEYS = ["schema", "name", "description", "entry", "interpreter", "params", "inputs", "output_schema", "env", "effect", "timeout_seconds", "max_output_bytes", "generate", "invoke_agent"];
+const MANIFEST_KEYS = ["schema", "name", "description", "entry", "interpreter", "params", "inputs", "output_schema", "env", "effect", "timeout_seconds", "max_output_bytes", "generate", "invoke_agent", "spend_cap_usd", "exit_codes_are_data"];
 const MEDIA_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,127}$/;
 
 // Providers that can produce each media kind: the local models of that kind,
@@ -98,9 +99,22 @@ export function normalizeScriptManifest(raw) {
     if (!entry || entry.startsWith("/") || entry.includes(":") || entry.split("/").some(part => !part || part === "." || part === "..")) fail("entry must be a file inside the tool folder");
     if (!Object.hasOwn(SCRIPT_TOOL_INTERPRETERS, interpreter)) fail(`interpreter must be one of ${Object.keys(SCRIPT_TOOL_INTERPRETERS).join(", ")}`);
   }
+  // A non-zero exit fails the run unless the script declares its exit codes
+  // as data (a status probe, a diff); a signal always fails it. Absent and
+  // false are the same, so existing tools keep their digests.
+  if (raw.exit_codes_are_data !== undefined && (media || agent || typeof raw.exit_codes_are_data !== "boolean")) {
+    fail("exit_codes_are_data applies only to script tools and must be true or false");
+  }
   if (!SCRIPT_TOOL_EFFECTS.includes(raw.effect)) fail("effect must be read or write");
   const timeout = raw.timeout_seconds ?? (media || agent ? SCRIPT_TOOL_MEDIA_TIMEOUT_SECONDS : SCRIPT_TOOL_LIMITS.DEFAULT_TIMEOUT_SECONDS);
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > SCRIPT_TOOL_LIMITS.MAX_TIMEOUT_SECONDS) fail(`timeout_seconds must be 1-${SCRIPT_TOOL_LIMITS.MAX_TIMEOUT_SECONDS}`);
+  // An agent tool may raise its default per-run spend cap; the caller's
+  // remaining budget still bounds every run. Absent stays absent, so the
+  // digests of existing tools do not change.
+  const spendCap = raw.spend_cap_usd;
+  if (spendCap !== undefined && (!agent || typeof spendCap !== "number" || !Number.isFinite(spendCap) || spendCap <= 0 || spendCap > AGENT_LIMITS.spend_usd)) {
+    fail(`spend_cap_usd applies only to agent tools and must be a number greater than 0 and at most ${AGENT_LIMITS.spend_usd}`);
+  }
   const output = raw.max_output_bytes ?? SCRIPT_TOOL_LIMITS.DEFAULT_OUTPUT_BYTES;
   if (!Number.isInteger(output) || output < SCRIPT_TOOL_LIMITS.MIN_OUTPUT_BYTES || output > SCRIPT_TOOL_LIMITS.MAX_OUTPUT_BYTES) fail(`max_output_bytes must be ${SCRIPT_TOOL_LIMITS.MIN_OUTPUT_BYTES}-${SCRIPT_TOOL_LIMITS.MAX_OUTPUT_BYTES}`);
   const env = raw.env ?? [];
@@ -137,9 +151,11 @@ export function normalizeScriptManifest(raw) {
       fail("output_schema must be a JSON object schema; the script must print one JSON object");
     assertValidSchema(outputSchema, `Script tool ${raw.name} output_schema`);
   }
-  return { schema: raw.schema, name: raw.name, description, ...(agent ? { invoke_agent: invokeAgent } : media ? { generate } : { entry, interpreter }), params,
+  return { schema: raw.schema, name: raw.name, description, ...(agent ? { invoke_agent: invokeAgent } : media ? { generate }
+    : { entry, interpreter, ...(raw.exit_codes_are_data === true ? { exit_codes_are_data: true } : {}) }), params,
     ...(inputs === undefined ? {} : { inputs }), ...(outputSchema === undefined ? {} : { output_schema: outputSchema }),
-    env: normalizedEnv, effect: raw.effect, timeout_seconds: timeout, max_output_bytes: output };
+    env: normalizedEnv, effect: raw.effect, timeout_seconds: timeout, max_output_bytes: output,
+    ...(spendCap === undefined ? {} : { spend_cap_usd: spendCap }) };
 }
 
 // The PARAM_* variable a scalar argument arrives in.

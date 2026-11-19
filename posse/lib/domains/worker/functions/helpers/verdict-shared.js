@@ -13,7 +13,7 @@ import { parseJobPayload, parseJsonObject } from "../../../queue/functions/paylo
 import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { sanitizeHumanQuestions } from "./human-question-classifier.js";
 import { listUnresolvedActionableFailures } from "../../../queue/functions/failure-actionability.js";
-import { countInternalAssessmentRetries, getAssessmentInternalRetryLimit } from "./assessment-shared.js";
+import { ASSESSMENT_INTERNAL_RETRIES_PAYLOAD_KEY, countInternalAssessmentRetries, getAssessmentInternalRetryLimit } from "./assessment-shared.js";
 import { validateScopedPath } from "../../../../shared/scope/functions/validation.js";
 import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
@@ -1415,6 +1415,7 @@ function _queueInternalAssessmentRetry(
   if (retryTier === previousTier && !clarifyReview) return false;
   payload._assess_only = true;
   if (clarifyReview) payload._assess_review_correction = true;
+  payload[ASSESSMENT_INTERNAL_RETRIES_PAYLOAD_KEY] = retryCount + 1;
   payload._assess_model_tier = retryTier;
   // A corrective reread at the same tier keeps an explicit model selection.
   // Only a tier escalation invalidates the old model override.

@@ -204,6 +204,19 @@ export const HUMAN_GATE_ACTIONS = Object.freeze(Object.fromEntries(
     .map(([kind, choices]) => [kind, freezeChoices(choices.length > 0 ? choices : ["respond"])]),
 ));
 
+// An operator note may ride with a choice ("<choice>: note" through ask, or
+// question.answer's feedback). These actions act on it: retry guidance,
+// replan reasons, rework and rejection feedback, the dirty-worktree note.
+// Every other action records the note with the answer and ignores it.
+export const HUMAN_GATE_FEEDBACK_MAX_CHARS = 2000;
+const HUMAN_GATE_FEEDBACK_ACTIONS = readonlySet(["retry", "replan", "send_back", "fail", "reject", "commit", "revert"]);
+
+export function humanGateActionAcceptsFeedback(kind, action) {
+  const id = String(action || "").trim();
+  const actions = HUMAN_GATE_ACTIONS[String(kind || "").trim()] || [];
+  return actions.includes(id) && (HUMAN_GATE_FEEDBACK_ACTIONS.has(id) || id.startsWith("retry:"));
+}
+
 export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
   ENVIRONMENT_SETUP_REVIEW_TYPE,
   "blocked_recovery",
@@ -382,10 +395,14 @@ const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
     "headless_behavior": "continue_with_best_judgment",
     "diagnostic_insufficient_reason": "Continuing without an answer requires an explicit best-judgment assumption."
   },
+  // Opened on a complete work item whose shared-trunk publication could not
+  // be proven, asking the operator to inspect it. Timing it out headless would
+  // only drop that prompt, so a headless run leaves it parked
+  // (HEADLESS_PARKED_POST_COMPLETION_GATE_KINDS).
   shared_trunk_publication_unprovable: {
     unresolved_fact: "Whether the operator has inspected and repaired the shared-trunk condition.",
     human_contribution: "recovery_choice",
-    headless_behavior: "fail_closed",
+    headless_behavior: "leave_parked",
     diagnostic_insufficient_reason: "Acknowledgement records an operator decision before shared-trunk recovery resumes.",
   },
   shared_trunk_fast_forward_blocked: {
@@ -455,6 +472,45 @@ const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
     "diagnostic_insufficient_reason": "The available recovery choices spend different authority and budget."
   }
 });
+
+// Gates a work item owns after its jobs are done: they attach to a completed
+// work item (a disposition gate: to a failed or merge-deferred one) and decide
+// its publication or recovery, answered by the operator outside the job
+// pipeline. So none of them is moot because its work item is terminal, counts
+// toward the work item's status or completion, or is work a headless run's
+// closeout waits on. A gate kind not listed here belongs to the job pipeline.
+export const POST_COMPLETION_GATE_KINDS = Object.freeze([
+  "push_offer",
+  POST_MERGE_DB_TASK_REVIEW_TYPE,
+  MERGE_VERIFICATION_REVIEW_TYPE,
+  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
+  "shared_trunk_publication_unprovable",
+  ...WORK_ITEM_DISPOSITION_REVIEW_TYPES,
+]);
+const POST_COMPLETION_GATE_KIND_SET = readonlySet(POST_COMPLETION_GATE_KINDS);
+
+// The post-completion gates a headless run leaves parked instead of timing
+// out: those whose declared headless behavior is not to fail closed. Timing
+// one out would only drop the operator's prompt, or strand the work item it
+// is the one way out for.
+export const HEADLESS_PARKED_POST_COMPLETION_GATE_KINDS = Object.freeze(POST_COMPLETION_GATE_KINDS
+  .filter((kind) => HUMAN_GATE_ACTIONABILITY_PROFILES[kind]?.headless_behavior !== "fail_closed"));
+
+/**
+ * The post-completion gate kind a payload names, or null. A push offer names
+ * itself by subtype; merge-failure recovery gates opened before their own type
+ * existed carry MERGE_VERIFICATION_REVIEW_TYPE.
+ */
+export function postCompletionGateKindForPayload(payload = {}) {
+  for (const name of [payload?.review_type, payload?.subtype]) {
+    if (POST_COMPLETION_GATE_KIND_SET.has(name)) return name;
+  }
+  return null;
+}
+
+export function isPostCompletionGatePayload(payload = {}) {
+  return postCompletionGateKindForPayload(payload) != null;
+}
 
 function actionTransition(action) {
   const canonical = String(action || "").trim();
@@ -611,8 +667,13 @@ export function mergeFailureRecoveryChoices({ integrationGate = null, allowWaive
 function narrowedReviewChoices(payload, reviewChoices) {
   const reviewType = String(payload?.review_type || "").trim();
   const offered = normalizeHumanInputChoices(payload?.choices);
+  // These kinds may persist an ordered subset of their actions (question-
+  // choices.js CHOICE_SET_POLICIES): a dead-letter or stall gate offers only
+  // the providers that can take a retry. The prompt, the accepted answers and
+  // every projection honor that subset.
   if (["assessment_review", "assessment_evidence_missing", "assessment_transport_recovery", "assessment_retry_limit", "pipeline_head_recovery",
-    "unexecuted_replan_recovery"].includes(reviewType)
+    "unexecuted_replan_recovery", "stall_exhausted_recovery", "failure_threshold_exhausted", "fix_chain_exhausted",
+    "blocked_recovery", "dead_letter_recovery"].includes(reviewType)
     && offered.length > 0 && offered.every((action) => reviewChoices.includes(action))
     && offered.every((action, index) => index === 0 || reviewChoices.indexOf(action) > reviewChoices.indexOf(offered[index - 1]))) {
     return offered;

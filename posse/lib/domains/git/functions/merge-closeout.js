@@ -24,6 +24,7 @@ import {
   walkDiff3Conflicts,
 } from "./handoff-conflict-resolution.js";
 import { parseCommandArguments } from "../../../shared/scope/functions/test-command.js";
+import { gitNameList, topLiteralPathspec } from "./project-paths.js";
 import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
 
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../catalog/process.js";
@@ -240,14 +241,12 @@ function blobAt(exec, cwd, rev, file) {
  */
 export function handoffCopyLandedOnTarget(exec, cwd, { commit, mergeBase, targetHead }) {
   try {
-    const files = exec(["-c", "core.quotePath=false", "diff-tree", "--no-commit-id", "--name-only", "-r", commit], cwd)
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
+    // Repository-relative names (`cwd` may be a nested project directory).
+    const files = gitNameList(exec, cwd, ["diff-tree", "--no-commit-id", "--name-only", "-r", commit]);
     if (files.length === 0) return false;
     for (const file of files) {
       const copied = blobAt(exec, cwd, commit, file);
-      const landed = exec(["log", "--format=%H", `${mergeBase}..${targetHead}`, "--", file], cwd)
+      const landed = exec(["log", "--format=%H", `${mergeBase}..${targetHead}`, "--", topLiteralPathspec(file)], cwd)
         .split("\n")
         .map((line) => line.trim())
         .filter(Boolean)
@@ -400,12 +399,16 @@ function mergeCarriedPaths(exec, cwd, tempDir, { mergeBase, branchHead, candidat
 /**
  * Commit `restoredFiles` at the branch head's content and `mergedFiles` at
  * their 3-way result on top of the replay in `worktreePath`, then prove the
- * committed tree holds exactly that content.
+ * committed tree holds exactly that content. File names are
+ * repository-relative and `worktreePath` is a worktree root; `cwd` may be a
+ * project nested in the repository, so git is addressed there with
+ * `:(top,literal)` pathspecs.
  */
-function applyMergeCarriedContent(exec, worktreePath, { cwd, branch, branchHead, targetHead, restoredFiles, mergedFiles }) {
+function applyMergeCarriedContent(exec, worktreePath, { cwd, branch, branchHead, targetHead, refreshedHead, restoredFiles, mergedFiles }) {
   try {
+    const restoredSpecs = restoredFiles.map(topLiteralPathspec);
     const present = restoredFiles.length > 0
-      ? new Set(namesFrom(exec, cwd, ["ls-tree", "-r", "--name-only", branchHead, "--", ...restoredFiles]))
+      ? new Set(gitNameList(exec, cwd, ["ls-tree", "-r", "--full-name", "--name-only", branchHead, "--", ...restoredSpecs]))
       : new Set();
     const checkoutFiles = restoredFiles.filter((file) => present.has(file));
     const removeFiles = restoredFiles.filter((file) => !present.has(file));
@@ -436,8 +439,16 @@ function applyMergeCarriedContent(exec, worktreePath, { cwd, branch, branchHead,
     ], worktreePath);
     const head = exec(["rev-parse", "HEAD"], worktreePath);
     const stillDiffer = restoredFiles.length > 0
-      ? namesFrom(exec, cwd, ["diff", "--no-renames", "--name-only", branchHead, head, "--", ...restoredFiles])
+      ? gitNameList(exec, cwd, ["diff", "--no-renames", "--name-only", branchHead, head, "--", ...restoredSpecs])
       : [];
+    // Every restored path differed between the replay and the branch head,
+    // so the restore commit must change each one. A check that cannot see a
+    // name it was asked about (it matched none of them) proves nothing.
+    const changed = new Set(restoredFiles.length > 0
+      ? gitNameList(exec, cwd, ["diff", "--no-renames", "--name-only", refreshedHead, head, "--", ...restoredSpecs])
+      : []);
+    const unchanged = restoredFiles.filter((file) => !changed.has(file));
+    if (unchanged.length > 0) return { ok: false, error: `restore did not change: ${unchanged.join(", ")}` };
     for (const { file, result } of mergedFiles) {
       if (!sameAsBlob(exec, cwd, result, blobAt(exec, cwd, head, file))) stillDiffer.push(file);
     }
@@ -671,7 +682,7 @@ export function refreshBranchForCloseout({
     if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
   }
   if (restoredFiles.length > 0 || mergedFiles.length > 0) {
-    const reapplied = applyMergeCarriedContent(exec, worktreePath, { cwd, branch, branchHead, targetHead, restoredFiles, mergedFiles });
+    const reapplied = applyMergeCarriedContent(exec, worktreePath, { cwd, branch, branchHead, targetHead, refreshedHead, restoredFiles, mergedFiles });
     if (!reapplied.ok) {
       const lostFiles = [...restoredFiles, ...mergedFiles.map(({ file }) => file)];
       restore();

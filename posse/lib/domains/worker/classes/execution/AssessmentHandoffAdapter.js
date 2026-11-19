@@ -408,6 +408,7 @@ export class AssessmentHandoffAdapter {
         cwd: assessmentCwd,
         commitHash: assessedCommitHash,
         attemptId: assessAttempt.attempt.id,
+        signal: assessAc?.signal || null,
         cleanupWorktree: wtPath
           ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
               reason: `test-post-change-side-effects-wi-${job.work_item_id}-job-${job.id}`,

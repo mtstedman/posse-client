@@ -42,6 +42,7 @@ import { executeGitPushGate } from "./git-push-gate.js";
 import { inspectRepair, applyRepair } from "./operator-repair.js";
 import { answerWorkItemQuestion, nudgeWorkItemAgent } from "./work-item-actions.js";
 import { projectWorkItemHistory, projectWorkItemTail } from "./work-item-history.js";
+import { projectWorkItemConversation } from "./work-item-conversation.js";
 import { projectWorkItemOverview } from "./work-item-overview.js";
 import { projectWorkItemStats } from "./work-item-stats.js";
 import {
@@ -84,6 +85,7 @@ const GATE_RESOLUTION_COMMAND_SET = new Set([
   BRIDGE_COMMANDS.PLAN_REJECT,
   BRIDGE_COMMANDS.REVIEW_APPROVE,
   BRIDGE_COMMANDS.REVIEW_REJECT,
+  BRIDGE_COMMANDS.QUESTION_ANSWER,
 ]);
 const MUTATING_COMMAND_SET = new Set([
   BRIDGE_COMMANDS.QUEUE_ADD,
@@ -385,6 +387,9 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
     case BRIDGE_COMMANDS.WORK_ITEMS_TAIL:
       return projectWorkItemTail(args, context);
 
+    case BRIDGE_COMMANDS.WORK_ITEM_CONVERSATION:
+      return projectWorkItemConversation(args, context);
+
     case BRIDGE_COMMANDS.TEAM_OVERVIEW:
       return projectTeamOverview(args, context);
 
@@ -587,6 +592,9 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
  */
 async function maybeKickRunAfterGateResolution(result, context = {}) {
   if (!result || result.ok === false) return result;
+  // A work-item action (question.answer) reports its own outcome; only an
+  // applied answer can have unblocked work.
+  if (result.outcome != null && result.outcome !== "accepted") return result;
   if (typeof context.startPosse !== "function") return result;
   if (getLiveSchedulerBlockMessage("main")) return result;
   try {

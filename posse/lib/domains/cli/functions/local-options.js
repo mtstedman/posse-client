@@ -43,6 +43,8 @@ List devices with posse local gpus.`;
 const stringFlags = ["model", "kind", "prompt", "input", "format", "output", "model-root", "runtime-root", "source", "parameters",
   ...Object.keys(LOCAL_PARAMETER_FLAGS)];
 const booleanFlags = ["help", "json", "quiet", "non-interactive"];
+// A value that would itself parse as an option: a long option, or -h.
+const readsAsOption = value => value.startsWith("--") || value === "-h";
 export function parseLocalOptions(argv) {
   // Preserve the existing bare --gpu spelling without rewriting flag values.
   const normalized = [];
@@ -51,9 +53,14 @@ export function parseLocalOptions(argv) {
     if (token === "--") { normalized.push(...argv.slice(index)); break; }
     if (token === "--gpu" && (argv[index + 1] === undefined || argv[index + 1].startsWith("-"))) {
       normalized.push("--gpu=on");
+    } else if (stringFlags.includes(token.slice(2)) && token.startsWith("--") && argv[index + 1] !== undefined) {
+      // parseArgs refuses a separate value that starts with a dash as
+      // ambiguous; joined, "-1" or "-a red fox" is the flag's value. One that
+      // reads as an option stays separate, so a forgotten value is still refused.
+      const value = argv[++index];
+      normalized.push(...(readsAsOption(value) ? [token, value] : [`${token}=${value}`]));
     } else {
       normalized.push(token);
-      if (stringFlags.includes(token.slice(2)) && token.startsWith("--") && argv[index + 1] !== undefined) normalized.push(argv[++index]);
     }
   }
   const { values, positionals, tokens } = parseArgs({ args: normalized, strict: true, allowPositionals: true, tokens: true,

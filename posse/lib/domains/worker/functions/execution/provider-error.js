@@ -1,8 +1,9 @@
 // Shared provider-failure classification for fallback and attempt recovery.
-// Prefer structured adapter errors; message patterns cover older CLI/API errors.
+// Prefer structured adapter errors; message patterns cover older CLI/API
+// errors and never apply to an error Posse raised itself.
 
 import { PROVIDER_WINDOW_LIMIT_REACHED_RE } from "../../../providers/functions/shared/quota-reset.js";
-import { nativeProviderNoticeText } from "../../../providers/functions/shared/api-resilience.js";
+import { isPosseRaisedError, nativeProviderNoticeText } from "../../../providers/functions/shared/api-resilience.js";
 
 // The provider-side text of a native CLI failure that is itself a quota or
 // rate-limit notice. The other patterns stay message-only.
@@ -16,7 +17,7 @@ const PROVIDER_ERROR_PATTERNS = [
   /overloaded_error/i,
   /API Error:\s*5\d\d/i,
   /api_error.*internal server error/i,
-  /rate.?limit|429|too many requests/i,
+  /rate.?limit|\b429\b|too many requests/i,
   /out of.*usage|usage.*reset|usage limit|usage cap|usage exhausted|over usage|quota exceeded|credit balance is too low|session limit|(?:hit|reached) your.*limit/i,
   // Claude's "5-hour limit reached" / "Weekly limit reached" quota wordings.
   PROVIDER_WINDOW_LIMIT_REACHED_RE,
@@ -41,5 +42,8 @@ export function isProviderInfrastructureError(err) {
   if (code === "provider_circuit_open" || NATIVE_PROVIDER_FAILURE_CLASSES.has(String(err?.classification || ""))) return true;
   const notice = nativeProviderNoticeText(err);
   if (notice && (NATIVE_NOTICE_QUOTA_RE.test(notice) || PROVIDER_WINDOW_LIMIT_REACHED_RE.test(notice))) return true;
+  // Origin before text: a message Posse wrote (a handoff rejection naming
+  // src/middleware/rateLimiter.js) is never a provider failure.
+  if (isPosseRaisedError(err)) return false;
   return PROVIDER_ERROR_PATTERNS.some((pattern) => pattern.test(String(err?.message || "")));
 }

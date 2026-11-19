@@ -13,6 +13,8 @@ import {
 import fs from "fs";
 import path from "path";
 import {
+  hasCodeObjectIntent,
+  hasCodeTaskIntent,
   hasExplicitRepoWorkIntent,
   hasPassiveRepoRequirementIntent,
   hasRepoMutationIntent,
@@ -134,7 +136,12 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
   const passiveRequirementIntent = hasPassiveRepoRequirementIntent(lower);
   const politeDeliveryRequest = !explicitReadOnlyIntent
     && /^(?:please\s+)?(?:can|could)\s+(?:we|i)\s+(?:get|have)\s+(?:a|an)\s+\S/u.test(lower.trim());
-  const implementationIntent = passiveRequirementIntent || politeDeliveryRequest || hasRepoMutationIntent(lower, {
+  // A named source file or a code-noun object outranks report wording; only
+  // the code-noun object also counts as implementation, so a non-question
+  // such as "refactoring the parser to analyze ..." is not read-only.
+  const codeTaskIntent = hasCodeTaskIntent(lower);
+  const codeObjectIntent = !directQuestionIntent && hasCodeObjectIntent(lower);
+  const implementationIntent = passiveRequirementIntent || politeDeliveryRequest || codeObjectIntent || hasRepoMutationIntent(lower, {
     includeCreate: true,
     includeCompletion: true,
   });
@@ -158,7 +165,7 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
     hints.deliverable_type = "image";
     hints.output_mode = "auto";
     hints.desired_outputs = ["artifact"];
-  } else if (reportGenerationRe.test(lower) && !strongImplementationIntent) {
+  } else if (reportGenerationRe.test(lower) && !strongImplementationIntent && !codeTaskIntent) {
     hints.intent_type = "report";
     hints.deliverable_type = /\bpdf\b/.test(lower) ? "pdf" : "markdown";
     hints.output_mode = "auto";

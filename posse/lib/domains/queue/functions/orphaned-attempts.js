@@ -3,6 +3,7 @@ import { LEASE_HOLDING_STATUSES_SQL, runImmediateTransaction } from "./common.js
 import { leaseNowMs } from "./lease-clock.js";
 import { logEvent } from "./events.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { persistToolGroupsForJobs } from "../../conversation/functions/tool-group-store.js";
 
 /**
  * Mark any job_attempts stuck in 'running' status as 'failed'.
@@ -12,6 +13,7 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 export function reconcileOrphanedAttempts() {
   const db = getDb();
   const ts = new Date(leaseNowMs()).toISOString();
+  const reconciledJobIds = new Set();
   const execute = () => {
     const stuck = db.prepare(`
       SELECT a.id, a.job_id
@@ -40,6 +42,7 @@ export function reconcileOrphanedAttempts() {
       const result = fix.run(ts, id);
       if (result.changes === 0) continue;
       reconciled += 1;
+      reconciledJobIds.add(job_id);
       logEvent({
         job_id: job_id,
         event_type: EVENT_TYPES.ATTEMPT_ORPHAN_RECONCILED,
@@ -50,6 +53,8 @@ export function reconcileOrphanedAttempts() {
     return reconciled;
   };
 
-  if (db.inTransaction) return execute();
-  return runImmediateTransaction(db, execute);
+  const reconciled = db.inTransaction ? execute() : runImmediateTransaction(db, execute);
+  // The crashed worker never reached closeout; snapshot what its rows show.
+  persistToolGroupsForJobs(reconciledJobIds, { db });
+  return reconciled;
 }

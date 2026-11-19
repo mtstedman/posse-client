@@ -410,6 +410,8 @@ export class DisplayBottomInputRenderer {
     if (this.onImage) input.push(hint("g", "image", C.magenta));
 
     if (this.onReviewPending) inspect.push(hint("r", "review", C.magenta));
+    // Unlocked by merged work waiting to be pushed; absent otherwise.
+    if (this.onDeployPending && this.deployAvailable?.() === true) inspect.push(hint("y", "deploy", C.green));
 
     // View switching has a persistent tab row in the content pane. Selected-
     // agent actions also have stable slots in Agent View, so do not duplicate

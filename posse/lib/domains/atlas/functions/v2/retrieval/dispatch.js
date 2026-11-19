@@ -43,6 +43,7 @@ import { info } from "./info.js";
 import { actionSearch, manual } from "./discovery.js";
 import { workflowExecute } from "./workflow.js";
 import { createHashRefResult, fetchHashRefTool } from "../../../../../shared/tools/functions/hash-adder.js";
+import { atlasCallFieldName, atlasNestedAction, normalizeAtlasCallAction } from "../../../../../shared/tools/functions/atlas-nested-action.js";
 import { readRepoFileResult } from "./repo-read.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
@@ -513,19 +514,10 @@ const GATEWAY_ACTIONS = Object.freeze(
   ),
 );
 
-const ACTION_BY_NORMALIZED_KEY = new Map(
-  ATLAS_TOOL_ACTIONS.map((action) => [actionKey(action), action]),
-);
-
-const ACTION_ALIAS_BY_NORMALIZED_KEY = new Map([
-  ["symbolgetcard", "symbol.card"],
-  ["treewalk", "tree.branch"],
-]);
-
+// Nested-action keys (gateway_action, target_action, action_name and every
+// other spelling that folds onto them) are not aliased here: they fold through
+// atlasCallFieldName, the rule the owner's policy and the executor read too.
 const FIELD_ALIASES = Object.freeze({
-  action_name: "actionName",
-  gateway_action: "gatewayAction",
-  target_action: "targetAction",
   node_id: "nodeId",
   repo: "repoId",
   repo_id: "repoId",
@@ -576,12 +568,7 @@ const BLOCKED_ARGUMENT_KEYS = new Set(["__proto__", "constructor", "prototype"])
  * @param {{ gateway: "query" | "code" | "repo" | "agent" | "internal", call: ToolCall, ctx: DispatchContext }} args
  */
 function dispatchGateway({ gateway, call, ctx }) {
-  const target = normalizeActionName(String(
-    /** @type {any} */ (call).gatewayAction
-    || /** @type {any} */ (call).targetAction
-    || /** @type {any} */ (call).actionName
-    || "",
-  ).trim());
+  const target = atlasNestedAction(call, { includeActionField: false });
   const allowed = GATEWAY_ACTIONS[gateway];
   if (!target || !allowed.has(target)) {
     return errorEnvelope({
@@ -770,8 +757,7 @@ function normalizeFieldName(key) {
   if (Object.prototype.hasOwnProperty.call(FIELD_ALIASES, key)) {
     return /** @type {Record<string, string>} */ (FIELD_ALIASES)[key];
   }
-  if (!key.includes("_")) return key;
-  return key.replace(/_+([a-zA-Z0-9])/g, (_match, char) => char.toUpperCase());
+  return atlasCallFieldName(key);
 }
 
 /**
@@ -785,21 +771,7 @@ function normalizeFieldName(key) {
  * @returns {string}
  */
 export function normalizeActionName(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  if (ATLAS_TOOL_ACTIONS.includes(/** @type {AtlasToolAction} */ (raw))) return raw;
-  const stripped = raw
-    .replace(/^atlas[._-]/i, "")
-    .replace(/^atlas_/i, "");
-  const key = actionKey(stripped);
-  return ACTION_ALIAS_BY_NORMALIZED_KEY.get(key) || ACTION_BY_NORMALIZED_KEY.get(key) || stripped;
-}
-
-/**
- * @param {string} action
- */
-function actionKey(action) {
-  return String(action || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return normalizeAtlasCallAction(value);
 }
 
 function usageTelemetryEnabled(config = {}) {

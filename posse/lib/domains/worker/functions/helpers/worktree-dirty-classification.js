@@ -8,11 +8,12 @@ import { DIRTY_WORKTREE_RECOVERY_KEY, WAIVED_WORK_FINALIZATION_KEY } from "../..
 // paths during setup recovery.
 
 import path from "path";
-import { siblingJobScopeOwners } from "../../../queue/functions/file-locks.js";
+import { getJobWriteScope, siblingJobScopeOwners } from "../../../queue/functions/file-locks.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import { getAttempts, getJob, logEvent } from "../../../queue/functions/index.js";
-import { preserveDirtyWorktreeSnapshotAsync } from "../../../git/functions/worktree.js";
+import { getAttempts, getJob, listJobsByWorkItem, logEvent } from "../../../queue/functions/index.js";
+import { MUTATING_JOB_TYPES, TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
+import { nestedProjectSubpathAsync, preserveDirtyWorktreeSnapshotAsync } from "../../../git/functions/worktree.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
 import { parsePorcelainZ } from "../../../git/functions/porcelain-diff.js";
 import { isAbortError } from "../../../runtime/functions/yield.js";
@@ -253,22 +254,78 @@ export async function snapshotAndResetSetupBlockingPathsAsync(worker, job, wi, w
   return snapshotDir;
 }
 
+// A future task's planned scope is not evidence that it left these edits.
+// Otherwise its predecessor could wait forever for a job it blocks.
+function siblingHasUnfinishedAttempt(id) {
+  const owner = getJob(id);
+  const attempt = getAttempts(id).findLast(entry => entry.worker_type !== "assessor");
+  const finalized = parseJobPayload(owner)[WAIVED_WORK_FINALIZATION_KEY];
+  // An attempt that committed left nothing uncommitted behind: a sibling
+  // waiting on review after its commit owns no dirt.
+  return !!attempt && !attempt.commit_hash
+    && !(owner.status === "succeeded" && finalized?.complete && finalized.attempt_id === attempt.id);
+}
+
 // A released lease is not a transfer of unfinished work. These are ownership
 // hints for preservation only, never authority to write or acquire a lease.
 export function unfinishedSiblingDirtyLocks(job, paths = [], { includeCurrentScope = false } = {}) {
   const payload = parseJobPayload(job);
   const candidates = paths.filter(file => includeCurrentScope || !payloadExplicitlyClaimsPath(payload, file));
   const owners = siblingJobScopeOwners(job.id, candidates, { preserveUncommittedWaivers: true });
-  // A future task's planned scope is not evidence that it left these edits.
-  // Otherwise its predecessor could wait forever for a job it blocks.
-  const attempted = new Set([...owners.values()].flatMap(ids => [...ids])
-    .filter(id => {
-      const owner = getJob(id);
-      const attempt = getAttempts(id).findLast(entry => entry.worker_type !== "assessor");
-      const finalized = parseJobPayload(owner)[WAIVED_WORK_FINALIZATION_KEY];
-      return attempt && !(owner.status === "succeeded" && finalized?.complete && finalized.attempt_id === attempt.id);
-    }));
+  const attempted = new Set([...owners.values()].flatMap(ids => [...ids]).filter(siblingHasUnfinishedAttempt));
   return [...owners].flatMap(([file, ids]) => [...ids].filter(id => attempted.has(id)).map(id => ({
     path: file, lock_kind: "file", job_id: id, work_item_id: job.work_item_id,
   })));
+}
+
+// A wildcard root names every path, which the per-path ownership map drops:
+// it is as unbounded as an undeclared scope.
+function scopeCoversAnyPath(scope) {
+  return !!scope.unknown
+    || (!scope.assessmentBarrier && (scope.roots || []).some(root => ["*", ".", "./"].includes(String(root).trim())));
+}
+
+// Unfinished same-WI writers that have run but declared no files. Their
+// scope is unknown, so ownership cannot say which dirty paths are theirs
+// and the ownership map above never names them.
+export function unfinishedUnknownScopeSiblingIds(job) {
+  return listJobsByWorkItem(job.work_item_id)
+    .filter(sibling => Number(sibling.id) !== Number(job.id)
+      && !TERMINAL_JOB_STATUSES.includes(sibling.status)
+      && MUTATING_JOB_TYPES.has(sibling.job_type)
+      && scopeCoversAnyPath(getJobWriteScope(sibling)))
+    .map(sibling => Number(sibling.id))
+    .filter(siblingHasUnfinishedAttempt);
+}
+
+// Which dirty paths unfinished same-WI siblings that have run may own: each
+// sibling whose scope covers a path, or, once one has run with unknown
+// scope, all of them (`unknownScopeIds`). `selfJobIds` name further jobs
+// whose dirt the caller is clearing, which are never owners here.
+export function unfinishedSiblingDirtOwners(job, paths = [], { selfJobIds = [] } = {}) {
+  const self = new Set([job.id, ...selfJobIds].map(Number));
+  const unknownScopeIds = unfinishedUnknownScopeSiblingIds(job).filter(id => !self.has(id));
+  const siblingLocks = unknownScopeIds.length > 0 ? [] : unfinishedSiblingDirtyLocks(job, paths, { includeCurrentScope: true })
+    .filter(lock => !self.has(Number(lock.job_id)));
+  return { siblingLocks, unknownScopeIds };
+}
+
+// A reused worktree's dirty paths, named from the project as scope names
+// them (Git names them from the worktree root, and the project can be nested
+// in its repository), with the owners above as lock-shaped entries.
+export async function reusedWorktreeDirtAsync(job, wtRoot, projectDir, { signal = null } = {}) {
+  const [porcelain, subpath] = await Promise.all([
+    gitExecAsync(["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"], wtRoot, { signal, trim: false }),
+    nestedProjectSubpathAsync(projectDir, { signal }),
+  ]);
+  const prefix = subpath ? `${subpath}/` : "";
+  const paths = [...new Set(parsePorcelainEntries(porcelain).map(entry => entry.path))]
+    .map(file => !prefix ? file : file.startsWith(prefix) ? file.slice(prefix.length) : null)
+    .filter(Boolean);
+  if (paths.length === 0) return { paths, owners: [] };
+  const { siblingLocks, unknownScopeIds } = unfinishedSiblingDirtOwners(job, paths);
+  return { paths, owners: [
+    ...siblingLocks,
+    ...unknownScopeIds.map(id => ({ path: "*", lock_kind: "root", job_id: id, work_item_id: job.work_item_id })),
+  ] };
 }

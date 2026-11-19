@@ -8,7 +8,12 @@ import {
 import { BRIDGE_COMMANDS } from "../../../catalog/bridge.js";
 
 export function bridgeGateKindForJob(job, payload = {}) {
-  if (payload?.subtype === "shared_trunk_provenance") return "shared_trunk_provenance";
+  // The relay and the phone app accept only human_input | review | plan |
+  // push, and the relay rejects the whole frame for any other kind, so this
+  // gate never reached the phone under its own name. It is an accept/reject
+  // decision for a person; the specific identity still travels in the gate
+  // detail (`payload.subtype`) and in the snapshot's `identity.gate_kind`.
+  if (payload?.subtype === "shared_trunk_provenance") return "human_input";
   if (payload?.subtype === "push_offer") return "push";
   if (payload?.subtype === "plan_approval") return "plan";
   if (

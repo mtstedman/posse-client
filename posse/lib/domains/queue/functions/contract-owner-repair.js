@@ -1,7 +1,7 @@
 import { CONTRACT_OWNER_REPAIR_LIMIT } from "../../../catalog/repair.js";
 import { createHash } from "node:crypto";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { parseJobPayload } from "./payload.js";
+import { parseJobPayload, resetJobPayloadForReexecution } from "./payload.js";
 import { updateJobPayload } from "./queue-store.js";
 import { addDependency } from "./dependencies.js";
 import { FINAL_REVIEW_CONTRACT_FIELDS } from "../../../catalog/final-review.js";
@@ -57,7 +57,7 @@ export function coordinateContractOwnerRepair({ job, paths, proposedFix, spawn }
     const updatedPayload = { ...ownerPayload, original_task_spec: ownerPayload.original_task_spec || producerTaskSpec,
       task_spec: repairTaskSpec, fix_instructions: repairInstructions,
       _contract_owner_repair_request: { consumer_job_id: job.id, paths, fingerprint } };
-    delete updatedPayload._assess_only;
+    resetJobPayloadForReexecution(updatedPayload);
     updateJobPayload(owner.id, JSON.stringify(updatedPayload));
     repair = { ...owner, payload_json: JSON.stringify(updatedPayload) };
   }

@@ -26,6 +26,7 @@ const RETENTION_TARGETS = Object.freeze([
   Object.freeze({ table: "agent_calls", column: "created_at" }),
   Object.freeze({ table: "job_observations", column: "created_at" }),
   Object.freeze({ table: "session_recycle_savings", column: "recorded_at" }),
+  Object.freeze({ table: "agent_tool_groups", column: "created_at" }),
 ]);
 
 const TERMINAL_JOB_STATUS_PLACEHOLDERS = TERMINAL_JOB_STATUSES.map(() => "?").join(", ");

@@ -32,6 +32,7 @@ import {
   settleWaitingLaneAtlas,
   updateJobPayload,
 } from "../../queue/functions/index.js";
+import { ATLAS_MAIN_GENERATION_PUBLISHED_PROOF_REASONS } from "../../atlas/functions/v2/contracts/jobs.js";
 import { readBoolSetting, readPositiveIntSetting } from "./config.js";
 import { recordWaitingLaneTelemetry } from "../../observability/functions/waiting-lane-telemetry.js";
 
@@ -391,7 +392,7 @@ export function extractPublishedMainGeneration(job) {
   const payload = parseJobPayload(job);
   if (!MAIN_GENERATION_PURPOSE_SET.has(String(payload?.purpose || ""))) return null;
   const result = parseJsonObject(job.result_json);
-  if (result.generation_proof_reason !== "clean_exact_oid_before_after") return null;
+  if (!ATLAS_MAIN_GENERATION_PUBLISHED_PROOF_REASONS.includes(result.generation_proof_reason)) return null;
   return normalizeWaitingLaneGeneration(result.generation);
 }
 

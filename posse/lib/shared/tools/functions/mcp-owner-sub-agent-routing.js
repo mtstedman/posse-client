@@ -55,6 +55,26 @@ function subAgentRoutingIdentities(requested, args = {}, result = null, context 
   return subAgentEvidenceCallIdentities(requested, args, result);
 }
 
+// The dispatch narrowed to the inputs each child reports consuming. A child's
+// cursor walks its request's inputs in order, so coverage.consumed counts a
+// prefix; inputs it never reached (budget, early stop) were not synthesized,
+// and the parent may still read them. No reported coverage means nothing is
+// known to be consumed, so the guard fails open.
+function consumedDispatchArgs(args = {}, results = []) {
+  const requests = Array.isArray(args?.requests) ? args.requests : [{ inputs: args?.inputs }];
+  return {
+    ...args,
+    requests: requests.map((request, index) => {
+      const entry = results.find((candidate) => candidate?.input_index === index)
+        ?? results.find((candidate) => candidate?.input_index == null && candidate?.id != null && candidate.id === request?.id)
+        ?? (requests.length === 1 && results.length === 1 && results[0]?.input_index == null ? results[0] : null);
+      const consumed = Number(entry?.coverage?.consumed);
+      const inputs = Array.isArray(request?.inputs) ? request.inputs : [];
+      return { ...request, inputs: Number.isInteger(consumed) && consumed > 0 ? inputs.slice(0, consumed) : [] };
+    }),
+  };
+}
+
 function replaceDelegatedTargetSummary(state) {
   state.delegatedTargets.clear();
   for (const targets of state.delegatedSelections.values()) {
@@ -109,7 +129,7 @@ export function noteSubAgentRoutingSuccess(state, requested, args = {}, result =
         && ["complete", "partial"].includes(entry?.packet?.outcome)
     ));
     if (completedWaitAll) {
-      const identities = subAgentRoutingIdentities(requested, args, result, context);
+      const identities = subAgentRoutingIdentities(requested, consumedDispatchArgs(args, result.results), result, context);
       for (const selection of identities.selectionKeys) {
         state.delegatedSelections.set(
           selection,

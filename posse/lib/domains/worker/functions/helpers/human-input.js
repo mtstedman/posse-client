@@ -212,16 +212,20 @@ function gateReviewDiffTarget(job, payload) {
 const MAX_AUTOMATIC_GATE_ANSWERS = 2;
 
 // Earlier gates of the same kind for the same original job that a standing
-// policy answered. Questions (clarifications) are not repairs and never count.
+// policy answered; for a gate that belongs to the work item rather than a job
+// (work-item failure and cross-WI upstream dispositions, merge failure
+// recovery), earlier ones on the same work item. Questions (clarifications)
+// are not repairs and never count.
 function automaticAnswersForOriginal(job, payload, gate) {
+  if (flowGroupForGate(gate) !== "failure_recovery") return 0;
   const originalId = Number(payload?.original_job_id);
-  if (!Number.isSafeInteger(originalId) || originalId <= 0 || flowGroupForGate(gate) !== "failure_recovery") return 0;
+  const perJob = Number.isSafeInteger(originalId) && originalId > 0;
   let count = 0;
   for (const other of listJobsByWorkItem(job.work_item_id)) {
     if (other.id === job.id || other.job_type !== "human_input" || other.status !== "succeeded") continue;
     let otherPayload;
     try { otherPayload = JSON.parse(other.payload_json || "{}"); } catch { continue; }
-    if (Number(otherPayload.original_job_id) !== originalId || tryHumanGateNameForPayload(otherPayload) !== gate) continue;
+    if ((perJob && Number(otherPayload.original_job_id) !== originalId) || tryHumanGateNameForPayload(otherPayload) !== gate) continue;
     let result;
     try { result = JSON.parse(other.result_json || "{}"); } catch { result = {}; }
     if (result?.unattended === true || result?.source === "approval_policy") count += 1;
@@ -239,9 +243,10 @@ export async function runHumanInputHandler(worker, job, abortSignal = null, { le
   const policy = worker.display?.hasOperatorAnswer ? {} : approvalPolicyForPayload(payload, { getSetting, scopeMode: worker.scopeMode,
     autoApprove: worker.autoApprove, autoApprovePlan: process.argv.includes("--auto-approve-plan") });
   // An automatic repair that keeps landing on the same gate is not repairing
-  // anything: after two automatic answers for one job, the operator decides.
+  // anything: after two automatic answers for one job (or one work item, for
+  // its own gates), the operator decides.
   if (policy.answer && policy.source === "approval_policy" && automaticAnswersForOriginal(job, payload, policy.gate) >= MAX_AUTOMATIC_GATE_ANSWERS) {
-    worker.emit(job.id, `${C.yellow}[human] ${policy.gate} was already answered automatically ${MAX_AUTOMATIC_GATE_ANSWERS} times for this job; asking instead${C.reset}`);
+    worker.emit(job.id, `${C.yellow}[human] ${policy.gate} was already answered automatically ${MAX_AUTOMATIC_GATE_ANSWERS} times for this ${Number(payload?.original_job_id) > 0 ? "job" : "work item"}; asking instead${C.reset}`);
     policy.answer = null;
   }
   // Best judgement answers only a question that offers that escape to an

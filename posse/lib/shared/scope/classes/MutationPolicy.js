@@ -4,7 +4,7 @@ import fs from "fs";
 import path from "path";
 import { agentHiddenReadablePathReason } from "../functions/agent-hidden-paths.js";
 import { primaryCheckoutAlias } from "../functions/primary-checkout-alias.js";
-import { isSensitiveEnvRepoPath } from "../../../domains/runtime/functions/protected-paths.js";
+import { isSensitiveEnvRepoPath, SENSITIVE_ENV_BASENAME_GLOBS } from "../../../domains/runtime/functions/protected-paths.js";
 import { isSensitiveEnvFileOrTargetPath } from "../../../domains/runtime/functions/sensitive-paths.js";
 import {
   checkoutReadRootContains,
@@ -108,6 +108,27 @@ function unsupportedShellEscape(command) {
     }
     if (quote) { if (ch === quote) quote = null; }
     else if (ch === "'" || ch === '"') quote = ch;
+  }
+  return false;
+}
+
+// Read-only bash commands longer than this are refused before classification.
+const MAX_READONLY_BASH_COMMAND_LENGTH = 16384;
+
+// Whether the quote-masked command holds a brace expansion to bash: an
+// unquoted `{`, then a `,` or `..`, then a `}`, with no unescaped whitespace
+// between them (one shell word, nesting included). This is the set the
+// pattern /\{(?:\\.|\S)*?(?:,|\.\.)(?:\\.|\S)*?\}/ matched, found in one
+// pass: that pattern backtracked exponentially on a run of backslashes.
+function hasBraceExpansionWord(masked) {
+  let open = false;
+  let separated = false;
+  for (let i = 0; i < masked.length; i += 1) {
+    const ch = masked[i];
+    if (/\s/.test(ch) && masked[i - 1] !== "\\") { open = false; separated = false; continue; }
+    if (ch === "{") open = true;
+    else if (open && (ch === "," || (ch === "." && masked[i + 1] === "."))) separated = true;
+    else if (ch === "}" && separated) return true;
   }
   return false;
 }
@@ -365,28 +386,50 @@ const GLOB_FILTER_FLAGS = {
   rg: new Set(["--glob", "--iglob", "-g"]),
 };
 
+// grep's --exclude and --exclude-dir compare names case-sensitively, while
+// isSensitiveEnvRepoPath does not (`sub2/.ENV`): spell each letter as a
+// bracket of both cases, `.env` -> `.[eE][nN][vV]`.
+function caseInsensitiveNameGlob(glob) {
+  return glob.replace(/[A-Za-z]/g, (ch) => `[${ch.toLowerCase()}${ch.toUpperCase()}]`);
+}
+
 // Recursion reads files no command-line word names, so the per-word checks in
 // readonlyBashPathReason never see them. These flags keep the same private
-// directories and environment files out of a recursive grep/rg; appended last
-// because in both tools the later of two contradictory filters wins.
+// directories and environment files (files and directories alike, as
+// isSensitiveEnvRepoPath matches any path segment: `conf/.env.d/prod`) out of a
+// recursive grep/rg. rg's --iglob already ignores case.
 const PROTECTED_SEARCH_EXCLUDES = {
   grep: [...PRIVATE_BASH_PATH_PARTS].flatMap((part) => [`--exclude-dir=${part}`, `--exclude=${part}`])
-    .concat(["--exclude=.env", "--exclude='.env.*'"]),
-  rg: [...PRIVATE_BASH_PATH_PARTS, ".env", ".env.*"].map((part) => `--iglob='!${part}'`),
+    .concat(SENSITIVE_ENV_BASENAME_GLOBS.map(caseInsensitiveNameGlob)
+      .flatMap((glob) => [`--exclude-dir='${glob}'`, `--exclude='${glob}'`])),
+  rg: [...PRIVATE_BASH_PATH_PARTS, ...SENSITIVE_ENV_BASENAME_GLOBS].map((part) => `--iglob='!${part}'`),
 };
 
 // The command the executor runs for an authorized read-only `command`: each
 // rg, and each grep that can recurse (-r, -d recurse and every long spelling
-// carry an r or d), gets PROTECTED_SEARCH_EXCLUDES before its `--` or at its end.
+// carry an r or d), gets PROTECTED_SEARCH_EXCLUDES twice. The first copy goes
+// right after the command name, where nothing later in the command can make
+// it a pattern, an operand or another option's value (a trailing `#`, a `--`
+// that is `-e`'s value, a dangling `--label`). The second copy goes before the
+// command's `--`, or at its end, so it follows every filter the command adds:
+// grep's --include and rg's --iglob can re-include what an earlier exclude
+// dropped, because the later of two matching filters wins. That copy starts
+// with a duplicate of its first word, the one word a dangling value-taking
+// option just before it (`rg x . -r`) can take as its value.
 export function withProtectedSearchExcludes(command) {
   return splitShellSubcommandsWithJoins(command).map(({ seg, join }) => {
     const { tokens, starts } = shellWordsDetailed(seg);
     const name = shellCommandName(tokens[0]);
     if (!Object.hasOwn(PROTECTED_SEARCH_EXCLUDES, name)
       || (name === "grep" && !tokens.slice(1).some((token) => /^-.*[rRd]/.test(token)))) return join + seg;
+    const excludes = PROTECTED_SEARCH_EXCLUDES[name];
     const dashDash = tokens.indexOf("--", 1);
-    const at = dashDash > 0 ? starts[dashDash] : seg.trimEnd().length;
-    return `${join}${seg.slice(0, at)} ${PROTECTED_SEARCH_EXCLUDES[name].join(" ")} ${seg.slice(at)}`;
+    const end = dashDash > 0 ? starts[dashDash] : seg.trimEnd().length;
+    const front = tokens.length > 1 ? starts[1] : end;
+    // A segment ending in a redirect operator would take the appended
+    // excludes as its target and create that file; leave it a shell syntax error.
+    if (dashDash <= 0 && /[<>]\s*$/.test(seg)) return `${join}${seg.slice(0, front)} ${excludes.join(" ")} ${seg.slice(front)}`;
+    return `${join}${seg.slice(0, front)} ${excludes.join(" ")} ${seg.slice(front, end)} ${[excludes[0], ...excludes].join(" ")} ${seg.slice(end)}`;
   }).join("");
 }
 
@@ -542,6 +585,180 @@ function searchFollowsSymlinks(cmdName, token) {
   return false;
 }
 
+// Where a path spelled `value` really leads. The kernel resolves the spelling,
+// so `link/../x` climbs from the link's target, not lexically from `link`'s
+// parent; null when nothing exists there. fs.realpathSync normalizes `..`
+// lexically first; the native realpath(3) does not.
+function physicalRealPath(base, value) {
+  try {
+    return fs.realpathSync.native(path.isAbsolute(value) ? value : `${base}${path.sep}${value}`);
+  } catch {
+    return null;
+  }
+}
+
+// Decision E1: the workspace read boundary, the private directories and the
+// environment files apply to the real path a read reaches, not only to its
+// spelling (`cfg -> .posse`, `link -> ../outside`).
+function realPathReadReason(policy, real) {
+  const inside = pathIsInside(policy.cwd, real);
+  if (!inside && !policy.isWithinScopeRoot(real)) return "outside";
+  const relative = inside ? path.relative(policy.cwd, real) : null;
+  if (relative != null && relative.split(path.sep).some((part) => PRIVATE_BASH_PATH_PARTS.has(part.toLowerCase()))) {
+    return "private";
+  }
+  return isSensitiveEnvRepoPath(relative ?? real) ? "env" : null;
+}
+
+// A cap on the directory entries one glob's vetting may examine; past it the
+// command is refused rather than vetted partially.
+const SHELL_GLOB_VET_ENTRY_LIMIT = 20000;
+
+// One path segment of a shell pattern as match tokens: `*`, `?`, a bracket
+// expression, or a literal character. A bracket naming a POSIX class widens
+// the rest of the segment to `*`, as shellPatternRegex does: an over-broad
+// pattern can only refuse more. Ranges also match the other letter case, for
+// shells whose locale collates them that way.
+function shellGlobSegmentTokens(segment) {
+  const tokens = [];
+  for (let i = 0; i < segment.length; i += 1) {
+    const ch = segment[i];
+    if (ch === "*") {
+      if (!tokens.at(-1)?.star) tokens.push({ star: true });
+      continue;
+    }
+    if (ch === "?") { tokens.push({ test: () => true }); continue; }
+    if (ch === "[") {
+      let start = i + 1;
+      const negated = segment[start] === "!" || segment[start] === "^";
+      if (negated) start += 1;
+      const close = segment.indexOf("]", segment[start] === "]" ? start + 1 : start);
+      if (close >= 0) {
+        const body = segment.slice(start, close);
+        if (/\[[:=.]/.test(body)) {
+          if (!tokens.at(-1)?.star) tokens.push({ star: true });
+          break;
+        }
+        const ranges = [];
+        for (let j = 0; j < body.length; j += 1) {
+          if (body[j + 1] === "-" && j + 2 < body.length) { ranges.push([body[j], body[j + 2]]); j += 2; }
+          else ranges.push([body[j], body[j]]);
+        }
+        const inSet = (c) => ranges.some(([lo, hi]) => [c, c.toLowerCase(), c.toUpperCase()].some((v) => v >= lo && v <= hi));
+        // A negated bracket must not be widened: excluding both cases would
+        // match fewer names than the shell does ("cat .[!A-Z]nv" opens .env).
+        const inExactSet = (c) => ranges.some(([lo, hi]) => c >= lo && c <= hi);
+        tokens.push({ test: negated ? (c) => !inExactSet(c) : inSet });
+        i = close;
+        continue;
+      }
+    }
+    tokens.push({ test: (c) => c === ch, literal: ch });
+  }
+  return tokens;
+}
+
+// Wildcard matching with a single backtrack point, linear in the name for
+// each star: a pattern of many stars cannot backtrack exponentially.
+function shellGlobTokensMatch(tokens, chars) {
+  let t = 0;
+  let n = 0;
+  let starT = -1;
+  let starN = 0;
+  while (n < chars.length) {
+    if (tokens[t]?.star) { starT = t; t += 1; starN = n; continue; }
+    if (t < tokens.length && tokens[t].test(chars[n])) { t += 1; n += 1; continue; }
+    if (starT < 0) return false;
+    t = starT + 1;
+    starN += 1;
+    n = starN;
+  }
+  while (tokens[t]?.star) t += 1;
+  return t === tokens.length;
+}
+
+// Whether the shell matches a directory entry `name` against one segment's
+// tokens. In dash and bash alike only a literal dot matches a leading dot.
+// dash matches bytes and bash characters, so either reading counts.
+function shellGlobSegmentMatches(tokens, name) {
+  if (name.startsWith(".") && tokens[0]?.literal !== ".") return false;
+  if (shellGlobTokensMatch(tokens, Array.from(name))) return true;
+  return /[^\x00-\x7f]/.test(name) && shellGlobTokensMatch(tokens, Array.from(Buffer.from(name, "utf8").toString("latin1")));
+}
+
+// The paths /bin/sh expands an unquoted pattern to, spelled as the shell
+// joins them (absolute, unnormalized). Unlike fs.globSync, a wildcard segment
+// descends into a symbolic link to a directory, as the shell does: `l*/*`
+// with `link -> ../outside` lists the outside directory. Throws past
+// SHELL_GLOB_VET_ENTRY_LIMIT.
+function expandShellGlob(pattern, cwd) {
+  let current = [pattern.startsWith("/") ? "" : cwd];
+  const segments = pattern.split("/").filter(Boolean);
+  let examined = 0;
+  for (const [index, segment] of segments.entries()) {
+    const next = [];
+    if (!/[*?[]/.test(segment)) {
+      for (const dir of current) {
+        const candidate = `${dir}/${segment}`;
+        let present = index < segments.length - 1;
+        // ENOTDIR (`a.js/x`) and ENAMETOOLONG mean no match, as to the shell.
+        if (!present) { try { present = !!fs.lstatSync(candidate, { throwIfNoEntry: false }); } catch { present = false; } }
+        if (present) next.push(candidate);
+      }
+    } else {
+      const tokens = shellGlobSegmentTokens(segment);
+      for (const dir of current) {
+        let names;
+        try { names = fs.readdirSync(dir || "/"); } catch { continue; }
+        examined += names.length;
+        if (examined > SHELL_GLOB_VET_ENTRY_LIMIT) throw new Error("shell glob expansion exceeds the vetting limit");
+        for (const name of names) {
+          if (shellGlobSegmentMatches(tokens, name)) next.push(`${dir}/${name}`);
+        }
+      }
+    }
+    current = next;
+    if (current.length === 0) break;
+  }
+  return current;
+}
+
+// Why an unquoted pattern's expansion may not be read, checking each path it
+// expands to by spelling and by real path. On win32 PowerShell expands it, so
+// fs.globSync vets it as before.
+function shellGlobExpansionReason(policy, value) {
+  let matches;
+  try {
+    matches = process.platform === "win32"
+      ? (typeof fs.globSync === "function" ? fs.globSync(value.replace(/[{}]/g, "[$&]"), { cwd: policy.cwd }) : [])
+      : expandShellGlob(value, policy.cwd);
+  } catch {
+    return `shell glob cannot be vetted: ${value}; name the paths, or narrow the pattern`;
+  }
+  for (const match of matches) {
+    const expanded = path.resolve(policy.cwd, match);
+    if (isSensitiveEnvFileOrTargetPath(expanded)) return `shell glob resolves to a protected environment file: ${value}`;
+    const expandedRelative = path.relative(policy.cwd, expanded);
+    const expandedParts = expandedRelative.replace(/\\/g, "/").split("/").filter(Boolean).map((part) => part.toLowerCase());
+    if (expandedParts.some((part) => part.startsWith("-"))) {
+      return `shell glob expands to an option-like path: ${value}`;
+    }
+    if (expandedParts.some((part) => PRIVATE_BASH_PATH_PARTS.has(part))
+      || agentHiddenReadablePathReason(expandedRelative)) {
+      return `shell glob resolves to a private workspace path: ${value}`;
+    }
+    const physical = process.platform === "win32" ? null : physicalRealPath(policy.cwd, match);
+    for (const real of [resolvedExistingPrefix(expanded), physical]) {
+      if (!real) continue;
+      const reason = realPathReadReason(policy, real);
+      if (reason === "outside") return `shell glob resolves outside the workspace read boundary: ${value}`;
+      if (reason === "private") return `shell glob resolves to a private workspace path: ${value}`;
+      if (reason === "env") return `shell glob resolves to a protected environment file: ${value}`;
+    }
+  }
+  return null;
+}
+
 function readonlyBashPathReason(policy, command) {
   const { tokens: words, expandable, quotedPattern } = shellWordsDetailed(command);
   // POSIX only, like unsupportedShellEscape: PowerShell runs the command on
@@ -572,6 +789,13 @@ function readonlyBashPathReason(policy, command) {
   if (isSearch) {
     const follows = words.slice(1, preDashDash).find((token) => searchFollowsSymlinks(cmdName, token));
     if (follows) return `recursive search that follows symbolic links cannot be vetted: ${follows}; use -r, which does not follow them`;
+    // `grep -e x -e -- .`: the tool reads that `--` as `-e`'s value, so the
+    // words after it are still options (`-R`) and the excludes the executor
+    // places before it would be the value instead.
+    const beforeDashDash = preDashDash > 1 ? words[preDashDash - 1] : null;
+    if (beforeDashDash && !searchOptionIsSelfContained(cmdName, beforeDashDash)) {
+      return `\`--\` right after ${beforeDashDash} is ambiguous: the tool may read it as that option's value, not as the end of options; attach the value instead (for example -e-- or --regexp=--)`;
+    }
   }
   let patternSkipped = !isSearch || explicitPatternSource;
   let skipNext = false;
@@ -677,26 +901,14 @@ function readonlyBashPathReason(policy, command) {
       // separator, so `\**` would walk `/`; on POSIX a word holding one only
       // gets here unexpanded (the quotedPattern check refused it otherwise),
       // so the program receives it literally and there is nothing to expand.
-      if (/[*?\[\]{}]/.test(value) && !reachesParent && typeof fs.globSync === "function"
+      // On POSIX only a word the shell expands is expanded: a quoted pattern
+      // (`find . -name '.e*'`) reaches the program literally.
+      if (/[*?\[\]{}]/.test(value) && !reachesParent
         && !(process.platform !== "win32" && value.includes("\\"))
+        && (process.platform === "win32" || shellExpands)
         && (pathIsInside(policy.cwd, lexical) || policy.isWithinScopeRoot(lexical))) {
-        for (const match of fs.globSync(value.replace(/[{}]/g, "[$&]"), { cwd: policy.cwd })) {
-          const expanded = path.resolve(policy.cwd, match);
-          if (isSensitiveEnvFileOrTargetPath(expanded)) return `shell glob resolves to a protected environment file: ${value}`;
-          const expandedRelative = path.relative(policy.cwd, expanded);
-          const expandedParts = expandedRelative.replace(/\\/g, "/").split("/").filter(Boolean).map((part) => part.toLowerCase());
-          if (expandedParts.some((part) => part.startsWith("-"))) {
-            return `shell glob expands to an option-like path: ${value}`;
-          }
-          if (expandedParts.some((part) => PRIVATE_BASH_PATH_PARTS.has(part))
-            || agentHiddenReadablePathReason(expandedRelative)) {
-            return `shell glob resolves to a private workspace path: ${value}`;
-          }
-          const real = resolvedExistingPrefix(expanded);
-          if (!pathIsInside(policy.cwd, real) && !policy.isWithinScopeRoot(real)) {
-            return `shell glob resolves outside the workspace read boundary: ${value}`;
-          }
-        }
+        const globReason = shellGlobExpansionReason(policy, value);
+        if (globReason) return globReason;
       }
       if (!absolute && !hasTraversal && !exists) continue;
       if (!pathIsInside(policy.cwd, lexical) && !policy.isWithinScopeRoot(lexical)) {
@@ -708,11 +920,13 @@ function readonlyBashPathReason(policy, command) {
         }
         return `path escapes the workspace read boundary: ${value}`;
       }
-      if (exists) {
-        const real = resolvedExistingPrefix(lexical);
-        if (!pathIsInside(policy.cwd, real) && !policy.isWithinScopeRoot(real)) {
-          return `path resolves outside the workspace read boundary: ${value}`;
-        }
+      const physical = process.platform === "win32" ? null : physicalRealPath(policy.cwd, value);
+      for (const real of [exists ? resolvedExistingPrefix(lexical) : null, physical]) {
+        if (!real) continue;
+        const reason = realPathReadReason(policy, real);
+        if (reason === "outside") return `path resolves outside the workspace read boundary: ${value}`;
+        if (reason === "private") return `path resolves to a private workspace path: ${value}`;
+        if (reason === "env") return `protected environment file: ${value}`;
       }
     }
   }
@@ -1307,6 +1521,10 @@ export class MutationPolicy {
     if (!original || typeof command !== "string") {
       return { ok: false, error: "Error: No command provided.", reasonClass: "empty" };
     }
+    // The classifier runs synchronously in the MCP server; bound its input.
+    if (original.length > MAX_READONLY_BASH_COMMAND_LENGTH) {
+      return { ok: false, error: `Error: Command is too long for read-only bash (${original.length} characters; the limit is ${MAX_READONLY_BASH_COMMAND_LENGTH}). Split it into shorter commands.`, reasonClass: "too_long" };
+    }
     if (unsupportedShellEscape(original)) {
       return { ok: false, error: "Error: Unsupported shell escape in read-only bash. Put the argument in single quotes (for example 'a b.txt') instead of escaping characters with a backslash.", reasonClass: "shell_escape" };
     }
@@ -1365,8 +1583,19 @@ export class MutationPolicy {
     // `rg . $'--pre=sh'`), so they are rejected on the quote-masked command.
     // The brace test spans one shell word and any nesting inside it, so
     // `{x{y},-exec}` and `{{x},-delete}` are caught as well as `{a,b}`.
-    if (/\{(?:\\.|\S)*?(?:,|\.\.)(?:\\.|\S)*?\}/.test(masked) || /\$['"]/.test(masked)) {
+    if (hasBraceExpansionWord(masked) || /\$['"]/.test(masked)) {
       return { ok: false, error: `Error: Shell brace expansion and ANSI-C/locale quoting are not allowed in sandboxed bash: ${cmd.slice(0, 100)}`, reasonClass: "brace_or_ansi_c" };
+    }
+    // An unquoted `(` or `)` opens a subshell, a command group or a function
+    // body (`cat () ( id ) && cat`), whose commands the per-segment checks
+    // below never see. `$(`, `<(` and `>(` are refused above.
+    if (/[()]/.test(masked)) {
+      return { ok: false, error: "Error: Unquoted parentheses are not allowed in read-only bash: they start a subshell, command group or function definition. Quote an argument that contains them.", reasonClass: "shell_operator" };
+    }
+    // A `#` that starts a word comments out the rest of the line, so the shell
+    // would run fewer words than were vetted here.
+    if (/(?:^|[\s;&|<>])#/.test(masked)) {
+      return { ok: false, error: "Error: Shell comments are not allowed in read-only bash. Remove the # and the text after it, or quote a # that is part of an argument.", reasonClass: "shell_operator" };
     }
     // Tilde expansion: `~user` needs no slash, and the shell also expands a
     // tilde after `=` or `:`. Quoted or mid-word tildes are literal.

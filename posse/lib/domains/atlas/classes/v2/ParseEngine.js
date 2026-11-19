@@ -91,6 +91,7 @@ import {
 } from "../../functions/v2/parser/index-filters.js";
 import { sha256Hex } from "../../functions/v2/hash.js";
 import {
+  assertWiRefreshKeepsSource,
   materializeWiCommitPaths,
   verifyWiSource,
   wiCommitTree,
@@ -99,7 +100,7 @@ import {
 } from "../../functions/v2/wi-source-proof.js";
 import { ATLAS_SCIP_WARM_PURPOSES, ATLAS_WI_REFRESH_MAX_SOURCE_PASSES } from "../../../../catalog/atlas.js";
 import { ATLAS_EVENTS } from "../../functions/v2/contracts/events.js";
-import { ingestScipFile, listScipFiles } from "../../functions/v2/scip/ingester.js";
+import { ingestScipFile, listScipFiles, scipIngestRecordedArtifact } from "../../functions/v2/scip/ingester.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
 import { startEmbeddingRefresh } from "../../functions/v2/parse/embedding-intake-runner.js";
 import { hasLanguageSemantics } from "../../functions/v2/resolver/adapters/registry.js";
@@ -1150,9 +1151,10 @@ export class ParseEngine {
                 });
               }
               // A decode failure reports itself as a skip with a non-complete
-              // status: no document in the artifact was recorded, and the
-              // artifact cannot say which ones they were.
-              if (result?.skipped === true && result?.status !== "complete") artifactRecorded = false;
+              // status and no row id: no document in the artifact was
+              // recorded, and the artifact cannot say which ones they were. A
+              // short-circuited partial row names its failed documents above.
+              if (!scipIngestRecordedArtifact(result)) artifactRecorded = false;
             },
             onDocumentsPrepared: typeof opts.onDocumentsPrepared === "function"
               ? (coverage) => {
@@ -1353,6 +1355,8 @@ export class ParseEngine {
               worktreePath: payload.worktree_path, commitSha: payload.commit_sha });
             const tree = await wiCommitTree(sourceRoot, indexedCommit);
             const snapshot = this.#ledger.pathSnapshotAt(branch, this.#ledger.headSeq(branch));
+            await assertWiRefreshKeepsSource({ worktreePath: sourceRoot, commitSha: payload.commit_sha,
+              head: indexedCommit, tree, snapshot });
             const paths = [...new Set([...tree.keys(), ...snapshot.keys()])];
             base.paths_considered = paths.length;
             await this.#indexWiCommitPaths({ paths, tree, branch, base, sourceRoot, commitSha: indexedCommit });
@@ -1970,6 +1974,11 @@ export class ParseEngine {
       }
     }
 
+    // This merge publishes the generation that discharges work an unfinished
+    // main intake carried to it, so do that work here. Indexing appends
+    // ledger entries, which also keeps the view reuse below from skipping it.
+    await this.#indexCarriedIntakeWork(payload, ontoBranch, base);
+
     if (replayedEntries === 0 && await this.#reuseCurrentBranchView({ payload, branch: ontoBranch, base })) {
       return base;
     }
@@ -1981,6 +1990,31 @@ export class ParseEngine {
       branch: ontoBranch,
       base,
     });
+  }
+
+  /**
+   * Index the work a main intake carried to this attempt — its resume paths,
+   * plus a repository freshness scan when it owes a recheck — for a purpose
+   * that does not route through #warmIncremental, which honours it the same way.
+   *
+   * @param {AtlasWarmJobPayload} payload
+   * @param {string} branch
+   * @param {AtlasWarmJobResult} base
+   */
+  async #indexCarriedIntakeWork(payload, branch, base) {
+    const resumePaths = Array.isArray(payload?.resume_paths)
+      ? payload.resume_paths.filter(isCanonicalRepoPath)
+      : [];
+    const recheck = payload?.resume_repository_recheck === true || payload?.resume_paths_truncated === true;
+    if (!this.#parser || (resumePaths.length === 0 && !recheck)) return;
+    const paths = orderedUniquePaths([
+      ...(recheck ? await this.#discoverBootFreshnessPaths({ branch, base }) : []),
+      ...resumePaths,
+    ]);
+    if (paths.length === 0) return;
+    await this.#emitStage("merge", `indexing ${paths.length} path${paths.length === 1 ? "" : "s"} carried from an unfinished main intake`);
+    base.paths_considered += paths.length;
+    await this.#indexPaths({ paths, branch, base });
   }
 
   /**

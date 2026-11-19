@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { editScopeRequestReason } from "../../../../shared/tools/functions/edit-scope-preview.js";
 import { isSensitiveEnvFileOrTargetPath, safePath } from "../../../../shared/tools/functions/toolkit/index.js";
+import { realMutationTarget } from "../../../../shared/tools/functions/toolkit/path-policy.js";
 import { getJob, updateJobPayload, runInTransaction, grantApprovedScopeEntries, requestJobScopeExpansion } from "../../../queue/functions/index.js";
 import { guardToolWriteLock } from "../../../queue/functions/write-lock-guard.js";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../../runtime/functions/protected-paths.js";
@@ -15,18 +16,28 @@ import { toRepoRelativePath } from "../../../../shared/format/functions/display-
 // keeps the scope decision, path guard, and mutation transaction together.
 export function createScopedMutationTools(ctx) {
   installScopeCreateMaterializer(materializeScopeCreates);
-  function protectedMutationError(toolName, displayPath, absolutePath) {
-    const relPath = relativePathFromCwd(ctx.workspaceCwd, absolutePath);
-    const reason = protectedMutablePathReason(relPath);
-    return reason ? `Error: ${toolName} blocked - ${displayPath} is protected: ${reason}.` : null;
+  // Both the spelling and the symlink-resolved landing path must be mutable.
+  function protectedMutationError(toolName, displayPath, absolutePath, targetPath = absolutePath) {
+    for (const candidate of new Set([absolutePath, targetPath])) {
+      const reason = protectedMutablePathReason(relativePathFromCwd(ctx.workspaceCwd, candidate));
+      if (reason) return `Error: ${toolName} blocked - ${displayPath} is protected: ${reason}.`;
+    }
+    return null;
   }
 
+  // `target` is where the write lands; scope is judged there (decision E1).
   function resolveMutationPath(toolName, displayPath) {
     try {
-      return { path: safePath(ctx.workspaceCwd, displayPath, ctx.effectiveScopePredicates) };
+      const resolved = safePath(ctx.workspaceCwd, displayPath, ctx.effectiveScopePredicates);
+      return { path: resolved, target: realMutationTarget(ctx.workspaceCwd, resolved, ctx.effectiveScopePredicates) };
     } catch (err) {
       return { error: `Error: ${toolName} blocked - ${err?.message || String(err)}` };
     }
+  }
+
+  // Rename, copy and mkdir act on the entry itself, so only its parent is resolved.
+  function entryTarget(absolutePath, { followFinalLink = false } = {}) {
+    return realMutationTarget(ctx.workspaceCwd, absolutePath, ctx.effectiveScopePredicates, { followFinalLink });
   }
 
   function recordMutationPaths(files) {
@@ -107,18 +118,18 @@ export function createScopedMutationTools(ctx) {
     if (!ctx.writeEnabled) return "Error: Write access is not granted for this role.";
     const resolved = resolveMutationPath("write_file", args.path);
     if (resolved.error) return resolved.error;
-    const protectedErr = protectedMutationError("write_file", args.path, resolved.path);
+    const protectedErr = protectedMutationError("write_file", args.path, resolved.path, resolved.target);
     if (protectedErr) return protectedErr;
     const exists = fs.existsSync(resolved.path);
     const allowed = exists
-      ? ctx.effectiveScopePredicates.canEdit(resolved.path)
-      : ctx.effectiveScopePredicates.canCreate(resolved.path);
+      ? ctx.effectiveScopePredicates.canEdit(resolved.target)
+      : ctx.effectiveScopePredicates.canCreate(resolved.target);
     if (!allowed) {
       if (!ctx.mcpJobId) {
         return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
       }
       const scopeResult = await requestScopeExpansionWithinJob({
-        path: toRepoRelativePath(ctx.workspaceCwd, resolved.path) ?? "",
+        path: toRepoRelativePath(ctx.workspaceCwd, resolved.target) ?? "",
         access: exists ? "modify" : "create",
         operation: "write_file",
         reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
@@ -132,28 +143,28 @@ export function createScopedMutationTools(ctx) {
       }
       // Approved: complete the original write in the same call.
     }
-    return recordMutationUse(ctx.execWriteFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates), resolved.path);
+    return recordMutationUse(ctx.execWriteFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates), resolved.target);
   }
 
   async function editFileWithinScope(args = {}) {
     if (!ctx.writeEnabled) return "Error: Write access is not granted for this role.";
     const resolved = resolveMutationPath("edit_file", args.path);
     if (resolved.error) return resolved.error;
-    const protectedErr = protectedMutationError("edit_file", args.path, resolved.path);
+    const protectedErr = protectedMutationError("edit_file", args.path, resolved.path, resolved.target);
     if (protectedErr) return protectedErr;
     const missing = !fs.existsSync(resolved.path);
     const emptyCreate = !missing && args.find === "" && fs.statSync(resolved.path).isFile() && fs.statSync(resolved.path).size === 0;
-    if ((missing || emptyCreate) && ctx.effectiveScopePredicates.canCreate(resolved.path)) {
+    if ((missing || emptyCreate) && ctx.effectiveScopePredicates.canCreate(resolved.target)) {
       if (args.find !== "" || typeof args.replace !== "string") return "Error: Missing file: use write_file to create it, or edit_file with empty find and replacement text.";
       if (Object.keys(args).some((key) => !["path", "find", "replace"].includes(key))) return "Error: Creation edit accepts only path, find and replace; use write_file.";
-      return recordMutationUse(ctx.execWriteFile({ path: args.path, content: args.replace }, ctx.workspaceCwd, ctx.effectiveScopePredicates), resolved.path);
+      return recordMutationUse(ctx.execWriteFile({ path: args.path, content: args.replace }, ctx.workspaceCwd, ctx.effectiveScopePredicates), resolved.target);
     }
-    if (!ctx.effectiveScopePredicates.canEdit(resolved.path)) {
+    if (!ctx.effectiveScopePredicates.canEdit(resolved.target)) {
       if (!ctx.mcpJobId) {
         return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope.`;
       }
       const scopeResult = await requestScopeExpansionWithinJob({
-        path: toRepoRelativePath(ctx.workspaceCwd, resolved.path) ?? "",
+        path: toRepoRelativePath(ctx.workspaceCwd, resolved.target) ?? "",
         access: "modify",
         operation: "edit_file",
         reason: editScopeRequestReason(args),
@@ -167,7 +178,7 @@ export function createScopedMutationTools(ctx) {
       }
       // Approved: complete the original edit in the same call.
     }
-    return recordMutationUse(ctx.execEditFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates), resolved.path);
+    return recordMutationUse(ctx.execEditFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates), resolved.target);
   }
 
   function pathsReferToSameExistingFile(a, b) {
@@ -193,9 +204,11 @@ export function createScopedMutationTools(ctx) {
     if (!ctx.writeEnabled) return "Error: move_file is not available for this role.";
     const sourcePath = safePath(ctx.workspaceCwd, args.source, ctx.effectiveScopePredicates);
     const destinationPath = safePath(ctx.workspaceCwd, args.destination, ctx.effectiveScopePredicates);
-    const protectedSourceErr = protectedMutationError("move_file", args.source, sourcePath);
+    const sourceTarget = entryTarget(sourcePath);
+    const destinationTarget = entryTarget(destinationPath);
+    const protectedSourceErr = protectedMutationError("move_file", args.source, sourcePath, sourceTarget);
     if (protectedSourceErr) return protectedSourceErr;
-    const protectedDestinationErr = protectedMutationError("move_file", args.destination, destinationPath);
+    const protectedDestinationErr = protectedMutationError("move_file", args.destination, destinationPath, destinationTarget);
     if (protectedDestinationErr) return protectedDestinationErr;
     if (isSensitiveEnvFileOrTargetPath(sourcePath)) {
       return "Error: move_file blocked - reading .env files is blocked.";
@@ -206,20 +219,25 @@ export function createScopedMutationTools(ctx) {
     if (!fs.existsSync(sourcePath)) return `Error: Source file not found: ${args.source}`;
     const sourceStat = fs.statSync(sourcePath);
     if (!sourceStat.isFile()) return `Error: Source path is not a file: ${args.source}`;
-    if (!ctx.effectiveScopePredicates.canEdit(sourcePath)) {
+    if (!ctx.effectiveScopePredicates.canEdit(sourceTarget)) {
       return `Error: move_file blocked - ${args.source} is outside the allowed edit scope.`;
     }
 
     const overwrite = args.overwrite === true;
     const destinationExists = fs.existsSync(destinationPath);
     const destinationIsSource = destinationExists && pathsReferToSameExistingFile(sourcePath, destinationPath);
+    // The replace step renames the destination aside before moving the file
+    // in, so a directory there would be displaced first and the move then fail.
+    if (destinationExists && !destinationIsSource && fs.statSync(destinationPath).isDirectory()) {
+      return `Error: move_file destination is a directory: ${args.destination}. Name the destination file path, for example ${path.posix.join(String(args.destination).replace(/\\/g, "/"), path.basename(sourcePath))}.`;
+    }
     if (destinationExists && !destinationIsSource && !overwrite) {
       return `Error: Destination already exists: ${args.destination} (set overwrite=true to replace).`;
     }
-    if (destinationExists && !ctx.effectiveScopePredicates.canEdit(destinationPath)) {
+    if (destinationExists && !ctx.effectiveScopePredicates.canEdit(destinationTarget)) {
       return `Error: move_file blocked - ${args.destination} is outside the allowed edit scope.`;
     }
-    if (!destinationExists && !ctx.effectiveScopePredicates.canCreate(destinationPath)) {
+    if (!destinationExists && !ctx.effectiveScopePredicates.canCreate(destinationTarget)) {
       return `Error: move_file blocked - ${args.destination} is outside the allowed creation scope.`;
     }
     const sourceLockErr = guardToolWriteLock("move_file", args.source, ctx.workspaceCwd);
@@ -277,7 +295,7 @@ export function createScopedMutationTools(ctx) {
       }
     }
 
-    recordMutationPaths([args.source, args.destination]);
+    recordMutationPaths([sourceTarget, destinationTarget]);
     return JSON.stringify({
       ok: true,
       source: path.relative(ctx.workspaceCwd, sourcePath).replace(/\\/g, "/"),
@@ -290,9 +308,10 @@ export function createScopedMutationTools(ctx) {
     if (!ctx.writeEnabled) return "Error: copy_file is not available for this role.";
     const sourcePath = safePath(ctx.workspaceCwd, args.source, ctx.effectiveScopePredicates);
     const destinationPath = safePath(ctx.workspaceCwd, args.destination, ctx.effectiveScopePredicates);
-    const protectedSourceErr = protectedMutationError("copy_file", args.source, sourcePath);
+    const destinationTarget = entryTarget(destinationPath);
+    const protectedSourceErr = protectedMutationError("copy_file", args.source, sourcePath, entryTarget(sourcePath, { followFinalLink: true }));
     if (protectedSourceErr) return protectedSourceErr;
-    const protectedDestinationErr = protectedMutationError("copy_file", args.destination, destinationPath);
+    const protectedDestinationErr = protectedMutationError("copy_file", args.destination, destinationPath, destinationTarget);
     if (protectedDestinationErr) return protectedDestinationErr;
     if (isSensitiveEnvFileOrTargetPath(sourcePath)) {
       return "Error: copy_file blocked - reading .env files is blocked.";
@@ -314,11 +333,16 @@ export function createScopedMutationTools(ctx) {
     if (destinationExists && pathsReferToSameExistingFile(sourcePath, destinationPath)) {
       return `Error: copy_file source and destination are the same file: ${args.destination}.`;
     }
-    if (destinationExists && !ctx.effectiveScopePredicates.canEdit(destinationPath)) {
+    if (destinationExists && !ctx.effectiveScopePredicates.canEdit(destinationTarget)) {
       return `Error: copy_file blocked - ${args.destination} is outside the allowed edit scope.`;
     }
-    if (!destinationExists && !ctx.effectiveScopePredicates.canCreate(destinationPath)) {
+    if (!destinationExists && !ctx.effectiveScopePredicates.canCreate(destinationTarget)) {
       return `Error: copy_file blocked - ${args.destination} is outside the allowed creation scope.`;
+    }
+    // copyFileSync writes through a dangling link to a target the scope
+    // check above never saw.
+    if (!destinationExists && fs.lstatSync(destinationPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      return `Error: copy_file blocked - ${args.destination} is a symbolic link to a missing target.`;
     }
     const destinationLockErr = guardToolWriteLock("copy_file", args.destination, ctx.workspaceCwd);
     if (destinationLockErr) return destinationLockErr;
@@ -331,7 +355,7 @@ export function createScopedMutationTools(ctx) {
       const reason = err?.code ? ` (${err.code})` : "";
       return `Error: copy_file failed for ${args.source} -> ${args.destination}${reason}.`;
     }
-    recordMutationPaths([args.destination]);
+    recordMutationPaths([destinationTarget]);
     return JSON.stringify({
       ok: true,
       source: path.relative(ctx.workspaceCwd, sourcePath).replace(/\\/g, "/"),
@@ -344,7 +368,8 @@ export function createScopedMutationTools(ctx) {
     if (!ctx.writeEnabled) return "Error: make_dir is not available for this role.";
     if (!args.path || typeof args.path !== "string") return "Error: path is required.";
     const dirPath = safePath(ctx.workspaceCwd, args.path, ctx.effectiveScopePredicates);
-    const protectedErr = protectedMutationError("make_dir", args.path, dirPath);
+    const dirTarget = entryTarget(dirPath, { followFinalLink: true });
+    const protectedErr = protectedMutationError("make_dir", args.path, dirPath, dirTarget);
     if (protectedErr) return protectedErr;
     if (fs.existsSync(dirPath)) {
       if (!fs.statSync(dirPath).isDirectory()) {
@@ -356,7 +381,7 @@ export function createScopedMutationTools(ctx) {
         created: false,
       }, null, 2);
     }
-    if (!ctx.effectiveScopePredicates.canCreate(dirPath)) {
+    if (!ctx.effectiveScopePredicates.canCreate(dirTarget)) {
       return `Error: make_dir blocked - ${args.path} is outside the allowed creation scope.`;
     }
     try {

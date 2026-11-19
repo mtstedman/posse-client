@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { parseLocalToolCall } from "../../providers/functions/posse-local/tool-protocol.js";
 
 const SIMULATED_RESULT = /^(?:\{\s*"role"\s*:\s*"tool"|\{\s*"type"\s*:\s*"tool_result"|<tool_result\b)/i;
@@ -21,7 +23,40 @@ function leadingJsonObject(text) {
   return null;
 }
 
+function plainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+const TRANSCRIPT_MESSAGE_KEYS = new Set(["role", "content", "tool_calls"]);
+const TRANSCRIPT_CALL_KEYS = new Set(["id", "name", "arguments"]);
+
+// Prompt-only providers see their earlier requests rendered as
+// {"role":"assistant","content":"","tool_calls":[{id,name,arguments}]}
+// (renderConversation), and some reply in that shape. A message object of
+// that form (a role, a tool_calls array, optional content, nothing else) is a
+// request batch when it is the assistant's and every call is complete,
+// otherwise an unexecutable imitation ([]). Echoed call ids are dropped; the
+// runtime assigns its own. Returns null for any other text, so a JSON answer
+// that merely lists tool calls stays an answer.
+function transcriptToolCalls(text) {
+  if (!text.startsWith("{") || !text.endsWith("}")) return null;
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return null; }
+  if (!plainObject(parsed) || typeof parsed.role !== "string" || !Array.isArray(parsed.tool_calls)
+    || !Object.keys(parsed).every(key => TRANSCRIPT_MESSAGE_KEYS.has(key))) return null;
+  const message = parsed.role === "assistant" && (parsed.content === undefined || typeof parsed.content === "string");
+  const calls = parsed.tool_calls.map(item => {
+    const call = plainObject(item);
+    const name = typeof call?.name === "string" ? call.name.trim() : "";
+    if (!name || !plainObject(call.arguments) || !Object.keys(call).every(key => TRANSCRIPT_CALL_KEYS.has(key))) return null;
+    return { name, arguments: call.arguments, raw: JSON.stringify({ name, arguments: call.arguments }) };
+  });
+  return message && calls.length && calls.every(Boolean) ? calls : [];
+}
+
 function exactToolCalls(text) {
+  const transcript = transcriptToolCalls(text);
+  if (transcript) return transcript.length ? transcript : null;
   const single = parseLocalToolCall(text);
   if (single) return [single];
   if (!text.startsWith("[") || !text.endsWith("]")) return null;
@@ -106,7 +141,7 @@ function embeddedToolCall(text) {
     const index = text.indexOf("{", offset);
     if (index < 0) return false;
     const object = leadingJsonObject(text.slice(index));
-    if (object && parseLocalToolCall(object.body)) return true;
+    if (object && (parseLocalToolCall(object.body) || transcriptToolCalls(object.body))) return true;
     offset = index + (object?.body.length || 1);
   }
   return false;
@@ -133,13 +168,31 @@ function callsAfterCommentary(text) {
   return call ? [call] : null;
 }
 
-/** Accept one or more exact tool calls, or salvage a call before fabricated results. */
+/**
+ * A tool call's identity for duplicate checks: its name and its arguments as
+ * canonical JSON (object keys sorted at every depth, no whitespace), hashed.
+ * Two calls are byte-identical when these match, whatever the key order or
+ * spacing the model wrote.
+ */
+export function toolCallFingerprint(name, args) {
+  const canonical = value => Array.isArray(value) ? value.map(canonical)
+    : plainObject(value) ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+  return createHash("sha256").update(JSON.stringify([String(name), canonical(args ?? {})])).digest("hex");
+}
+
+/**
+ * Accept one or more exact tool calls, or salvage a call before fabricated
+ * results. `afterCommentary` marks calls that trailed prose: a live request
+ * under the commentary-then-call rule, which the caller may still refuse to
+ * run when it only repeats an executed call.
+ */
 export function parseAgentToolTurn(output) {
   const text = String(output || "").trim();
+  if (transcriptToolCalls(text)?.length === 0) return { calls: [], malformed: true };
   const exact = exactToolCalls(text) || missingRootTerminator(text) || redundantBatchTerminator(text) || batchEnvelopeSlip(text);
   if (exact) return { calls: exact, malformed: false };
   const afterCommentary = callsAfterCommentary(text);
-  if (afterCommentary) return { calls: afterCommentary, malformed: false };
+  if (afterCommentary) return { calls: afterCommentary, malformed: false, afterCommentary: true };
   const leading = leadingJsonObject(text);
   const firstCall = leading ? parseLocalToolCall(leading.body) : null;
   // A complete call followed only by one redundant object terminator has

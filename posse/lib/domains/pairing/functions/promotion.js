@@ -247,6 +247,10 @@ function fetchSourceBranch(projectDir, journal, exec = git) {
     });
   }
   const pinned = pinnedSource(projectDir, journal, sha, exec);
+  // The source ref records what this promotion integrates. A push after the
+  // close froze it is not part of the session: left on the ref, the session
+  // tree listing would read those commits as integrated and purge them.
+  if (pinned?.moved) exec(["update-ref", sourceRef, pinned.sha], projectDir, { timeoutMs: 5_000 });
   return pinned ? { remoteRef: sourceRef, ...pinned } : { remoteRef: sourceRef, sha };
 }
 

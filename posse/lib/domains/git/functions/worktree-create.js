@@ -64,8 +64,11 @@ export async function ensureDetachedReadOnlyWorktreeAsync(projectDir, {
       // .git file (partial context-dir rm) resolves to the enclosing repo —
       // the main checkout, since these dirs live under <project>/.posse/ —
       // and the reset/clean below would then hit the user's working tree.
+      // Git reports the real toplevel, so compare real paths: a project
+      // reached through a symlink otherwise never matches, and every call
+      // leaks a fresh `-<token>` worktree beside the stale one.
       const toplevel = String(await gitExecAsync(["rev-parse", "--show-toplevel"], targetDir, { signal }) || "").trim();
-      if (!toplevel || path.resolve(toplevel).toLowerCase() !== targetDir.toLowerCase()) {
+      if (!toplevel || fs.realpathSync(toplevel).toLowerCase() !== fs.realpathSync(targetDir).toLowerCase()) {
         throw new Error(`stale directory is not a worktree root (toplevel: ${toplevel || "unknown"})`);
       }
       await gitExecAsync(["checkout", "--detach", ref], targetDir, { signal });

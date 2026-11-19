@@ -1,5 +1,6 @@
 import { mergeEvidenceCatalog } from "./merged-packet-evidence.js";
 import { packetEvidence } from "./packet-evidence.js";
+import { materializedEvidenceIdentity } from "./evidence-selector.js";
 
 function failStoredPacket(message) {
   const error = new Error(message);
@@ -36,7 +37,7 @@ function mapStoredPacketEvidence(packet, mapEvidence) {
 export function serializeStoredAgentHandoffPacket(packet) {
   const { catalog: evidenceCatalog, pointers } = mergeEvidenceCatalog(packetEvidence(packet));
   if (evidenceCatalog.length === 0) return JSON.stringify(packet);
-  const stored = mapStoredPacketEvidence(packet, (evidence) => pointers.get(evidence.selector));
+  const stored = mapStoredPacketEvidence(packet, (evidence) => pointers.get(materializedEvidenceIdentity(evidence)));
   stored.evidence_catalog = evidenceCatalog;
   return JSON.stringify(stored);
 }
@@ -44,13 +45,13 @@ export function serializeStoredAgentHandoffPacket(packet) {
 export function parseStoredAgentHandoffPacket(materializedJson) {
   const stored = JSON.parse(materializedJson);
   if (!Array.isArray(stored.evidence_catalog)) return stored;
-  const selectors = new Set();
+  const identities = new Set();
   for (const evidence of stored.evidence_catalog) {
-    const selector = String(evidence?.selector || "");
-    if (!selector || selectors.has(selector)) {
+    const identity = materializedEvidenceIdentity(evidence);
+    if (!identity || identities.has(identity)) {
       failStoredPacket("Stored agent_handoff evidence catalog is invalid");
     }
-    selectors.add(selector);
+    identities.add(identity);
   }
   const packet = mapStoredPacketEvidence(stored, (pointer) => {
     const evidenceId = Number(pointer?.evidence_id);

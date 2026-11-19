@@ -122,5 +122,6 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "-v", takesValue: false, category: "boolean" },
   { name: "--auto", takesValue: false, category: "boolean" },
   { name: "--yes", takesValue: false, category: "boolean" },
+  { name: "--diff", takesValue: false, category: "boolean" },
   { name: "-y", takesValue: false, category: "boolean" },
 ]);

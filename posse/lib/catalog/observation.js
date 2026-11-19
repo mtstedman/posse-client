@@ -8,6 +8,9 @@ export const RESEARCH_CHILD_ENVELOPE_NORMALIZED_OBSERVATION_TYPE = "handoff.rese
 export const ASSESSMENT_VERDICT_OBSERVATION_TYPE = "assessment.verdict";
 export const HANDOFF_TRAVERSAL_COMPLETION_CHECK_OBSERVATION_TYPE = "handoff.traversal_completion_check";
 export const TOOL_SURFACE_ISSUED_OBSERVATION_TYPE = "tool.surface.issued";
+// Bounded provider commentary (the visible text between tool calls), kept
+// beside the job's tool rows so the conversation orders and retains both alike.
+export const AGENT_COMMENTARY_OBSERVATION_TYPE = "agent.commentary";
 export const AGENT_HANDOFF_OBSERVATION_TYPES = Object.freeze({
   SHAPE_NORMALIZED: "agent_handoff.shape_normalized",
   TARGET_DERIVED: "agent_handoff.target_derived",

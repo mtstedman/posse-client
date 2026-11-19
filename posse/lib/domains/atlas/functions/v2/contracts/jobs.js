@@ -175,6 +175,16 @@ export const ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS = Object.freeze([
   "symlink_skip",
 ]);
 
+/**
+ * `generation_proof_reason` values of a warm that published its exact main
+ * generation: on the first attempt, or on the retry after a coded
+ * stale-publication error.
+ */
+export const ATLAS_MAIN_GENERATION_PUBLISHED_PROOF_REASONS = Object.freeze([
+  "clean_exact_oid_before_after",
+  "clean_exact_oid_before_after_retry",
+]);
+
 /** Frozen status policy. Implementations and tests must source from here. */
 export const ATLAS_WARM_JOB_POLICY = Object.freeze({
   jobType: "atlas_warm",

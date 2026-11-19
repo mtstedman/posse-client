@@ -362,6 +362,7 @@ export const EVENT_TYPES = Object.freeze({
   PLAN_APPROVAL_GATE_FAILED: "plan.approval_gate_failed",
   PLAN_APPROVED: "plan.approved",
   PLAN_DEPENDENCY_MISSING: "plan.dependency_missing",
+  PLAN_HUMAN_INPUT_MERGED: "plan.human_input_merged",
   PLAN_MODALITY_MISMATCH: "plan.modality_mismatch",
   PLAN_MODALITY_RECOVERY: "plan.modality_recovery",
   PLAN_MODALITY_RECOVERY_EXHAUSTED: "plan.modality_recovery_exhausted",

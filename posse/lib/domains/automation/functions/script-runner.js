@@ -25,6 +25,8 @@ export function scriptToolEnv(tool, input, secrets, tempDir, sourceEnv = process
 // Runs one script tool. Arguments arrive only as data — JSON on stdin and
 // PARAM_* variables — never on a command line. Returns a redacted result; an
 // abort of `signal` rejects with the signal's reason after the tree is killed.
+// `ok` is false for a timeout, a killing signal (named in `signal`), or a
+// non-zero exit unless the manifest declares exit codes as data.
 export async function runScriptTool(tool, input, { secrets = {}, privateInputs = {}, signal = null, sourceEnv = process.env } = {}) {
   signal?.throwIfAborted();
   const interpreter = SCRIPT_TOOL_INTERPRETERS[tool.manifest.interpreter];
@@ -68,7 +70,7 @@ export async function runScriptTool(tool, input, { secrets = {}, privateInputs =
       // A script that never reads stdin closes the pipe; that is not an error.
       child.stdin.on("error", () => {});
       child.stdin.end(JSON.stringify(input ?? {}));
-      const finish = (code, failure) => {
+      const finish = (code, failure, killedBy = null) => {
         if (settled) return; settled = true;
         clearTimeout(timer); signal?.removeEventListener("abort", onAbort);
         terminator.cancel();
@@ -88,18 +90,19 @@ export async function runScriptTool(tool, input, { secrets = {}, privateInputs =
         if (output === undefined) output = scrubSecretText(out.text);
         const errorText = scrubSecretText(err.text);
         resolve({
-          ok: !timedOut && code === 0, exit_code: timedOut ? null : code, timed_out: timedOut,
+          ok: !timedOut && !killedBy && (code === 0 || code !== null && tool.manifest.exit_codes_are_data === true),
+          exit_code: timedOut ? null : code, timed_out: timedOut, ...(killedBy ? { signal: killedBy } : {}),
           output, ...(outputJson !== undefined ? { output_json: outputJson } : {}), stderr: errorText.trim(), truncated,
           redacted: out.redacted || err.redacted || output !== out.text || errorText !== err.text,
           duration_ms: Math.round(performance.now() - started),
         });
       };
       child.once("error", error => finish(null, error));
-      child.once("close", code => {
+      child.once("close", (code, killedBy) => {
         terminator.noteClose();
         // During termination the bounded waiter owns the outcome, including
         // close events caused by its final destruction of inherited pipes.
-        if (!terminating) finish(code, null);
+        if (!terminating) finish(code, null, killedBy);
       });
       if (signal?.aborted) onAbort();
     });

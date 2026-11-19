@@ -89,7 +89,7 @@ export const ATLAS_EVENT_NAMES = Object.freeze(
  * @property {string[]} paths                 Canonical repo-relative paths changed in the range.
  * @property {string} [target_branch]
  * @property {string} [reason]
- * @property {"post_commit_hook" | "external_pull" | "merge" | "freshness_gate"} source
+ * @property {"post_commit_hook" | "external_pull" | "merge" | "freshness_gate" | "host_lease_released"} source
  */
 
 /**

@@ -54,20 +54,10 @@ export function cancelUnusedReviewedTransfers(jobId, { staleOnly = false, leaseT
     metadata.cross_wi_merge_dependencies = (metadata.cross_wi_merge_dependencies || []).filter((dep) => !ids.has(dep.transfer_id));
     db.prepare("UPDATE work_items SET metadata_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(metadata), now(), wi.id);
     for (const entry of unused) {
-      const source = db.prepare("SELECT * FROM work_items WHERE id = ?").get(entry.source_work_item_id);
       for (const file of entry.files) {
         db.prepare(`UPDATE work_item_file_locks SET released_at = ?, release_reason = 'unused_reviewed_reservation'
           WHERE work_item_id = ? AND path = ? AND released_at IS NULL AND source_job_id = ?`).run(now(), wi.id, normPath(file.path), job.id);
-        if (source && source.merge_state !== "merged" && !["failed", "canceled"].includes(source.status)
-            && workItemBranchGeneration(source) === entry.source_generation) {
-          // Restore the original rows only if no other WI has acquired the
-          // claim. Reservations have prevented another live writer meanwhile.
-          const other = db.prepare(`SELECT 1 FROM work_item_file_locks WHERE path = ? AND released_at IS NULL AND work_item_id != ?`).get(normPath(file.path), source.id);
-          const own = db.prepare("SELECT 1 FROM work_item_file_locks WHERE work_item_id = ? AND path = ? AND released_at IS NULL").get(source.id, normPath(file.path));
-          if (!other && !own) db.prepare(`UPDATE work_item_file_locks SET released_at = NULL, release_reason = NULL
-            WHERE id = (SELECT id FROM work_item_file_locks WHERE work_item_id = ? AND path = ?
-              AND release_reason = 'reviewed_handoff' ORDER BY id DESC LIMIT 1)`).run(source.id, normPath(file.path));
-        }
+        restoreReviewedDonorClaim(entry, file.path, db);
       }
     }
     const payload = parseJobPayload(job);
@@ -83,6 +73,48 @@ export function cancelUnusedReviewedTransfers(jobId, { staleOnly = false, leaseT
     return unused.length;
   };
   return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
+}
+
+/**
+ * Return one reviewed path's claim to its donor (decision M7). Reserving the
+ * path released the donor's lock as `reviewed_handoff`; once the receiver no
+ * longer holds the import (an unused reservation was canceled, its branch was
+ * discarded with the import, or its lock left with a deferred lease), that
+ * lock is active again while the donor is unmerged, live and on the transfer's
+ * branch generation, unless another work item holds the path meanwhile. A
+ * merged donor needs no claim: its edit is on the target branch. Returns
+ * whether a lock was restored.
+ */
+export function restoreReviewedDonorClaim(transfer, path, db = getDb()) {
+  const source = db.prepare("SELECT * FROM work_items WHERE id = ?").get(transfer.source_work_item_id);
+  if (!source || source.merge_state === "merged" || ["failed", "canceled"].includes(source.status)
+      || workItemBranchGeneration(source) !== transfer.source_generation) return false;
+  const lockPath = normPath(path);
+  const other = db.prepare(`SELECT 1 FROM work_item_file_locks WHERE path = ? AND released_at IS NULL AND work_item_id != ?`).get(lockPath, source.id);
+  const own = db.prepare("SELECT 1 FROM work_item_file_locks WHERE work_item_id = ? AND path = ? AND released_at IS NULL").get(source.id, lockPath);
+  if (other || own) return false;
+  return db.prepare(`UPDATE work_item_file_locks SET released_at = NULL, release_reason = NULL
+    WHERE id = (SELECT id FROM work_item_file_locks WHERE work_item_id = ? AND path = ?
+      AND release_reason = 'reviewed_handoff' ORDER BY id DESC LIMIT 1)`).run(source.id, lockPath).changes > 0;
+}
+
+/**
+ * A work item's branch was discarded with its content (K2): every reviewed
+ * import it reserved or applied went with it, so each donor gets its claim
+ * back (restoreReviewedDonorClaim). Run after the work item's own locks are
+ * released. A rebuilt job that needs the path again reserves it through
+ * reviewed admission, which re-adds its merge dependency on the donor.
+ */
+export function restoreReviewedDonorClaimsForWorkItem(workItemId, db = getDb()) {
+  let restored = 0;
+  for (const job of db.prepare("SELECT * FROM jobs WHERE work_item_id = ? ORDER BY id").all(Number(workItemId))) {
+    for (const transfer of [...reviewedTransfers(job, { applied: true }), ...reviewedTransfers(job)]) {
+      for (const file of transfer.files || []) {
+        if (restoreReviewedDonorClaim(transfer, file.path, db)) restored += 1;
+      }
+    }
+  }
+  return restored;
 }
 
 export function reviewedTransferOwner(jobId, transfer, leaseToken) {

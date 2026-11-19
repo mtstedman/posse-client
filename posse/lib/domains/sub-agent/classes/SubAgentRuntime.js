@@ -1659,9 +1659,13 @@ export class SubAgentRuntime {
   #priorBatch(parentCallId, registration, digest, researchRequest, requestCount) {
     const priorBatches = [...this.batches.values()].filter((batch) => batch.parentCallId === parentCallId);
     const existingBatchId = this.batchByParent.get(parentCallId);
+    const mappedBatch = existingBatchId ? this.batches.get(existingBatchId) : null;
+    // A batch whose every request failed validation ran no child, so it does
+    // not spend the parent's one batch; an identical resubmission still
+    // replays it through the digest match in #dispatch.
     const existingBatch = researchRequest
       ? priorBatches.find((batch) => batch.requestDigest === digest)
-      : existingBatchId ? this.batches.get(existingBatchId) : null;
+      : mappedBatch?.entries.some((entry) => !entry.validationError) ? mappedBatch : null;
     if (researchRequest && !existingBatch) {
       const limit = registration.researchPolicy?.maxChildren || 0;
       const used = priorBatches.reduce((sum, batch) => sum + batch.entries.filter(entryCountsTowardResearchLimit).length, 0);

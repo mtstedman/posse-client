@@ -10,6 +10,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 
 import { atlasDir } from "./runtime-paths.js";
+import { ATLAS_MAIN_GENERATION_PUBLISHED_PROOF_REASONS } from "./contracts/jobs.js";
 
 const SCHEMA_VERSION = 1;
 const TERMINAL_STATUSES = new Set(["complete", "partial", "failed", "interrupted"]);
@@ -53,41 +54,127 @@ export function readAtlasMainIntakeState(repoRoot) {
   return value;
 }
 
+export function mainIntakeRecheckRequestPath(repoRoot) {
+  return path.join(atlasDir(repoRoot), "intake", "main.recheck.json");
+}
+
 /**
- * @param {{ repoRoot: string, purpose: string, targetBranch: string, sourceProof: any, paths?: string[] }} args
+ * A pending request that the next main intake recheck the whole repository.
+ * It lives beside the intake record, so attempts rewriting that record cannot
+ * drop it, and it exists even before the first intake.
  */
-export function beginAtlasMainIntake({ repoRoot, purpose, targetBranch, sourceProof, paths = [] }) {
+export function readAtlasMainRecheckRequest(repoRoot) {
+  const value = readJson(mainIntakeRecheckRequestPath(repoRoot));
+  if (!value || value.schema_version !== SCHEMA_VERSION || typeof value.request_id !== "string") return null;
+  return value;
+}
+
+/** @param {any} request @param {string} targetBranch */
+export function atlasMainRecheckRequestApplies(request, targetBranch) {
+  return !!request && (!request.target_branch || request.target_branch === targetBranch);
+}
+
+/**
+ * Record that source changed without hinting a main warm (for example while a
+ * session host lease suppressed ATLAS emission). The next main intake for the
+ * target branch takes it over as `resume.repository_recheck`.
+ *
+ * @param {string} repoRoot
+ * @param {{ targetBranch?: string | null, reason: string }} args
+ */
+export function requestAtlasMainRepositoryRecheck(repoRoot, { targetBranch = null, reason }) {
+  const existing = readAtlasMainRecheckRequest(repoRoot);
+  const branch = targetBranch ? String(targetBranch) : null;
+  const request = {
+    schema_version: SCHEMA_VERSION,
+    request_id: randomUUID(),
+    // Two requests for different branches widen to any branch.
+    target_branch: existing && existing.target_branch !== branch ? null : branch,
+    requested_at: new Date().toISOString(),
+    reasons: [...new Set([
+      ...(Array.isArray(existing?.reasons) ? existing.reasons : []),
+      capText(reason || "unspecified", 120),
+    ])].slice(-8),
+  };
+  writeJsonAtomic(mainIntakeRecheckRequestPath(repoRoot), request);
+  return request;
+}
+
+function consumeAtlasMainRecheckRequest(repoRoot, request) {
+  // A request written after this attempt read the old one stays pending.
+  if (readAtlasMainRecheckRequest(repoRoot)?.request_id !== request.request_id) return;
+  try { fs.unlinkSync(mainIntakeRecheckRequestPath(repoRoot)); } catch { /* already consumed */ }
+}
+
+function cleanPaths(values) {
+  return Array.isArray(values)
+    ? values.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+}
+
+/**
+ * `sourceDelta` lists the paths that changed between the last published
+ * generation and this source pin (`repository_recheck` when they could not be
+ * listed); the warm indexes them beside its hint paths.
+ *
+ * @param {{
+ *   repoRoot: string,
+ *   purpose: string,
+ *   targetBranch: string,
+ *   sourceProof: any,
+ *   paths?: string[],
+ *   sourceDelta?: { paths?: string[], repository_recheck?: boolean } | null,
+ * }} args
+ */
+export function beginAtlasMainIntake({ repoRoot, purpose, targetBranch, sourceProof, paths = [], sourceDelta = null }) {
   const previous = readAtlasMainIntakeState(repoRoot);
   const proofOid = String(sourceProof?.git_oid || "").trim().toLowerCase();
   const gitOid = /^[0-9a-f]{40,64}$/u.test(proofOid) ? proofOid : null;
-  const canResume = !!(
-    gitOid
-    && previous
+  const unfinished = !!(
+    previous
     && RESUMABLE_STATUSES.has(previous.status)
     && previous.target_branch === targetBranch
-    && previous.git_oid === gitOid
   );
+  const canResume = !!(unfinished && gitOid && previous.git_oid === gitOid);
+  // An unfinished attempt's work is not discharged by a later source pin: it
+  // carries forward, and the whole repository is rechecked because the pin
+  // moved under that work. An attempt without a proven pin cannot publish, so
+  // it keeps the paths but leaves the recheck to the next proven attempt,
+  // which inherits it from this one (itself unfinished).
+  const carriesToNewPin = unfinished && !canResume && !!gitOid;
   const now = new Date().toISOString();
-  const normalizedPaths = Array.isArray(paths)
-    ? paths.map((value) => String(value || "").trim()).filter(Boolean)
+  const normalizedPaths = cleanPaths(paths);
+  const previousSkipped = unfinished && Array.isArray(previous?.result?.skipped?.items)
+    ? cleanPaths(previous.result.skipped.items.map((row) => row?.repo_rel_path))
     : [];
-  const previousSkipped = canResume && Array.isArray(previous?.result?.skipped?.items)
-    ? previous.result.skipped.items.map((row) => String(row?.repo_rel_path || "").trim()).filter(Boolean)
+  const repeatScope = unfinished && previous.status !== "partial"
+    ? cleanPaths(previous?.scope?.paths)
     : [];
-  const repeatScope = canResume && previous.status !== "partial"
-    ? (Array.isArray(previous?.scope?.paths) ? previous.scope.paths : [])
-    : [];
-  const resumePaths = [...new Set([...repeatScope, ...previousSkipped].filter((value) => value !== "."))];
-  const resumeRepository = !!(canResume && (
-    (previous.status !== "partial" && previous?.scope?.kind === "repository")
-    || previous?.scope?.paths_truncated === true
-    || previous?.result?.skipped?.truncated === true
-    || previous?.result?.truncated === true
-    || !!previous?.result?.rebuild_required
-    || (previous.status === "partial"
-      && previous?.result?.generation_proof_reason !== "clean_exact_oid_before_after")
-    || previousSkipped.includes(".")
-  ));
+  // Work this unfinished attempt itself inherited and never closed.
+  const pendingResume = unfinished ? cleanPaths(previous?.resume?.paths) : [];
+  const resumePaths = [...new Set([
+    ...repeatScope,
+    ...previousSkipped,
+    ...pendingResume,
+    ...cleanPaths(sourceDelta?.paths),
+  ].filter((value) => value !== "."))];
+  const recheckRequest = readAtlasMainRecheckRequest(repoRoot);
+  const recheckRequested = atlasMainRecheckRequestApplies(recheckRequest, targetBranch);
+  const resumeRepository = carriesToNewPin
+    || recheckRequested
+    || sourceDelta?.repository_recheck === true
+    || !!(canResume && (
+      (previous.status !== "partial" && previous?.scope?.kind === "repository")
+      || previous?.scope?.paths_truncated === true
+      || previous?.result?.skipped?.truncated === true
+      || previous?.result?.truncated === true
+      || !!previous?.result?.rebuild_required
+      || (previous.status === "partial"
+        && !ATLAS_MAIN_GENERATION_PUBLISHED_PROOF_REASONS.includes(previous?.result?.generation_proof_reason))
+      || previousSkipped.includes(".")
+      || previous?.resume?.repository_recheck === true
+      || previous?.resume?.paths_truncated === true
+    ));
   const state = {
     schema_version: SCHEMA_VERSION,
     attempt_id: canResume ? previous.attempt_id : randomUUID(),
@@ -120,6 +207,9 @@ export function beginAtlasMainIntake({ repoRoot, purpose, targetBranch, sourcePr
     supersedes_attempt_id: !canResume && previous ? previous.attempt_id : null,
   };
   writeJsonAtomic(mainIntakeStatePath(repoRoot), state);
+  // This attempt now owns the recheck; if it does not complete, its resume
+  // state carries the recheck to the next attempt.
+  if (recheckRequested) consumeAtlasMainRecheckRequest(repoRoot, recheckRequest);
   return state;
 }
 

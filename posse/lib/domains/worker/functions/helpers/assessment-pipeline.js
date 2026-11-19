@@ -2304,6 +2304,7 @@ export async function runPostExecutionAssessment(worker, {
         cwd: wtPath,
         commitHash: assessedCommitHash,
         attemptId: attempt.id,
+        signal: worker._abortControllers?.get(job.id)?.signal || null,
         cleanupWorktree: wtPath
           ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
               reason: `test-post-change-side-effects-wi-${job.work_item_id}-job-${job.id}`,

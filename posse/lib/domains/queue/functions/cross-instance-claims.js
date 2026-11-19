@@ -9,13 +9,20 @@ import crypto from "node:crypto";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isUnderRoot, rootsOverlap } from "../../../shared/scope/functions/path.js";
+import { normalizeGitPrefix, projectPathToRepoPath, repoPathToProjectPath } from "../../git/functions/project-paths.js";
 import { casPushSharedTrunkClaimNative } from "../../git/functions/shared-trunk-native.js";
+import { isGitCommandFailure } from "../../git/functions/utils.js";
+import { nestedProjectSubpathAsync } from "../../git/functions/worktree-path.js";
 import { now, runImmediateTransaction } from "./common.js";
 import { logDurableEvent, logEvent } from "./events.js";
 import { readRuntimeStatus, RUNTIME_STATUS_KEYS, updateSharedTrunkRuntimeStatus } from "./runtime-status.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
 
 const CLAIM_PROTOCOL = "posse.shared_trunk_claim.v1";
+// Claim paths are relative to the repository root, so instances whose project
+// dirs differ inside one repository name a file alike. A payload without this
+// marker was written before that, with a path relative to the writer's project.
+const CLAIM_PATH_SPACE = "repository";
 const CLAIM_REF_PREFIX = "refs/posse/claims/";
 const CLAIM_KEY_RE = /^[0-9a-f]{64}$/;
 const OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -52,6 +59,26 @@ export function sharedTrunkClaimKey(pathValue, scopeKind = "file") {
   const kind = normalizeScopeKind(scopeKind, path);
   if (!path || !kind) return null;
   return crypto.createHash("sha256").update(`${kind}\0${path}`, "utf8").digest("hex");
+}
+
+/** The project's prefix in its repository ("" at the root), as claim paths compare. */
+async function claimProjectPrefix(projectDir, signal = null) {
+  try {
+    return normalizeGitPrefix(normalizePath(await nestedProjectSubpathAsync(projectDir, { signal })) || "");
+  } catch (error) {
+    // Outside a repository the project is its own root; nothing can be pushed there.
+    if (isGitCommandFailure(error)) return "";
+    throw error;
+  }
+}
+
+/** A peer's repository-relative claim path as this project names it, or null when outside it. */
+function projectClaimPath(repoPath, scopeKind, prefix) {
+  if (!prefix) return repoPath;
+  const projectPath = normalizePath(repoPathToProjectPath(repoPath, prefix));
+  if (projectPath) return projectPath;
+  // A root claim on the project dir or one of its ancestors covers the whole project.
+  return scopeKind === "root" && isUnderRoot(prefix.slice(0, -1), [repoPath]) ? "*" : null;
 }
 
 function boundedString(value, max = MAX_ID_CHARS) {
@@ -91,6 +118,7 @@ function claimRefAndKey(raw = {}) {
 function normalizeFetchedClaim(raw, {
   observedAtMs = Date.now(),
   ttlMin = 30,
+  projectPrefix = "",
 } = {}) {
   const refData = claimRefAndKey(raw);
   if (!refData) return null;
@@ -104,6 +132,10 @@ function normalizeFetchedClaim(raw, {
   const scopeKind = normalizeScopeKind(payload.scope_kind, path);
   if (!instanceId || !path || !scopeKind || payload.kind !== "hard") return null;
   if (sharedTrunkClaimKey(path, scopeKind) !== refData.key) return null;
+  const localPath = payload.path_space === CLAIM_PATH_SPACE
+    ? projectClaimPath(path, scopeKind, projectPrefix)
+    : path;
+  if (!localPath) return null;
   const wiId = Number(payload.wi_id);
   const jobId = payload.job_id == null ? null : Number(payload.job_id);
   if (!Number.isSafeInteger(wiId) || wiId <= 0) return null;
@@ -119,7 +151,7 @@ function normalizeFetchedClaim(raw, {
     instance_id: instanceId,
     work_item_id: wiId,
     job_id: jobId,
-    path,
+    path: localPath,
     scope_kind: scopeKind,
     lifecycle_kind: "hard",
     expires_at: new Date(effectiveExpiryMs).toISOString(),
@@ -237,7 +269,7 @@ function replacePeerClaims(rows, instanceId, {
   return peerRows;
 }
 
-function activeLockClaims(activeLocks, instanceId, ttlMin, nowMs = Date.now()) {
+function activeLockClaims(activeLocks, instanceId, ttlMin, { prefix = "", nowMs = Date.now() } = {}) {
   const rows = [
     ...(activeLocks?.work_items || []),
     ...(activeLocks?.jobs || []),
@@ -245,11 +277,12 @@ function activeLockClaims(activeLocks, instanceId, ttlMin, nowMs = Date.now()) {
   const desired = new Map();
   const expiresAt = new Date(nowMs + Math.max(1, Number(ttlMin) || 30) * 60_000).toISOString();
   for (const raw of rows) {
-    const path = normalizePath(raw.path);
+    const projectPath = normalizePath(raw.path);
     // Whole-repository rows are local scheduler barriers or unknown-scope
     // fallbacks. Publishing either as an advisory peer veto turns routine
     // assessment/legacy jobs into a global cross-clone lock.
-    if (path === "*") continue;
+    if (!projectPath || projectPath === "*") continue;
+    const path = normalizePath(projectPathToRepoPath(projectPath, prefix));
     const scopeKind = normalizeScopeKind(raw.lock_kind, path);
     const wiId = Number(raw.work_item_id);
     const jobId = raw.job_id == null ? null : Number(raw.job_id);
@@ -262,6 +295,7 @@ function activeLockClaims(activeLocks, instanceId, ttlMin, nowMs = Date.now()) {
       wi_id: wiId,
       job_id: Number.isSafeInteger(jobId) && jobId > 0 ? jobId : null,
       path,
+      path_space: CLAIM_PATH_SPACE,
       scope_kind: scopeKind,
       kind: "hard",
       expires_at: expiresAt,
@@ -353,6 +387,7 @@ export async function syncCrossInstanceClaims({
   const owner = boundedString(instanceId);
   if (!owner) return { attempted: false, skipped: "missing_instance_id" };
 
+  const projectPrefix = await claimProjectPrefix(projectDir, signal);
   const observedAtMs = Date.now();
   const boundedFetched = Array.isArray(fetchedClaims)
     ? fetchedClaims.slice(0, MAX_CLAIMS_PER_FETCH)
@@ -360,6 +395,7 @@ export async function syncCrossInstanceClaims({
   let normalized = normalizeFetchedSharedTrunkClaims(boundedFetched, {
     observedAtMs,
     ttlMin: config.claimsTtlMin,
+    projectPrefix,
   });
   const snapshotStartedMs = Date.parse(claimSnapshotStartedAt || "");
   if (Number.isFinite(snapshotStartedMs) && observedAtMs < snapshotStartedMs) {
@@ -422,7 +458,7 @@ export async function syncCrossInstanceClaims({
   }
   const localRows = localClaimRows();
   const localByKey = new Map(localRows.map((row) => [row.claim_key, row]));
-  const desired = activeLockClaims(activeLocks, owner, config.claimsTtlMin);
+  const desired = activeLockClaims(activeLocks, owner, config.claimsTtlMin, { prefix: projectPrefix });
   const renewalFloorMs = Date.now() + Math.max(1, Number(config.claimsTtlMin) || 30) * 30_000;
   let published = 0;
   let released = 0;

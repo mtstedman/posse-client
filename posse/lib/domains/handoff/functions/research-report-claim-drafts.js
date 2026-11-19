@@ -1,10 +1,18 @@
-import { AGENT_HANDOFF_PROFILES } from "../../../catalog/handoff.js";
+import { AGENT_HANDOFF_ALIAS_POLICY, AGENT_HANDOFF_PROFILES } from "../../../catalog/handoff.js";
 // @ts-check
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { createAgentHandoffPacketTable, createResearchReportClaimDraftTable } from "../../../shared/storage/functions/table-definitions.js";
+import { coerceList, normalizeAgentHandoffShape } from "./helpers/shape-normalizer.js";
 
 const TABLE = "research_report_claim_drafts";
 const CLAIM_ID_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
+const CLAIM_NAME_ALIAS = AGENT_HANDOFF_ALIAS_POLICY.accepted.fieldAliases.claimName;
+const CLAIM_EVIDENCE_LANES = Object.freeze([...new Set(
+  ["researcherClaimProof", "researcherClaimSupport"].flatMap((aliasId) => {
+    const { canonical, alias } = AGENT_HANDOFF_ALIAS_POLICY.accepted.fieldAliases[aliasId];
+    return [canonical, alias];
+  }),
+)]);
 
 function fail(code, message) {
   const error = /** @type {Error & { code: string }} */ (new Error(message));
@@ -201,18 +209,43 @@ export function researchReportDraftClaims(agentCallId, db = getDb()) {
   return listRows(id, ensureSchema(db)).map(({ id: _id, index: _index, position: _position, ...claim }) => claim);
 }
 
+function plainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function carriesEvidence(claim) {
+  const detail = plainObject(Array.isArray(claim) ? claim[1] : claim);
+  return Boolean(detail) && CLAIM_EVIDENCE_LANES.some((lane) => (
+    detail[lane] != null && !(Array.isArray(detail[lane]) && detail[lane].length === 0)
+  ));
+}
+
+// The explicit claim keeps its own text and detail and takes the saved
+// finding's selectors as its evidence.
+function withSavedEvidence(claim, evidence) {
+  if (typeof claim === "string") return { [CLAIM_NAME_ALIAS.canonical]: claim, evidence };
+  if (Array.isArray(claim)) {
+    if (claim[1] != null && !plainObject(claim[1])) return claim;
+    return [claim[0], { ...(claim[1] || {}), evidence }, ...claim.slice(2)];
+  }
+  return { ...claim, evidence };
+}
+
 function mergeClaims(explicitClaims, draftClaims) {
   const merged = [];
   const indexes = new Map();
+  // Merged positions of explicit claims that carry no evidence of their own.
+  const evidenceless = new Set();
   // submitted[n] is the one-based merged index of the n-th entry of
   // [explicit claims..., saved findings...], or 0 for an entry with no text.
   const submitted = [];
-  for (const claim of [...explicitClaims, ...draftClaims]) {
+  for (const [position, claim] of [...explicitClaims, ...draftClaims].entries()) {
+    const explicit = position < explicitClaims.length;
     const text = typeof claim === "string"
       ? claim
       : Array.isArray(claim)
         ? claim[0]
-        : claim?.claim;
+        : claim?.[CLAIM_NAME_ALIAS.canonical] ?? claim?.[CLAIM_NAME_ALIAS.alias];
     const key = String(text || "").trim().replace(/\s+/g, " ").toLowerCase();
     if (!key) {
       submitted.push(0);
@@ -220,11 +253,19 @@ function mergeClaims(explicitClaims, draftClaims) {
     }
     if (indexes.has(key)) {
       // Explicit final claims are processed first and retain authority over an
-      // exact duplicate saved earlier in the call.
-      submitted.push(indexes.get(key) + 1);
+      // exact duplicate saved earlier in the call. One that restates a saved
+      // finding without evidence of its own inherits the saved evidence;
+      // explicit evidence replaces the saved finding entirely.
+      const index = indexes.get(key);
+      if (!explicit && evidenceless.has(index)) {
+        merged[index] = withSavedEvidence(merged[index], claim.evidence);
+        evidenceless.delete(index);
+      }
+      submitted.push(index + 1);
       continue;
     }
     indexes.set(key, merged.length);
+    if (explicit && !carriesEvidence(claim)) evidenceless.add(merged.length);
     merged.push(claim);
     submitted.push(merged.length);
   }
@@ -252,23 +293,51 @@ function remapCoverageClaimIndexes(coverage, { merged, submitted }) {
   });
 }
 
+// The claims list as the agent meant it: absent is empty, and a list sent as
+// JSON text or as a keyed object reads as the list (the handoff shape
+// normaliser's rule). Null when no list reading exists, so the merge leaves
+// the value for the validator to reject instead of replacing it.
+function explicitClaimList(value) {
+  if (value == null) return [];
+  return coerceList(value)?.value ?? null;
+}
+
+// The report whose claims the merge extends. The merge runs before
+// materialisation repairs shapes, so a handoffs list or report sent as JSON
+// text is read through that same shape normaliser; a canonical envelope is
+// used as it is, leaving its other repairs for materialisation to record.
+function reportForMerge(copy) {
+  const direct = Array.isArray(copy.handoffs) ? plainObject(copy.handoffs[0]?.report) : null;
+  if (direct && (direct.claims == null || Array.isArray(direct.claims))) {
+    return { envelope: copy, report: direct };
+  }
+  const envelope = normalizeAgentHandoffShape(copy, { role: "researcher" }).value;
+  const report = Array.isArray(envelope?.handoffs) ? plainObject(envelope.handoffs[0]?.report) : null;
+  return report ? { envelope, report } : null;
+}
+
 export function mergeResearchReportDraftClaims(args, agentCallId, db = getDb()) {
   const drafts = researchReportDraftClaims(agentCallId, db);
   if (drafts.length === 0 || !args || typeof args !== "object" || Array.isArray(args)) return args;
   const copy = JSON.parse(JSON.stringify(args));
   if (copy.profile !== AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT) return copy;
+  let merged = copy;
   let result;
-  if (Array.isArray(copy.handoffs)) {
-    const report = copy.handoffs[0]?.report;
-    if (!report || typeof report !== "object") return copy;
-    result = mergeClaims(Array.isArray(report.claims) ? report.claims : [], drafts);
-    report.claims = result.merged;
+  if (copy.handoffs != null) {
+    const target = reportForMerge(copy);
+    const explicit = target ? explicitClaimList(target.report.claims) : null;
+    if (!explicit) return copy;
+    result = mergeClaims(explicit, drafts);
+    target.report.claims = result.merged;
+    merged = target.envelope;
   } else {
-    result = mergeClaims(Array.isArray(copy.claims) ? copy.claims : [], drafts);
+    const explicit = explicitClaimList(copy.claims);
+    if (!explicit) return copy;
+    result = mergeClaims(explicit, drafts);
     copy.claims = result.merged;
   }
-  if (Object.prototype.hasOwnProperty.call(copy, "coverage")) {
-    copy.coverage = remapCoverageClaimIndexes(copy.coverage, result);
+  if (Object.prototype.hasOwnProperty.call(merged, "coverage")) {
+    merged.coverage = remapCoverageClaimIndexes(merged.coverage, result);
   }
-  return copy;
+  return merged;
 }

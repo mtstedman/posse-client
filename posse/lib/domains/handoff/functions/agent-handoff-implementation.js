@@ -2,7 +2,7 @@ import { existingJobDependencyId, validExistingJobDependency } from "../../plann
 import { PLANNER_EXISTING_JOB_PREFIX } from "../../../catalog/planning.js";
 import { mergeEvidenceCatalog } from "./helpers/merged-packet-evidence.js";
 import { AGENT_HANDOFF_ALIAS_POLICY, AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY, AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES, AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS, AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PLANNER_CONTRACT_KEYS, AGENT_HANDOFF_PLANNER_CONTRACT_VERSION, AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES, AGENT_HANDOFF_PLANNER_REPORT_KEYS, AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_PROTOCOL, AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY, AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES, AGENT_HANDOFF_RESEARCH_PROSE_FIELDS, AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES, AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR } from "../../../catalog/handoff.js";
-import { parseAgentHandoffEvidenceSelector, normalizedLines } from "./helpers/evidence-selector.js";
+import { materializedEvidenceIdentity, parseAgentHandoffEvidenceSelector, normalizedLines } from "./helpers/evidence-selector.js";
 import { fetchHashRefForContext, findFetchedHashRefViewsForContext, findVisibleHashRefSourceWindowsForContext, materializeHashRefEvidenceForContext, surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { fail, plainObject } from "./helpers/report-schema.js";
 import { recordHandoffSoftening, runWithHandoffFieldDiagnostics } from "./helpers/field-diagnostics.js";
@@ -432,6 +432,7 @@ function deliveredSourceCoverageCandidates(context) {
       source_version: detail?.source_version || null,
       start,
       end,
+      ref_backed: !!detail?.evidence_ref,
     });
   }
   return candidates;
@@ -572,18 +573,23 @@ function computeSurfacedPathCandidates(context) {
       existing.source_version = candidate.source_version;
     }
   };
-  for (const candidate of deliveredSourceCoverageCandidates(context)) {
+  // Ref-less custody (a tool.read, or coverage with no evidence ref) has no
+  // delivered bytes to compare; ref-backed coverage is checked through its ref.
+  for (const { ref_backed: refBacked, ...candidate } of deliveredSourceCoverageCandidates(context)) {
     const exactRange = { start: candidate.start, end: candidate.end };
+    const refless = refBacked ? [] : [exactRange];
     const existing = byPath.get(candidate.path);
     if (existing) {
       upgradeProvenance(existing, candidate);
       if (existing.restrict_to_opened_ranges) existing.opened_ranges.push(exactRange);
+      existing.refless_ranges.push(...refless);
       continue;
     }
     byPath.set(candidate.path, {
       ...candidate,
       restrict_to_opened_ranges: true,
       opened_ranges: [exactRange],
+      refless_ranges: refless,
     });
   }
   for (const candidate of successfulToolReadCandidates(context)) {
@@ -591,6 +597,7 @@ function computeSurfacedPathCandidates(context) {
     if (existing) {
       upgradeProvenance(existing, candidate);
       if (existing.restrict_to_opened_ranges) existing.opened_ranges.push({ start: candidate.start, end: candidate.end });
+      existing.refless_ranges.push({ start: candidate.start, end: candidate.end });
       continue;
     }
     byPath.set(candidate.path, {
@@ -599,6 +606,7 @@ function computeSurfacedPathCandidates(context) {
       source_version: candidate.source_version,
       restrict_to_opened_ranges: true,
       opened_ranges: [{ start: candidate.start, end: candidate.end }],
+      refless_ranges: [{ start: candidate.start, end: candidate.end }],
     });
   }
   for (const candidate of successfulArtifactInspectionCandidates(context)) {
@@ -613,6 +621,7 @@ function computeSurfacedPathCandidates(context) {
       source_version: null,
       restrict_to_opened_ranges: false,
       opened_ranges: [],
+      refless_ranges: [],
       artifact_inspection: candidate.artifact_inspection,
     });
   }
@@ -637,11 +646,16 @@ function computeSurfacedPathCandidates(context) {
       path: canonical,
       restrict_to_opened_ranges: true,
       opened_ranges: [{ start: window.start, end: window.end }],
+      refless_ranges: [],
       source_refs: window.ref ? [window.ref] : [],
     });
   }
   return [...byPath.values()]
-    .map((candidate) => ({ ...candidate, opened_ranges: mergedLineRanges(candidate.opened_ranges) }))
+    .map((candidate) => ({
+      ...candidate,
+      opened_ranges: mergedLineRanges(candidate.opened_ranges),
+      refless_ranges: mergedLineRanges(candidate.refless_ranges),
+    }))
     .sort((left, right) => left.path.localeCompare(right.path));
 }
 
@@ -937,6 +951,7 @@ function materializeWorktreeEvidenceSelector(selector, context) {
   let excerpt = lines.slice(selector.start - 1, endLine).join("\n");
   if (resolved.source_refs?.length > 0) {
     const matchingRanges = [];
+    const mismatchedLines = new Set();
     const safeExcerptLines = excerpt.split("\n");
     for (const ref of new Set(resolved.source_refs)) {
       const opts = { db: context?.db || getDb() };
@@ -963,7 +978,16 @@ function materializeWorktreeEvidenceSelector(selector, context) {
               safeExcerptLines[start - selector.start + index] = line;
             }
           }
+        } else {
+          for (let line = start; line <= end; line += 1) mismatchedLines.add(line);
         }
+      }
+    }
+    // A ref-less read or coverage row is custody of its own for lines no ref
+    // window contradicts; a line a ref delivered must match one of its refs.
+    for (const range of resolved.refless_ranges || []) {
+      for (let line = Math.max(selector.start, range.start); line <= Math.min(endLine, range.end); line += 1) {
+        if (!mismatchedLines.has(line)) matchingRanges.push({ start: line, end: line });
       }
     }
     // The same blank declaration separators bridged above sit between matched
@@ -1670,9 +1694,10 @@ function materializeClaim(
         continue;
       }
       for (const evidence of evidenceEntries) {
-        selectors.add(evidence.selector);
-        if (!materialized.has(evidence.selector)) {
-          materialized.set(evidence.selector, evidence);
+        const identity = materializedEvidenceIdentity(evidence);
+        selectors.add(identity);
+        if (!materialized.has(identity)) {
+          materialized.set(identity, evidence);
           counters.evidence += evidence.excerpt.length;
         }
       }
@@ -1718,7 +1743,7 @@ function materializeClaim(
         });
         return [];
       }
-      selectors.add(evidence.selector);
+      selectors.add(materializedEvidenceIdentity(evidence));
       const reason = boundedString(normalizedEntry[1], `decoy[${index}][1]`, 500);
       counters.evidence += evidence.excerpt.length;
       counters.narrative += reason.length;

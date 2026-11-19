@@ -37,7 +37,6 @@ const TUNABLE_DEFAULTS = Object.freeze({
   atlas_embedded_queue_wait_ms: 90000,
   atlas_job_cache_ttl_ms: 300000,
   atlas_prefetch_cache_ttl_ms: 600000,
-  atlas_corruption_cooldown_ms: 120000,
 });
 
 const LOG_LEVEL_VALUES = new Set(["debug", "info", "warn", "error"]);
@@ -202,10 +201,6 @@ export function getAtlasJobCacheTtlMs() {
 
 export function getAtlasPrefetchCacheTtlMs() {
   return readNonNegativeInt("atlas_prefetch_cache_ttl_ms", TUNABLE_DEFAULTS.atlas_prefetch_cache_ttl_ms);
-}
-
-export function getAtlasCorruptionCooldownMs() {
-  return readNonNegativeInt("atlas_corruption_cooldown_ms", TUNABLE_DEFAULTS.atlas_corruption_cooldown_ms);
 }
 
 // Exposed for tests that want to assert default values without round-tripping

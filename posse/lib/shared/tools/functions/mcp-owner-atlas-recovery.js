@@ -1,6 +1,7 @@
 import { atlasDescriptorSchemaForAction } from "../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
 import { SYMBOL_GET_BATCH_POLICY } from "../../../catalog/symbol-get-batch.js";
 import { symbolMatchesRequestedIdentifier } from "../../../domains/atlas/functions/v2/retrieval/identifier-resolution.js";
+import { atlasNestedActionArgKeys } from "./atlas-nested-action.js";
 
 /**
  * Clamp a count argument that exceeds its advertised ceiling instead of
@@ -219,10 +220,10 @@ export function nearestNameSearchArgs(result, toolArgs) {
   return { query, scope: "either", semantic: true, limit: NEAREST_NAME_LIMIT };
 }
 
-// A wrapper call may name its nested action under any key nestedAtlasAction
-// reads; rewrite every key present so the first one read agrees.
+// A wrapper call may name its nested action under any key and spelling
+// atlasNestedAction reads; rewrite every one present so the one read agrees.
 export function withNestedAtlasAction(toolArgs, action) {
-  const keys = ["gatewayAction", "targetAction", "actionName", "action"].filter((key) => toolArgs?.[key] != null);
+  const keys = atlasNestedActionArgKeys(toolArgs);
   const next = { ...toolArgs };
   for (const key of keys.length > 0 ? keys : ["action"]) next[key] = action;
   return next;

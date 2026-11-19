@@ -64,13 +64,19 @@ export function killProcessTree(child, {
   }
 }
 
-/** @param {string} command
- * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string, filesToCreate?: string[], posseRoot?: string}} options
+/** `slotKey` names the work item's worktree when `cwd` is a private checkout
+ * of it; `onSlotWait` hears when the command starts and stops waiting for it.
+ * @param {string} command
+ * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string, filesToCreate?: string[], posseRoot?: string, slotKey?: string | null, onSlotWait?: ((waiting: boolean) => void) | null}} options
  */
 export async function runCommand(command, options = {}) {
   const release = await acquireTestWorktreeSlot(options?.cwd || process.cwd(), {
+    key: options?.slotKey || null,
     signal: options?.signal || null,
-    onWait: () => log.info("verification", "Waiting for another job's verification run in this checkout", { command, cwd: options?.cwd }),
+    onWait: (waiting) => {
+      if (waiting) log.info("verification", "Waiting for another job's verification run in this checkout", { command, cwd: options?.cwd, slot: options?.slotKey || null });
+      options?.onSlotWait?.(waiting);
+    },
   });
   try {
     return await runCommandInSlot(command, options);

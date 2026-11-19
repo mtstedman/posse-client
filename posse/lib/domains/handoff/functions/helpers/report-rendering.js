@@ -1,5 +1,6 @@
 import { AGENT_HANDOFF_LIMITS, RESEARCHER_REPORT_BRIEF_POLICY } from "../../../../catalog/handoff.js";
 import { claimEvidenceReferences } from "./evidence-references.js";
+import { materializedEvidenceIdentity } from "./evidence-selector.js";
 
 function renderedEvidenceSelector(evidence) {
   if (evidence?.path && Number.isInteger(evidence.source_start_line)
@@ -107,13 +108,15 @@ function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommen
   const bySelector = new Map();
   const add = (evidence, lane, reason = null) => {
     if (!evidence?.selector || !evidence?.excerpt) return;
-    const existing = bySelector.get(evidence.selector);
+    // The same selector can name windows in different files; keep each.
+    const identity = materializedEvidenceIdentity(evidence);
+    const existing = bySelector.get(identity);
     if (existing) {
       existing.lanes.add(lane);
       if (reason) existing.reasons.add(reason);
       return;
     }
-    bySelector.set(evidence.selector, {
+    bySelector.set(identity, {
       evidence,
       lanes: new Set([lane]),
       reasons: new Set(reason ? [reason] : []),

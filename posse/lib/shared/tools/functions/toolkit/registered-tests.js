@@ -153,14 +153,16 @@ function workspaceSnapshotChanges(before, after) {
 function restoreWorkspaceEntry(root, rel, entry) {
   const fullPath = safeWorkspacePath(root, rel);
   if (!fullPath) return;
+  // A file too large to back up stays as the test left it; removing it first
+  // would lose it.
+  if (entry.type !== "symlink" && (!entry.backedUp || !entry.content)) {
+    throw new Error(`original content was not captured for ${rel}`);
+  }
   fs.mkdirSync(path.dirname(fullPath), { recursive: true });
   try { fs.rmSync(fullPath, { recursive: true, force: true }); } catch { /* best effort before restore */ }
   if (entry.type === "symlink") {
     fs.symlinkSync(entry.target, fullPath);
     return;
-  }
-  if (!entry.backedUp || !entry.content) {
-    throw new Error(`original content was not captured for ${rel}`);
   }
   fs.writeFileSync(fullPath, entry.content);
   try { fs.chmodSync(fullPath, entry.mode); } catch { /* best effort */ }
@@ -753,6 +755,14 @@ export function resolvePythonCommand(cwd = process.cwd(), {
   return null;
 }
 
+// Both runners print {"ok": true} as their last line only after the test
+// function returned true. An exit 0 without it (process.exit, sys.exit in the
+// test or the code under test) shows nothing ran to completion.
+function runnerReportedPass(stdout) {
+  const last = String(stdout || "").trimEnd().split(/\r?\n/).at(-1);
+  try { return JSON.parse(last)?.ok === true; } catch { return false; }
+}
+
 function cleanupTempDir(tmpDir) {
   if (!tmpDir) return true;
   try {
@@ -826,13 +836,15 @@ function runSource({
       timeout: Math.max(1000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS),
       maxBuffer: 8 * 1024 * 1024,
     });
-    let ok = (result.status ?? 1) === 0 && !result.error;
+    const exitedCleanly = (result.status ?? 1) === 0 && !result.error;
+    let ok = exitedCleanly && runnerReportedPass(result.stdout);
     const failureText = compactScrubbed(`${result.stderr || ""}\n${result.stdout || ""}`);
     let stdout = ok ? compactScrubbed(result.stdout, 2000) : null;
     let failure = ok ? null : {
       message: result.error?.code === "ETIMEDOUT"
         ? `test timed out after ${timeoutMs}ms`
-        : failureText || result.error?.message || `test exited ${result.status ?? "unknown"}`,
+        : exitedCleanly ? "test exited 0 without reporting a result; nothing shows it ran to completion"
+          : failureText || result.error?.message || `test exited ${result.status ?? "unknown"}`,
       exit_code: result.status ?? null,
       signal: result.signal || null,
       timed_out: result.error?.code === "ETIMEDOUT",

@@ -45,6 +45,8 @@ export const RUN_DISPLAY_GLOBAL_KEYS = Object.freeze({
   NUDGE: "n",
   ASK: "?",
   IMAGE: "g",
+  // Offered only while merged work is waiting to be pushed.
+  DEPLOY: "y",
 });
 
 // Keys that act only while the Session pane is showing and no prompt of its

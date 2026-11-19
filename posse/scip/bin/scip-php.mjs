@@ -258,6 +258,8 @@ function prepareFallbackPhpProject({ cwd, parentDir }) {
   if (usable.length === 0) {
     return null;
   }
+  // The stager's orphan sweep reclaims a killed wrapper's copy by this name
+  // shape (PHP_FALLBACK_PROJECT_DIR_RE in atlas scip/stager.js): keep the pid first.
   const dir = path.join(parentDir, `php-project-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   fs.mkdirSync(dir, { recursive: true });
   for (const file of usable) {

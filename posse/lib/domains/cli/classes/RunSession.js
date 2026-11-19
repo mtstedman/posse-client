@@ -9,6 +9,7 @@ import { pairingSessionLive, sharedRunEligible, sharedRunTerminalAttached, workI
 import { SESSION_OWNER_CHILD_ENV } from "../../../catalog/session-sync.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { leasedToSessionHost } from "../../pairing/functions/compute-lease.js";
+import { startAtlasHostLeaseWatch } from "../../integrations/functions/atlas.js";
 import { describeModelCatalogWarning, validateConfiguredModels } from "../../providers/functions/model-catalog-validate.js";
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
@@ -38,7 +39,7 @@ import { RunHumanAnswerRelay } from "./RunHumanAnswerRelay.js";
 import { RunSchedulerLoopCallbacks } from "./RunSchedulerLoopCallbacks.js";
 import { RunSharedSession } from "./RunSharedSession.js";
 import { RunShutdownController } from "./RunShutdownController.js";
-import { PROVIDER_AUTH_WARMUP_TIMEOUT_MS, PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS, closeRuntimeStateForExit, describeOpenGatesAtExit, firstLine, handleWrapUpSignal, listOpenHumanGatesAtExit, openParkingGateForWorkItem, operationalRunJobs, summarizeRunCompletion, bootScipLangPatchFromEvent, scopeScipEventToSourceLanguage } from "../functions/run-session.js";
+import { PROVIDER_AUTH_WARMUP_TIMEOUT_MS, PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS, closeRuntimeStateForExit, deployReadyLineAtExit, describeOpenGatesAtExit, firstLine, handleWrapUpSignal, listOpenHumanGatesAtExit, openParkingGateForWorkItem, operationalRunJobs, summarizeRunCompletion, bootScipLangPatchFromEvent, scopeScipEventToSourceLanguage } from "../functions/run-session.js";
 import { checkPosseUpdateAvailabilityCached, formatPosseUpdateAvailableWarning } from "../functions/update-command.js";
 import { BossyLocalStream } from "../../bridge/classes/BossyLocalStream.js";
 import { readHumanGateResnoozeSec } from "../../scheduler/functions/config.js";
@@ -62,6 +63,7 @@ export class RunSession {
     this._removeRunSignalHandlers = null;
     this._stopRunDisplaySnapshots = null;
     this._cleanupRunAtlas = null;
+    this._stopAtlasHostLeaseWatch = null;
     this._bossyLocalStream = null;
     this._humanAnswerRelay = null;
     this._processResourceDisposal = null;
@@ -102,6 +104,9 @@ export class RunSession {
     this._activeDisplay = null;
     try { display?.stop?.(); } catch { /* best effort */ }
 
+    const stopAtlasHostLeaseWatch = this._stopAtlasHostLeaseWatch;
+    this._stopAtlasHostLeaseWatch = null;
+    try { stopAtlasHostLeaseWatch?.(); } catch { /* best effort */ }
     const worker = this._activeWorker;
     this._activeWorker = null;
     const cleanupAtlas = this._cleanupRunAtlas;
@@ -179,6 +184,7 @@ export class RunSession {
       isAtlasRuntimeDisabled,
       getAtlasRuntimeDisabledReason,
       enqueueAtlasSelfRepair,
+      startAtlasHostLeaseWatch: startAtlasHostLeaseWatchForRun = startAtlasHostLeaseWatch,
       setConductorKeepWarm: setConductorKeepWarmForRun = setConductorKeepWarm,
       closeSharedConductor: closeSharedConductorForRun = closeSharedConductor,
       nativeBinaries: nativeBinariesForRun = defaultNativeBinaries,
@@ -1597,6 +1603,15 @@ export class RunSession {
     // the TUI. startAtlasWarmupPhase() is invoked post-scheduler.boot below; it
     // is intentionally NOT pushed into bootWarmups.
     startAtlasWarmupPhase = () => {
+    // While the lease names the session host this clone emits no ATLAS work;
+    // the watch records the main index as needing a recheck and catches the
+    // suppressed work up when the lease stops naming the host, including the
+    // boot warm skipped below.
+    if (!this._stopAtlasHostLeaseWatch) {
+      try {
+        this._stopAtlasHostLeaseWatch = startAtlasHostLeaseWatchForRun({ cwd: PROJECT_DIR, config: atlasWarmupBootConfig });
+      } catch { /* the next run's boot rechecks */ }
+    }
     // A clone whose lease names the session host never runs routable work
     // itself, so it has nothing to index ATLAS for.
     let leasedToHost = false;
@@ -3216,7 +3231,8 @@ export class RunSession {
   // their reminders, gates on work items outside this run): nothing asks
   // them again until the next run or the phone.
   try {
-    const openGateLines = describeOpenGatesAtExit(listOpenHumanGatesAtExit(), {
+    const openGatesAtExit = listOpenHumanGatesAtExit();
+    const openGateLines = describeOpenGatesAtExit(openGatesAtExit, {
       excludeGateIds: [...completion.failures, ...completion.incomplete]
         .map((item) => item.gate_job_id)
         .filter(Boolean),
@@ -3224,6 +3240,8 @@ export class RunSession {
     if (openGateLines.length > 0) {
       console.error(`  ${C.yellow}Open gate(s) left waiting for you:${C.reset}\n${openGateLines.map((line) => `    ${line}`).join("\n")}\n`);
     }
+    const deployLine = deployReadyLineAtExit(openGatesAtExit);
+    if (deployLine) console.error(`  ${C.dim}${deployLine}${C.reset}\n`);
   } catch { /* the exit summary is advisory; never block exit */ }
   // Set the exit code first so the shutdown record logs the real one.
   process.exitCode = completion.exitCode;

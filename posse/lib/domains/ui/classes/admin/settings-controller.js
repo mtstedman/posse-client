@@ -354,9 +354,12 @@ export class AdminSettingsController {
     } else if (paneId === "local") {
       // What is installed and what can be added, then the saved selections
       // and per-model defaults from the catalog groups.
-      const marks = { installed: `${C.green}✓${C.reset}`, available: `${C.dim}+${C.reset}`, unsupported: `${C.dim}–${C.reset}` };
+      const marks = {
+        installed: `${C.green}✓${C.reset}`, incomplete: `${C.yellow}!${C.reset}`,
+        available: `${C.dim}+${C.reset}`, unsupported: `${C.dim}–${C.reset}`,
+      };
       sections.push({
-        id: "local_models", title: "Models", hint: "✓ installed  + available to add",
+        id: "local_models", title: "Models", hint: "✓ installed  ! incomplete  + available to add",
         rows: [{ setting_key: ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY, setting_value: "Press Enter", updated_at: null, source: "action" }],
         lines: (this._localModelInstall?.inventory() || []).map(({ slug, kind, status, detail }) =>
           `  ${marks[status]} ${slug.padEnd(14)} ${kind.padEnd(6)} ${C.dim}${detail}${C.reset}`),

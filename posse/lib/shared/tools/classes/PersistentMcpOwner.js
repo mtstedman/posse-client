@@ -62,7 +62,7 @@ import { sourceSelectorFingerprint } from "../../../domains/research/classes/Sou
 import { admitSourceContextHeadroom, releaseSourceContextHeadroomReservation } from "../../../domains/research/functions/context-headroom.js";
 import { compactResearchSearchResult, compactResearchSearchRows } from "../functions/research-search-presentation.js";
 import { ATLAS_MUTATION_PATH_FIELDS } from "../../../catalog/tools/filesystem-mutations.js";
-import { usesResearcherAtlasReadSurface, sessionToolPolicy, requestedToolPolicyName, toolAllowedByPolicy, stripGatewaySessionTokenFields, nestedAtlasActionDenial, deniedToolCallMessage, hasSuiteToolAllowlist, delegatedEvidenceRequestAllowed } from "../functions/mcp-owner-tool-policy.js";
+import { usesResearcherAtlasReadSurface, sessionToolPolicy, requestedToolPolicyName, toolAllowedByPolicy, stripGatewaySessionTokenFields, nestedAtlasActionDenial, deniedToolCallMessage, deniedToolCallResult, hasSuiteToolAllowlist, delegatedEvidenceRequestAllowed } from "../functions/mcp-owner-tool-policy.js";
 import { resolveAtlasSymbolHandle, atlasSymbolSourcePath } from "../functions/mcp-owner-symbol-handles.js";
 import { annotateOwnerResultTransform, preserveOwnerModelControlNotices, ownerExactSourceEvidence, ownerThinImplementationGap, tagOwnerModelControlNotice, isMemoryToolAction, finalizeSourceTransport, mcpResultTextChars, CLIENT_RESULT_CLIP_CHARS } from "../functions/mcp-owner-source-transport.js";
 import { recordOwnerToolObservation, recordOwnerAnsweredToolCall, ownerToolStructuredError } from "../functions/mcp-owner-tool-observations.js";
@@ -1436,9 +1436,11 @@ export class PersistentMcpOwner {
       && terminalBatchIdleMs >= 0
       ? Math.floor(terminalBatchIdleMs)
       : RESEARCH_ATLAS_TERMINAL_BATCH_IDLE_MS;
-    // A memory failure is terminal only for the agent session that observed
-    // it. Weak keys avoid extending the lifetime of detached MCP sessions.
-    this._terminalMemoryToolSessions = new WeakSet();
+    // A memory failure is terminal only for the agent run that observed it:
+    // each entry holds the session's job binding at the failure, so a reused
+    // session bound to another job, attempt or agent call starts clean. Weak
+    // keys avoid extending the lifetime of detached MCP sessions.
+    this._terminalMemoryToolSessions = new WeakMap();
     this._startedAt = null;
     this._listenError = null;
   }
@@ -3253,6 +3255,21 @@ export class PersistentMcpOwner {
   }
 
   async _executeAtlasToolCall(args) {
+    // Every Atlas execution passes here, including the recoveries and batch
+    // items the owner issues after the entry check under a rewritten action.
+    // A recovery whose action the session was not granted gets this denial,
+    // which every recovery treats as failed: it returns the original result.
+    // Every registered session carries a signed suite allowlist (registration
+    // and rebinding reject one without), and the entry check admits nothing
+    // without one, so a call from a provider always reaches this check.
+    const policy = sessionToolPolicy(args?.session);
+    if (hasSuiteToolAllowlist(args?.session?.bootConfig) && !toolAllowedByPolicy(policy, args?.toolName, args?.toolArgs)) {
+      return {
+        jsonrpc: "2.0",
+        id: args?.message?.id ?? null,
+        result: deniedToolCallResult(args?.toolName, policy, args?.toolArgs),
+      };
+    }
     return observeAtlasRequest(args, (request) => this._executeAtlasRequestItems(request));
   }
 
@@ -3704,7 +3721,8 @@ export class PersistentMcpOwner {
       return mcpToolResultMessage(message, result);
     }
     const memoryAction = isMemoryToolAction(requested.name);
-    if (memoryAction && this._terminalMemoryToolSessions.has(session)) {
+    const terminalMemoryBinding = memoryAction ? this._terminalMemoryToolSessions.get(session) : null;
+    if (terminalMemoryBinding && gatewayBindingIsCurrent(session, terminalMemoryBinding)) {
       const result = terminalMemoryToolRejection(requested.name);
       recordOwnerToolObservation({
         session,
@@ -4201,7 +4219,7 @@ export class PersistentMcpOwner {
       const executorCompletedAt = Date.now();
       const transformStartedAt = Date.now();
       if (memoryAction && result?.isError === true) {
-        this._terminalMemoryToolSessions.add(session);
+        this._terminalMemoryToolSessions.set(session, gatewayBindingSnapshot(session));
         result = appendTerminalMemoryToolNotice(result);
       }
       session.noteAtlasGateEvent?.({
@@ -4374,7 +4392,7 @@ export class PersistentMcpOwner {
         { cwd: session?.bootConfig?.cwd },
       );
       if (memoryAction) {
-        this._terminalMemoryToolSessions.add(session);
+        this._terminalMemoryToolSessions.set(session, gatewayBindingSnapshot(session));
         result = appendTerminalMemoryToolNotice(result);
       }
       this._refundResearchInfrastructureFailure(session, synthesisAdmission, result, err);

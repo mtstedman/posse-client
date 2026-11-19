@@ -12,10 +12,15 @@
 
 import {
   AUTHORIZATION_GATE_KINDS,
+  HEADLESS_PARKED_POST_COMPLETION_GATE_KINDS,
   humanGateContractForPayload,
   humanGateStateAllowsAnswer,
   humanGateStateIsActive,
+  postCompletionGateKindForPayload,
 } from "../../../catalog/human-input.js";
+
+// Parked states a timed-out gate's original job is failed from.
+const HEADLESS_FAILABLE_ORIGINAL_STATUSES = Object.freeze(["waiting_on_review", "waiting_on_human", "blocked"]);
 
 /**
  * Headless human_input timeout recovery.
@@ -54,10 +59,7 @@ export function recoverHeadlessHumanTimeouts({
   queue: {
     hasJobs,
     listJobs,
-    isPushOfferJob,
     isPostMergeDbTaskJob = () => false,
-    isMergeVerificationReviewJob = () => false,
-    isWorkItemDispositionGateJob = () => false,
     parseJobPayload,
     getJob,
     getHumanGate,
@@ -87,11 +89,12 @@ export function recoverHeadlessHumanTimeouts({
       // held for a merge and their post-merge gates: only the operator knows
       // when the merged change is deployed. Merge verification reviews: timing
       // one out would only drop the operator's prompt, never the hold. A
-      // work-item disposition gate is the only recovery path of a failed or
-      // merge-deferred work item, which stays failed/complete; timing it out
-      // would strand it again.
-      if (isPushOfferJob(hj) || isPostMergeDbTaskJob(hj) || isMergeVerificationReviewJob(hj)
-        || isWorkItemDispositionGateJob(hj)) continue;
+      // merge-failure recovery gate or a work-item disposition gate is the
+      // only recovery path of a merge-failed, failed or merge-deferred work
+      // item, which stays in that state; timing it out would strand it.
+      // (HEADLESS_PARKED_POST_COMPLETION_GATE_KINDS.)
+      if (isPostMergeDbTaskJob(hj) || (hj.job_type === "human_input"
+        && HEADLESS_PARKED_POST_COMPLETION_GATE_KINDS.includes(postCompletionGateKindForPayload(parseJobPayload(hj))))) continue;
       if (hj.job_type !== "human_input") {
         if (!headlessNonHumanWaitingLogged.has(hj.id)) {
           headlessNonHumanWaitingLogged.add(hj.id);
@@ -136,6 +139,29 @@ export function recoverHeadlessHumanTimeouts({
         ) {
           continue;
         }
+        // 1. If this human_input was unblocking an original job, do NOT
+        //    auto-requeue the original job in headless mode. Re-running a
+        //    task that already needs human input/review just creates a loop
+        //    (run -> review gate -> timeout -> run again). Leave the
+        //    original job terminal so it cannot remain stranded behind a
+        //    gate that no longer accepts an answer.
+        let humanPayload = {};
+        let parkedOriginal = null;
+        try {
+          humanPayload = parseJobPayload(hj);
+          const origJob = humanPayload.original_job_id ? getJob(humanPayload.original_job_id) : null;
+          if (origJob && HEADLESS_FAILABLE_ORIGINAL_STATUSES.includes(origJob.status)) parkedOriginal = origJob;
+        } catch (err) {
+          log(`  -> headless recovery lookup failed for human_input #${hj.id}: ${err?.message || String(err)}`, "red");
+        }
+        // Failing the original refuses a job that still carries a lease token
+        // (its worker has not released it, or the expired lease is not swept
+        // yet). Wait for it: closing the gate first would cancel the gate's
+        // dependents while the original stays parked.
+        if (parkedOriginal?.lease_token) {
+          log(`WI#${hj.work_item_id} job #${hj.id} headless timeout waits: original job #${parkedOriginal.id} still holds a lease`, "yellow");
+          continue;
+        }
         // Close the contract before canceling dependents. This CAS rechecks
         // both gate state and lease under the database write lock, eliminating
         // the race between the best-effort read above and a bridge resolver.
@@ -148,32 +174,30 @@ export function recoverHeadlessHumanTimeouts({
           continue;
         }
         log(`WI#${hj.work_item_id} job #${hj.id} stuck in waiting_on_human for ${Math.ceil(age)}s — recovering (headless timeout)`, "yellow");
-        let humanPayload = {};
 
-        // 1. If this human_input was unblocking an original job, do NOT
-        //    auto-requeue the original job in headless mode. Re-running a
-        //    task that already needs human input/review just creates a loop
-        //    (run -> review gate -> timeout -> run again). Leave the
-        //    original job terminal so it cannot remain stranded behind a
-        //    gate that no longer accepts an answer.
-        try {
-          humanPayload = parseJobPayload(hj);
-          if (humanPayload.original_job_id) {
-            const origJob = getJob(humanPayload.original_job_id);
-            if (origJob && ["waiting_on_review", "waiting_on_human", "blocked"].includes(origJob.status)) {
-              updateJobStatus(origJob.id, "failed", { expectedStatuses: [origJob.status] });
-              logEvent({
-                work_item_id: hj.work_item_id,
-                job_id: origJob.id,
-                event_type: EVENT_TYPES.JOB_HEADLESS_RECOVERY,
-                actor_type: EVENT_ACTORS.SCHEDULER,
-                message: `Failed after human_input #${hj.id} timed out in headless mode`,
-              });
-              log(`  → failed original job #${origJob.id} after its decision timed out`, "yellow");
-            }
+        let originalSettled = true;
+        if (parkedOriginal) {
+          let failed = false;
+          try {
+            failed = updateJobStatus(parkedOriginal.id, "failed", { expectedStatuses: [parkedOriginal.status] });
+          } catch (err) {
+            log(`  -> headless recovery could not update original job #${parkedOriginal.id}: ${err?.message || String(err)}`, "red");
           }
-        } catch (err) {
-          log(`  -> headless recovery lookup failed for human_input #${hj.id}: ${err?.message || String(err)}`, "red");
+          if (failed) {
+            logEvent({
+              work_item_id: hj.work_item_id,
+              job_id: parkedOriginal.id,
+              event_type: EVENT_TYPES.JOB_HEADLESS_RECOVERY,
+              actor_type: EVENT_ACTORS.SCHEDULER,
+              message: `Failed after human_input #${hj.id} timed out in headless mode`,
+            });
+            log(`  → failed original job #${parkedOriginal.id} after its decision timed out`, "yellow");
+          } else {
+            // It left the parked state (or took a lease) after the scan; its
+            // new owner decides it. Do not cancel its dependents for it.
+            originalSettled = false;
+            log(`  → original job #${parkedOriginal.id} could not be failed (its lease or state changed); leaving the dependents of gate #${hj.id}`, "yellow");
+          }
         }
 
         // 2. Fail closed for every job gated on this unanswered decision.
@@ -181,17 +205,21 @@ export function recoverHeadlessHumanTimeouts({
         //    approval: exact operational-command plan gates, recovery gates,
         //    and clarification gates could all release their downstream work
         //    without the required answer.
-        const dependents = getDependents(hj.id);
+        const dependents = originalSettled ? getDependents(hj.id) : [];
         const affectedWorkItemIds = new Set([hj.work_item_id]);
         if (dependents.length > 0) {
           const isApprovalGate = Array.isArray(humanPayload.file_requests) && humanPayload.file_requests.length > 0;
           let canceled = 0;
+          const notCanceled = [];
           for (const dep of dependents) {
             const depJob = getJob(dep.job_id);
             if (!depJob) continue;
             if (depJob.work_item_id) affectedWorkItemIds.add(depJob.work_item_id);
             if (TERMINAL_JOB_STATUSES.includes(depJob.status)) continue;
-            updateJobStatus(depJob.id, "canceled");
+            if (!updateJobStatus(depJob.id, "canceled")) {
+              notCanceled.push(depJob.id);
+              continue;
+            }
             canceled++;
             logEvent({
               work_item_id: depJob.work_item_id,
@@ -206,10 +234,17 @@ export function recoverHeadlessHumanTimeouts({
           if (canceled > 0) {
             log(`  → canceled ${canceled} dependent(s) waiting on timed-out human gate #${hj.id}`, "yellow");
           }
+          if (notCanceled.length > 0) {
+            log(`  → could not cancel dependent(s) ${notCanceled.map((id) => `#${id}`).join(", ")} of timed-out human gate #${hj.id} (lease or state changed)`, "yellow");
+          }
         }
 
-        // 3. Now fail the human_input job itself.
-        updateJobStatus(hj.id, "failed");
+        // 3. Now fail the human_input job itself. A gate row that still
+        //    carries a stale lease is closed by reconciliation instead: its
+        //    contract was superseded above.
+        if (!updateJobStatus(hj.id, "failed")) {
+          log(`  → human gate #${hj.id} job row was not marked failed (lease or state changed); reconciliation closes its superseded contract`, "yellow");
+        }
         if (!gateContract) {
           supersedeHumanGate(hj.id, "Human gate timed out in headless mode");
         }

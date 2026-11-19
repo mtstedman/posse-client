@@ -19,6 +19,35 @@ const RECEIPT_CONTENT_MS = 30 * 24 * 60 * 60 * 1000;
 const CHAT_CONTENT_MS = 90 * 24 * 60 * 60 * 1000;
 const TRANSIENT_BUSY_CODES = new Set(["agent_session_busy", "agent_request_busy"]);
 
+// Failures whose cost or effect is unknown hold the full reservation.
+const UNKNOWN_OUTCOME_CODES = new Set(["usage_unknown", "external_outcome_unknown"]);
+
+// Native dispatch failures that bill nothing for the call they end: the
+// provider's 401, 403 and 429 status answers arrive before any generation,
+// and an open circuit never sends the request.
+const PROVIDER_REFUSAL_CODES = new Set(["provider_authentication", "provider_authorization", "provider_rate_limit", "provider_circuit_open"]);
+
+/**
+ * What a settled receipt counts against the registration's and exposure's
+ * lifetime spend: the measured cost when every provider call that could bill
+ * reported its usage, nothing when no provider was called (or the only call
+ * was refused), and the reservation otherwise.
+ *
+ * @param {{ status: string, error?: { code?: string } | null }} response
+ * @param {{ turns?: number, cost_usd?: number } | null | undefined} usage the runtime's own usage for this request
+ * @param {number} providerCalls provider calls the runtime started for this request
+ * @param {number} reserved
+ * @param {boolean} [refused] the request ended on a provider refusal, which billed nothing
+ */
+function settledSpend(response, usage, providerCalls, reserved, refused = false) {
+  if (UNKNOWN_OUTCOME_CODES.has(response.error?.code)) return reserved;
+  if (response.status === "done" && Number.isFinite(usage?.cost_usd)) return usage.cost_usd;
+  const billable = Math.max(0, providerCalls - (refused ? 1 : 0));
+  if (billable === 0) return 0;
+  // A call that failed in flight never reported what it billed.
+  return Number.isFinite(usage?.cost_usd) && usage.turns === billable ? usage.cost_usd : reserved;
+}
+
 function cachedTransientBusy(receipt) {
   return receipt.status === "failed" && receipt.response?.status === "failed"
     && TRANSIENT_BUSY_CODES.has(receipt.response?.error?.code);
@@ -419,7 +448,7 @@ export class RegisteredAgentBridge {
     catch {
       const response = failure("agent_scope_mismatch", "Configured agent workspace is unavailable");
       this.owner.service.assertOwner();
-      receipt.status = "failed"; receipt.response = response; receipt.completed_at = new Date().toISOString();
+      receipt.status = "failed"; receipt.response = response; receipt.spend_usd = 0; receipt.completed_at = new Date().toISOString();
       this.store.putRegisteredReceipt(receiptKey, receipt);
       return response;
     }
@@ -459,7 +488,7 @@ export class RegisteredAgentBridge {
         default: demand(false, "Operation is outside the registered protocol", "forbidden");
       }
     } };
-    let result;
+    let result, providerCalls = 0;
     const active = { clientID: registration.identity, controller, promise: null, resolve: null };
     active.promise = new Promise(resolve => { active.resolve = resolve; });
     this.active.set(receiptKey, active);
@@ -480,8 +509,13 @@ export class RegisteredAgentBridge {
         bootstrapMessage: request.request.bootstrap_message || "", preRunContext: context, session: receipt.session_id,
         idempotencyKey: request.idempotency_key, client, execution,
         includeToolSummary: request.request.include_tool_summary === true,
-        onProgress: request.progress === true && typeof onProgress === "function"
-          ? event => { const projected = safeProgress(event); if (projected) onProgress(projected); } : null });
+        // The runtime announces each provider call before making it; spend settlement counts them.
+        onProgress: event => {
+          if (event?.type === "turn.started") providerCalls++;
+          if (request.progress !== true || typeof onProgress !== "function") return;
+          const projected = safeProgress(event);
+          if (projected) onProgress(projected);
+        } });
     } catch (error) {
       result = failure(["forbidden", "idempotency_conflict", "agent_session_busy", "capability_unavailable"].includes(error.code) ? error.code : "agent_error");
       result.internalError = { code: error?.code || "agent_error", message: error?.message || String(error) };
@@ -500,8 +534,8 @@ export class RegisteredAgentBridge {
           return { ...current, response };
         }
         current.response = response; current.status = response.status;
-        current.spend_usd = response.status === "done" && Number.isFinite(response.usage?.cost_usd)
-          ? response.usage.cost_usd : current.spend_reserved_usd;
+        current.spend_usd = settledSpend(response, result?.usage, providerCalls, current.spend_reserved_usd,
+          response.status === "failed" && PROVIDER_REFUSAL_CODES.has(result?.error?.code));
         current.completed_at = new Date().toISOString();
         this.store.putRegisteredReceipt(receiptKey, current);
         if (request.operation === "run") {

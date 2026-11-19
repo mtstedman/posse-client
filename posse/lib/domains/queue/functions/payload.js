@@ -19,3 +19,16 @@ export function parseJobPayload(jobOrPayload, fallback = {}) {
     : jobOrPayload;
   return parseJsonObject(value, fallback);
 }
+
+// Payload state that belongs to one execution of a job's implementation and
+// its assessment. A requeue that re-runs the implementation clears it, or the
+// worker resumes the previous candidate's assessment (`_assess_only`) and
+// recovery reads a stale verification block. History the retry builds on
+// (review feedback, clarifications, scope grants) is left alone.
+const REEXECUTION_RESET_KEYS = Object.freeze(["_assess_only", "_verification_blocked"]);
+
+/** Reset a parsed job payload for re-execution in place; returns it. */
+export function resetJobPayloadForReexecution(payload) {
+  for (const key of REEXECUTION_RESET_KEYS) delete payload[key];
+  return payload;
+}

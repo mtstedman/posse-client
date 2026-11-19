@@ -10,10 +10,11 @@ import Database from "better-sqlite3";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { sha256Hex } from "../hash.js";
 import { normalizeRepoPath } from "../paths.js";
-import { parseAtlasSymbolId, sanitizeAtlasSymbolIdList } from "../symbol-id.js";
+import { isAtlasSymbolId, parseAtlasSymbolId, sanitizeAtlasSymbolIdList } from "../symbol-id.js";
 import { memoryDbPathForLedgerDb } from "../runtime-paths.js";
 import { getEffectivePolicy } from "./policy.js";
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
+import { scrubSecretText } from "../../../../../shared/telemetry/functions/logging/scrub-secret-text.js";
 
 // Domain is the retrieval FILTER axis: which area of concern a memory is about.
 // `general` is the default catch-all bucket — NOT a wildcard. A scoped search
@@ -212,8 +213,10 @@ export async function memoryStore({ versionId, params, ledger, repoId, view = nu
   };
 
   const domains = normalizeDomains(params.domains);
-  const title = cleanString(params.title, 120);
-  const content = cleanString(params.content, 1200);
+  // Redacted before hashing, so a re-store of the same secret-bearing text
+  // dedupes against the stored (redacted) row.
+  const title = cleanString(redactMemoryText(params.title), 120);
+  const content = cleanString(redactMemoryText(params.content), 1200);
   if (!title || !content) {
     return finish(errorEnvelope({
       action: "memory.store",
@@ -253,6 +256,9 @@ export async function memoryStore({ versionId, params, ledger, repoId, view = nu
       message: "memory.store memoryId may only contain [A-Za-z0-9_.:-] (max 120 chars)",
     }));
   }
+  // Only the main view may baseline or reconcile anchors; from a work item's
+  // view the write proceeds with no baselines and no reconciliation.
+  const anchorView = await mainAnchorView(view);
   const contentHash = memoryContentHash({ title, content, tags, symbolIds, fileRelPaths });
   const memoryId = providedId || `mem_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const existing = providedId ? findMemoryById(db, memoryId) : null;
@@ -280,7 +286,7 @@ export async function memoryStore({ versionId, params, ledger, repoId, view = nu
     }
     if (!providedId) {
       reviveMemory(db, existingByHash.memory_id, new Date().toISOString());
-      mergeMemoryLinks(db, existingByHash.memory_id, symbolIds, fileRelPaths, await viewFilePathHashes(view, fileRelPaths));
+      mergeMemoryLinks(db, existingByHash.memory_id, symbolIds, fileRelPaths, await viewFilePathHashes(anchorView, fileRelPaths));
       return finish(okEnvelope({
         action: "memory.store",
         versionId,
@@ -307,7 +313,7 @@ export async function memoryStore({ versionId, params, ledger, repoId, view = nu
       // Re-baseline the anchors to today's view: a resurrected memory judged
       // against its pre-prune baselines would flip straight back to dead on
       // the next reconcile.
-      mergeMemoryLinks(db, resurrected.memory_id, symbolIds, fileRelPaths, await viewFilePathHashes(view, fileRelPaths));
+      mergeMemoryLinks(db, resurrected.memory_id, symbolIds, fileRelPaths, await viewFilePathHashes(anchorView, fileRelPaths));
       return finish(okEnvelope({
         action: "memory.store",
         versionId,
@@ -334,7 +340,7 @@ export async function memoryStore({ versionId, params, ledger, repoId, view = nu
       reviveMemory(db, nearDuplicate.memory_id, new Date().toISOString());
       // A reworded re-derivation may carry NEW valid anchors — folding the
       // write into the twin used to drop them on the floor.
-      mergeMemoryLinks(db, nearDuplicate.memory_id, symbolIds, fileRelPaths, await viewFilePathHashes(view, fileRelPaths));
+      mergeMemoryLinks(db, nearDuplicate.memory_id, symbolIds, fileRelPaths, await viewFilePathHashes(anchorView, fileRelPaths));
       return finish(okEnvelope({
         action: "memory.store",
         versionId,
@@ -352,9 +358,9 @@ export async function memoryStore({ versionId, params, ledger, repoId, view = nu
 
   const now = new Date().toISOString();
   // Snapshot the current blob hash of each anchored file so a later edit (a
-  // different hash) is detectable as drift. No view -> NULL baselines, adopted
-  // without penalty on the first reconcile that does see a view.
-  const fileBaselines = await viewFilePathHashes(view, fileRelPaths);
+  // different hash) is detectable as drift. No main view -> NULL baselines,
+  // adopted without penalty on the first reconcile that does see one.
+  const fileBaselines = await viewFilePathHashes(anchorView, fileRelPaths);
   const txn = db.transaction(() => {
     if (duplicateToReplace) {
       db.prepare(
@@ -458,10 +464,10 @@ export async function memoryStore({ versionId, params, ledger, repoId, view = nu
     }));
   }
   // Anchor-drift decay: reconcile every memory's confidence against the code it
-  // points at, once per view rebuild. Runs before the cap so drift-pruned rows
-  // free their slots first. Only possible with a view (the write path is
-  // otherwise blind to code state).
-  if (view) await reconcileAnchorConfidence(db, view, effectiveRepoId, now);
+  // points at, once per main view rebuild. Runs before the cap so drift-pruned
+  // rows free their slots first. Only possible with the main view (the write
+  // path is otherwise blind to main's code state).
+  if (anchorView) await reconcileAnchorConfidence(db, anchorView, effectiveRepoId, now);
   sweepStaleMemories(db, effectiveRepoId, policy);
   pruneSurfacedEphemeral(db, effectiveRepoId, now);
   enforceMemoryCap(db, effectiveRepoId, policy, now);
@@ -776,20 +782,22 @@ export async function memorySurface({ versionId, params, ledger, repoId, view = 
     return memoryDisabled("memory.surface", versionId);
   }
   const requested = {
-    symbolIds: safeSymbolIds(params.symbolIds || [], "memory.surface symbolIds"),
+    symbolIds: safeSymbolIds(params.symbolIds || []),
     fileRelPaths: normalizePaths(params.fileRelPaths || []),
   };
-  if (requested.symbolIds.length === 0 && requested.fileRelPaths.length === 0) {
+  const lookupDomains = domainLookupFor(requested, params);
+  const empty = { symbols: [], files: [], ...(lookupDomains.length > 0 ? { domains: [] } : {}) };
+  if (requested.symbolIds.length === 0 && requested.fileRelPaths.length === 0 && lookupDomains.length === 0) {
     return okEnvelope({
       action: "memory.surface",
       versionId,
-      data: { symbols: [], files: [] },
+      data: empty,
     });
   }
   const opened = openMemoryReadDb({ ledger, action: "memory.surface", versionId });
   if (opened.error) return opened.error;
   if (opened.missing) {
-    return okEnvelope({ action: "memory.surface", versionId, data: { symbols: [], files: [] } });
+    return okEnvelope({ action: "memory.surface", versionId, data: empty });
   }
   const db = opened.db;
   const finish = (result) => {
@@ -801,7 +809,9 @@ export async function memorySurface({ versionId, params, ledger, repoId, view = 
     const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
     let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true, policy });
     filtered = await applyAnchorEvidence(view, filtered, links);
-    const presence = memoryAnchorPresence(filtered, links, requested);
+    const presence = lookupDomains.length > 0
+      ? memoryDomainPresence(filtered, lookupDomains)
+      : memoryAnchorPresence(filtered, links, requested);
     return finish(okEnvelope({
       action: "memory.surface",
       versionId,
@@ -833,20 +843,22 @@ export async function memoryGet({ versionId, params, ledger, repoId, view = null
     return memoryDisabled("memory.get", versionId);
   }
   const requested = {
-    symbolIds: safeSymbolIds(params.symbolIds || [], "memory.get symbolIds"),
+    symbolIds: safeSymbolIds(params.symbolIds || []),
     fileRelPaths: normalizePaths(params.fileRelPaths || []),
   };
-  if (requested.symbolIds.length === 0 && requested.fileRelPaths.length === 0) {
+  const lookupDomains = domainLookupFor(requested, params);
+  const empty = { symbols: {}, files: {}, ...(lookupDomains.length > 0 ? { domains: {} } : {}) };
+  if (requested.symbolIds.length === 0 && requested.fileRelPaths.length === 0 && lookupDomains.length === 0) {
     return okEnvelope({
       action: "memory.get",
       versionId,
-      data: { symbols: {}, files: {} },
+      data: empty,
     });
   }
   const opened = openMemoryReadDb({ ledger, action: "memory.get", versionId });
   if (opened.error) return opened.error;
   if (opened.missing) {
-    return okEnvelope({ action: "memory.get", versionId, data: { symbols: {}, files: {} } });
+    return okEnvelope({ action: "memory.get", versionId, data: empty });
   }
   const db = opened.db;
   const finish = (result) => {
@@ -858,7 +870,9 @@ export async function memoryGet({ versionId, params, ledger, repoId, view = null
     const links = fetchMemoryLinks(db, rows.map((row) => row.memory_id));
     let filtered = filterRows(rows, params, links, { anchorMode: "any", excludeStale: true, policy });
     filtered = await applyAnchorEvidence(view, filtered, links);
-    const data = memoryContentByAnchor(filtered, links, requested);
+    const data = lookupDomains.length > 0
+      ? memoryContentByDomain(filtered, links, lookupDomains)
+      : memoryContentByAnchor(filtered, links, requested);
     // Pulling a memory body IS the "surfaced" event that the usage-based prune
     // counts. Record it after the read connection closes (best-effort, throttled,
     // its own RW connection) so a write hiccup never fails the get.
@@ -1013,6 +1027,13 @@ function effectiveRepo(ctxRepoId, paramRepoId) {
   return cleanString(paramRepoId || ctxRepoId || "default", 200) || "default";
 }
 
+// Memory text is shown to every agent and role that reads the repository's
+// memories, so known secret shapes are masked on the way in and, for rows
+// written before that, on the way out.
+function redactMemoryText(value) {
+  return scrubSecretText(String(value ?? ""));
+}
+
 function cleanString(value, maxLen) {
   return String(value ?? "").trim().slice(0, maxLen);
 }
@@ -1083,9 +1104,12 @@ const NEAR_DUPLICATE_JACCARD = 0.9;
 function findNearDuplicateMemory(db, repoId, title, content) {
   const target = new Set(tokenize(`${title}\n${content}`));
   if (target.size === 0) return null;
+  // A memory flagged wrong or stale is never a fold target: a near-verbatim
+  // rewording of it is usually the correction ("30s" -> "60s"), and folding
+  // would discard the new text and revive the flagged one.
   const rows = db.prepare(
     `SELECT memory_id, title, content FROM memories
-     WHERE repo_id = ? AND deleted = 0
+     WHERE repo_id = ? AND deleted = 0 AND stale = 0 AND wrong_at IS NULL
      ORDER BY updated_at DESC
      LIMIT 200`,
   ).all(repoId);
@@ -1232,6 +1256,27 @@ function replaceMemoryLinks(db, memoryId, symbolIds, fileRelPaths, fileBaselines
 }
 
 /**
+ * The caller's view when it may baseline and reconcile memory anchors, else
+ * null. memory.db is shared by every view of the repository, so anchors are
+ * judged against main only: a view of the ledger's root branch (its meta names
+ * no parent branch). A work item's view is a fork of main; judging anchors
+ * against it charged an unmerged edit to the memories, and main then charged
+ * them again on return. A view whose meta cannot be read is not trusted.
+ *
+ * @param {import("../contracts/api.js").View | null | undefined} view
+ * @returns {Promise<import("../contracts/api.js").View | null>}
+ */
+async function mainAnchorView(view) {
+  if (!view) return null;
+  try {
+    const meta = await /** @type {any} */ (view).meta?.();
+    return String(meta?.parent_branch ?? "").trim() ? null : view;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Current blob hash for each anchored file, read from the view's path_to_blob.
  * The baseline that anchor-drift reconciliation later compares against. Returns
  * an empty map when there is no view (baselines stay NULL until first reconcile).
@@ -1257,7 +1302,7 @@ async function viewFilePathHashes(view, fileRelPaths) {
 /** Memory ids actually returned (surfaced) by a memory.get response. */
 function collectOfferedMemoryIds(data) {
   const ids = new Set();
-  for (const group of [data?.symbols, data?.files]) {
+  for (const group of [data?.symbols, data?.files, data?.domains]) {
     if (!group || typeof group !== "object") continue;
     for (const list of Object.values(group)) {
       for (const memory of Array.isArray(list) ? list : []) {
@@ -1398,16 +1443,22 @@ function memoryIsStaleForRead(row, policy) {
   return updatedAt < Date.now() - days * 86_400_000;
 }
 
-function safeSymbolIds(values, label = "memory symbolIds") {
-  try {
-    return sanitizeAtlasSymbolIdList(values, 500, label);
-  } catch {
-    return [];
+// Read-side symbol ids: each malformed entry is dropped on its own, so one
+// bad id no longer empties the whole request (the list sanitizer throws on the
+// first, and the catch returned []).
+function safeSymbolIds(values) {
+  const out = [];
+  for (const raw of Array.isArray(values) ? values : []) {
+    if (!isAtlasSymbolId(raw)) continue;
+    const symbolId = String(raw).trim();
+    if (!out.includes(symbolId)) out.push(symbolId);
+    if (out.length >= 500) break;
   }
+  return out;
 }
 
 function memoryAnchorPresence(rows, links, params = {}) {
-  const requestedSymbols = safeSymbolIds(params.symbolIds || [], "memory.surface symbolIds");
+  const requestedSymbols = safeSymbolIds(params.symbolIds || []);
   const requestedFiles = normalizePaths(params.fileRelPaths || []);
   const symbols = new Set();
   const files = new Set();
@@ -1427,22 +1478,58 @@ function memoryAnchorPresence(rows, links, params = {}) {
   };
 }
 
-function memoryContentByAnchor(rows, links, params = {}) {
-  const requestedSymbols = safeSymbolIds(params.symbolIds || [], "memory.get symbolIds");
-  const requestedFiles = normalizePaths(params.fileRelPaths || []);
-  const symbols = Object.fromEntries(requestedSymbols.map((symbolId) => [symbolId, []]));
-  const files = Object.fromEntries(requestedFiles.map((fileRelPath) => [fileRelPath, []]));
-  // Confidence-aware ordering: the strongest, freshest memories win the limited
-  // per-anchor slots as a repo's table grows. Ties fall back to recency so the
-  // ordering stays deterministic. memoryScore folds confidence + recency and is
-  // the same scorer mirrored by the Rust port, so JS and native agree.
+/**
+ * Domains to look up for a read that names domains but no anchors. With
+ * anchors, domains only filter the anchored memories, so this is empty.
+ */
+function domainLookupFor(requested, params) {
+  if (requested.symbolIds.length > 0 || requested.fileRelPaths.length > 0) return [];
+  return normalizeRequestedDomains(params.domains);
+}
+
+// Confidence-aware ordering: the strongest, freshest memories win the limited
+// per-anchor slots as a repo's table grows. Ties fall back to recency so the
+// ordering stays deterministic. memoryScore folds confidence + recency and is
+// the same scorer mirrored by the Rust port, so JS and native agree.
+function rankMemoriesForGet(rows) {
   const nowMs = Date.now();
-  const sorted = [...rows].sort((a, b) => {
+  return [...rows].sort((a, b) => {
     const delta = memoryScore(b, { nowMs }) - memoryScore(a, { nowMs });
     if (delta !== 0) return delta;
     return String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
   });
-  for (const row of sorted) {
+}
+
+/** Requested domains that have at least one surfaceable memory. */
+function memoryDomainPresence(rows, domains) {
+  const present = new Set(rows.flatMap((row) => memoryRowDomains(row)));
+  return { symbols: [], files: [], domains: domains.filter((domain) => present.has(domain)) };
+}
+
+/** Memory bodies grouped by requested domain, capped like an anchor's slots. */
+function memoryContentByDomain(rows, links, domains) {
+  const byDomain = Object.fromEntries(domains.map((domain) => [domain, []]));
+  for (const row of rankMemoriesForGet(rows)) {
+    const rowDomains = memoryRowDomains(row);
+    const memory = memoryForAnchorGet(row, links);
+    for (const domain of domains) {
+      if (rowDomains.includes(domain) && byDomain[domain].length < MEMORY_GET_PER_ANCHOR_LIMIT) {
+        byDomain[domain].push(memory);
+      }
+    }
+  }
+  for (const key of Object.keys(byDomain)) {
+    if (byDomain[key].length === 0) delete byDomain[key];
+  }
+  return { symbols: {}, files: {}, domains: byDomain };
+}
+
+function memoryContentByAnchor(rows, links, params = {}) {
+  const requestedSymbols = safeSymbolIds(params.symbolIds || []);
+  const requestedFiles = normalizePaths(params.fileRelPaths || []);
+  const symbols = Object.fromEntries(requestedSymbols.map((symbolId) => [symbolId, []]));
+  const files = Object.fromEntries(requestedFiles.map((fileRelPath) => [fileRelPath, []]));
+  for (const row of rankMemoriesForGet(rows)) {
     const linkedSymbols = links.symbolsById.get(row.memory_id) || [];
     const linkedFiles = activeMemoryFileLinks(row, links);
     const memory = memoryForAnchorGet(row, links);
@@ -1470,8 +1557,8 @@ function memoryForAnchorGet(row, links) {
   return {
     memoryId: row.memory_id,
     memory_id: row.memory_id,
-    title: row.title,
-    content: row.content,
+    title: redactMemoryText(row.title),
+    content: redactMemoryText(row.content),
     domains: memoryRowDomains(row),
     source: row.source || "agent",
     createdAt: row.created_at,

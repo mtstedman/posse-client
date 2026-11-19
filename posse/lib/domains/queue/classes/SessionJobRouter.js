@@ -3,15 +3,16 @@
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { TERMINAL_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import {
   SESSION_JOB_PROTOCOL,
+  SESSION_JOB_HOLD_REASONS,
   SESSION_JOB_OFFER_TTL_MS,
   SESSION_JOB_CLAIM_TTL_MS,
 } from "../../../catalog/session-sync.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { casPushSharedTrunkClaimNative } from "../../git/functions/shared-trunk-native.js";
-import { getLivePairingState } from "../../pairing/functions/state.js";
+import { getLivePairingState, sessionInstanceId } from "../../pairing/functions/state.js";
 import {
   acceptedComputeOwner,
   acceptsSessionOffer,
@@ -20,18 +21,23 @@ import {
 } from "../../pairing/functions/compute-lease.js";
 import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
 import {
+  getWorkItem,
   logEvent,
   refreshWorkItemStatus,
+  reholdPostMergeDbTasksForWorkItem,
+  setJobError,
   updateJobStatus,
   updateWorkItemStatus,
 } from "../functions/queue-store.js";
-import { now } from "../functions/common.js";
+import { now, runImmediateTransaction } from "../functions/common.js";
+import { reopenFailedWorkItem, restoreCanceledDependents } from "../functions/work-item-recovery.js";
 import {
   casRef,
   fetchNamespace,
   importPacket,
   offerSessionJob,
   sessionMustWaitForHost,
+  sessionHostLacksProviderText,
   packetMatchesOffer,
   resultOid,
   SESSION_REF_FETCH_LIMIT,
@@ -43,7 +49,8 @@ export class SessionJobRouter {
     projectDir = process.cwd(),
     getState = getLivePairingState,
     getSnapshot = readPairingPeerSnapshot,
-    instanceId = ensureBridgeInstanceId,
+    // The session row's identity, not the bridge's (see sessionInstanceId).
+    instanceId = (dir) => sessionInstanceId(dir, getState()),
     casPush = casPushSharedTrunkClaimNative,
     fetchRefs = fetchNamespace,
     nowMs = () => Date.now(),
@@ -109,26 +116,68 @@ export class SessionJobRouter {
    * The lease promises the host runs this job, and the host cannot take it now
    * (offline, no matching provider, or no headroom). The job waits; it never
    * runs on this clone. One event per job, so a job held across many laps (or
-   * across restarts) records nothing more than once.
+   * across restarts) records nothing more than once. A host that is here but
+   * does not run the job's provider (`route` from offer) gets its own one
+   * event, naming the provider and the remedies, even after a plain wait.
    */
-  recordAwaitingHost(job) {
-    if (!job?.id || this._leaseFallbackLogged.has(job.id)) return false;
-    this._leaseFallbackLogged.add(job.id);
+  recordAwaitingHost(job, route = null) {
+    const lacksProvider = route?.reason === SESSION_JOB_HOLD_REASONS.HOST_LACKS_PROVIDER;
+    const key = lacksProvider ? `${job?.id}:${route.reason}` : job?.id;
+    if (!job?.id || this._leaseFallbackLogged.has(key)) return false;
+    this._leaseFallbackLogged.add(key);
     try {
-      if (getDb().prepare("SELECT 1 FROM events WHERE job_id = ? AND event_type = ? LIMIT 1")
-        .get(job.id, EVENT_TYPES.SESSION_JOB_AWAITING_HOST)) return false;
+      const recorded = lacksProvider
+        ? getDb().prepare(`
+          SELECT 1 FROM events
+          WHERE job_id = ? AND event_type = ? AND json_extract(event_json, '$.reason') = ? LIMIT 1
+        `).get(job.id, EVENT_TYPES.SESSION_JOB_AWAITING_HOST, route.reason)
+        : getDb().prepare("SELECT 1 FROM events WHERE job_id = ? AND event_type = ? LIMIT 1")
+          .get(job.id, EVENT_TYPES.SESSION_JOB_AWAITING_HOST);
+      if (recorded) return false;
       logEvent({
         work_item_id: job.work_item_id,
         job_id: job.id,
         event_type: EVENT_TYPES.SESSION_JOB_AWAITING_HOST,
         actor_type: EVENT_ACTORS.SCHEDULER,
-        message: `Job #${job.id} is waiting for the session host: this clone's lease names the host, `
-          + "so the job never runs here. It starts when the host can take it "
-          + "(the host can run `posse session lease <member-id> member` to let this clone run its own work)",
+        ...(lacksProvider ? {
+          message: `${sessionHostLacksProviderText(job, route.provider)} It waits here until one of those changes.`,
+          event_json: JSON.stringify({ reason: route.reason, provider: route.provider, host_instance_id: route.hostInstanceId || null }),
+        } : {
+          message: `Job #${job.id} is waiting for the session host: this clone's lease names the host, `
+            + "so the job never runs here. It starts when the host can take it "
+            + "(the host can run `posse session lease <member-id> member` to let this clone run its own work)",
+        }),
       });
       return true;
     } catch {
       return false; // the event is advisory; the hold stands
+    }
+  }
+
+  /**
+   * A headless run has no one to wait with: a job whose host is here but does
+   * not run its provider (`route` from offer) fails with that reason, so the
+   * run can end. It never runs on this clone instead.
+   */
+  failForMissingHostProvider(job, route) {
+    if (!job?.id || route?.reason !== SESSION_JOB_HOLD_REASONS.HOST_LACKS_PROVIDER) return false;
+    const reason = `${sessionHostLacksProviderText(job, route.provider)} `
+      + "This run has no display to wait with, so the job failed; retry it once the host has changed.";
+    try {
+      if (!updateJobStatus(job.id, "failed", { expectedStatuses: ["queued"] })) return false;
+      setJobError(job.id, reason);
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.JOB_HEADLESS_RECOVERY,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        message: reason,
+        event_json: JSON.stringify({ reason: route.reason, provider: route.provider, host_instance_id: route.hostInstanceId || null }),
+      });
+      refreshWorkItemStatus(job.work_item_id);
+      return true;
+    } catch {
+      return false; // the job stays held for the host, as before
     }
   }
 
@@ -144,15 +193,17 @@ export class SessionJobRouter {
   // live one can never be recalled, completed or expired through the session
   // refs: every pass below runs only for the live, routing session. Their
   // origin jobs would stay blocked with no gate. An unclaimed offer returns
-  // to the queue; a claim fails like one whose executor disappeared.
+  // to the queue; a claim fails like one whose executor disappeared. Only an
+  // originator writes these states (an import starts at 'imported'), so they
+  // are matched without this clone's identity: the one it held in that
+  // session is not today's bridge identity once a phone pairing replaced it.
   _settleEndedSessionDelegations(state) {
-    const self = this._instanceId(this.projectDir);
     const liveSessionId = state?.remote_session_id || null;
     const rows = getDb().prepare(`
       SELECT * FROM work_item_delegations
-      WHERE originator_instance_id = ? AND state IN ('offered','claimed')
+      WHERE state IN ('offered','claimed')
         AND (? IS NULL OR session_id != ?)
-    `).all(self, liveSessionId, liveSessionId);
+    `).all(liveSessionId, liveSessionId);
     for (const row of rows) {
       if (row.state === "offered") {
         getDb().prepare(`UPDATE work_item_delegations SET state='recalled', updated_at=? WHERE offer_key=? AND state='offered'`)
@@ -210,8 +261,19 @@ export class SessionJobRouter {
             .run(offer.executor_instance_id, ref.oid, now(), ref.key);
           reconciled += 1;
         } else if (["succeeded", "failed"].includes(offer.state)) {
-          const nextState = offer.state === "succeeded" ? "running" : "failed";
-          if (offer.state === "succeeded" && row.state === "failed") this._recoverFalselyFailedOrigin(row);
+          // A success for a delegation already failed here is taken back only
+          // when the recovery succeeds. When it is refused, the failure stands
+          // and nothing waits for the executor's merge, so the delegation is
+          // settled failed (and its refs deleted) instead of left running for
+          // a trunk trailer that can no longer settle it. A recovery that
+          // could not run (null) is retried on the next poll.
+          let failed = offer.state === "failed";
+          if (offer.state === "succeeded" && row.state === "failed") {
+            const recovered = this._recoverFalselyFailedOrigin(row);
+            if (recovered == null) continue;
+            failed = !recovered;
+          }
+          const nextState = failed ? "failed" : "running";
           if (row.state !== nextState) {
             if (offer.state === "failed") updateJobStatus(row.origin_job_id, "failed", { expectedStatuses: ["blocked"] });
             getDb().prepare(`UPDATE work_item_delegations SET state=?, claim_oid=?, completed_at=?, updated_at=? WHERE offer_key=?`)
@@ -219,7 +281,7 @@ export class SessionJobRouter {
             if (offer.state === "failed") refreshWorkItemStatus(row.origin_work_item_id);
             reconciled += 1;
           }
-          if (offer.state === "failed") {
+          if (failed) {
             try {
               await casRef({
                 projectDir: this.projectDir, remote: state.remote_name, namespace: "jobs",
@@ -393,27 +455,49 @@ export class SessionJobRouter {
 
   // The executor finished a job this instance had already failed (its claim
   // was expired while the job ran). Take the failure back only while nothing
-  // has acted on it: the origin job is still failed and no recovery replan has
-  // been created for the work item.
+  // has acted on it: the origin job is still failed, its work item is failed
+  // or still open (not canceled or complete), and no recovery replan has been
+  // created for the work item. The job returns to waiting on the executor's
+  // merge, which the trunk trailer settles (session-job-router.js
+  // reconcileSessionDelegationCommits); the executor's job ending is not that
+  // merge. What the failure canceled is brought back, and a failed work item
+  // reopens so its recovery gate retires. Returns true when the failure was
+  // withdrawn, false when it stands, and null when the recovery could not run.
   _recoverFalselyFailedOrigin(row) {
     try {
-      const replanned = getDb().prepare(`
-        SELECT 1 FROM jobs
-        WHERE work_item_id=? AND id>? AND payload_json LIKE '%replan_after_failure_recovery%' LIMIT 1
-      `).get(row.origin_work_item_id, row.origin_job_id);
-      if (replanned) return false;
-      if (!updateJobStatus(row.origin_job_id, "succeeded", { expectedStatuses: ["failed"] })) return false;
-      refreshWorkItemStatus(row.origin_work_item_id);
-      logEvent({
-        work_item_id: row.origin_work_item_id,
-        job_id: row.origin_job_id,
-        event_type: EVENT_TYPES.SESSION_JOB_RECOVERED,
-        actor_type: EVENT_ACTORS.SCHEDULER,
-        message: `Job #${row.origin_job_id} did not fail: its executor finished it after the claim was expired; the failure was withdrawn`,
+      return runImmediateTransaction(getDb(), () => {
+        const replanned = getDb().prepare(`
+          SELECT 1 FROM jobs
+          WHERE work_item_id=? AND id>? AND payload_json LIKE '%replan_after_failure_recovery%' LIMIT 1
+        `).get(row.origin_work_item_id, row.origin_job_id);
+        if (replanned) return false;
+        const workItem = getWorkItem(row.origin_work_item_id);
+        if (!workItem || (TERMINAL_WORK_ITEM_STATUSES.includes(workItem.status) && workItem.status !== "failed")) return false;
+        if (!updateJobStatus(row.origin_job_id, "blocked", { expectedStatuses: ["failed"] })) return false;
+        const { restored } = restoreCanceledDependents(row.origin_work_item_id, [row.origin_job_id], {
+          ts: now(), gateJobId: null, supersededGates: [], restoreHeldDependents: false,
+        });
+        // The work item's failure canceled the database tasks held for its
+        // merge; they are held for it again, as a retry does.
+        const reheld = workItem.status === "failed" ? reholdPostMergeDbTasksForWorkItem(row.origin_work_item_id) : [];
+        if (workItem.status === "failed") {
+          reopenFailedWorkItem(row.origin_work_item_id, "blocked", "session executor finished the job");
+        }
+        refreshWorkItemStatus(row.origin_work_item_id);
+        logEvent({
+          work_item_id: row.origin_work_item_id,
+          job_id: row.origin_job_id,
+          event_type: EVENT_TYPES.SESSION_JOB_RECOVERED,
+          actor_type: EVENT_ACTORS.SCHEDULER,
+          message: `Job #${row.origin_job_id} did not fail: its executor finished it after the claim was expired; `
+            + `the failure was withdrawn and the job waits for the executor's merge`
+            + (restored.length > 0 ? `; restored ${restored.map((job) => `#${job.id}`).join(", ")}` : "")
+            + (reheld.length > 0 ? `; held database task(s) ${reheld.map((id) => `#${id}`).join(", ")} for the merge again` : ""),
+        });
+        return true;
       });
-      return true;
     } catch {
-      return false; // recovery is best effort; the failure stands
+      return null; // recovery is best effort; the failure stands until a later poll recovers it
     }
   }
 

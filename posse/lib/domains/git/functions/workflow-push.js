@@ -435,19 +435,78 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     return runGitWorkflowTaskOffMainThread("executePush", { ...args, sharedTrunkChecked: true }, workerOptions);
   }
 
+  // The commits a deploy would publish and, when asked, their combined diff:
+  // everything merged since the last push, as one change.
+  function printDeployRange(state, { showDiff = false } = {}) {
+    const upstream = `${state.effectiveRemote}/${state.pushBranch}`;
+    let base = null;
+    try {
+      base = gitExec(["rev-parse", "--verify", "--quiet", upstream], projectDir, { nativeParity }).trim() || null;
+    } catch { base = null; }
+    if (!base) {
+      console.log(`  ${C.dim}${upstream} does not exist yet: this is the first push of ${state.pushBranch}.${C.reset}`);
+      return;
+    }
+    const show = (args, limit) => {
+      let text = "";
+      try { text = gitExec(args, projectDir, { timeoutMs: 15000, nativeParity, trim: false }); } catch { return; }
+      const lines = String(text || "").replace(/\s+$/u, "").split("\n").filter((line) => line.length > 0 || limit == null);
+      for (const line of limit == null ? lines : lines.slice(0, limit)) console.log(`    ${line}`);
+      if (limit != null && lines.length > limit) console.log(`    ${C.dim}... and ${lines.length - limit} more${C.reset}`);
+    };
+    show(["log", "--oneline", "--no-decorate", `${base}..${state.pushBranch}`], 20);
+    console.log("");
+    show(["diff", "--stat", `${base}..${state.pushBranch}`], showDiff ? null : 40);
+    if (showDiff) {
+      console.log("");
+      show(["diff", "--no-color", `${base}..${state.pushBranch}`], null);
+    } else {
+      console.log(`  ${C.dim}Full diff: posse deploy --diff${C.reset}`);
+    }
+  }
+
+  // Wrap-up never asks. Merged work that can be pushed is recorded as the
+  // push-offer gate (the phone's gate, and what unlocks `posse deploy` and
+  // the run screen's deploy key) and named in one line.
   async function offerPush(mergedCount) {
+    let refreshed;
+    try {
+      refreshed = await refreshPushOfferGate(mergedCount, { createdBy: "run_wrapup" });
+    } catch (err) {
+      console.log(`  ${C.dim}Deploy check skipped: ${err?.message || String(err)}${C.reset}`);
+      console.log("");
+      return;
+    }
+    const state = refreshed?.state;
+    const ready = refreshed?.ok === true || refreshed?.reason === "previously_declined";
+    if (ready && state?.pushBranch) {
+      const ahead = Number.isFinite(state.aheadCount) && state.aheadCount > 0 ? `${state.aheadCount} commit(s)` : "Merged work";
+      console.log(`  ${C.dim}${ahead} on ${state.pushBranch} ready to deploy to ${state.effectiveRemote || "origin"}: ${C.reset}${C.cyan}posse deploy${C.reset}${C.dim} (review first: posse deploy --diff)${C.reset}`);
+    }
+    console.log("");
+  }
+
+  /**
+   * `posse deploy`: show what merged work is waiting to be pushed, optionally
+   * its combined diff, and push it on the operator's say-so.
+   *
+   * @param {{ showDiff?: boolean, assumeYes?: boolean }} [options]
+   * @returns {Promise<{ pushed: boolean, reason?: string }>}
+   */
+  async function runDeploy({ showDiff = false, assumeYes = false } = {}) {
+    const mergedCount = 0;
     let state;
     try {
       state = await collectPushOfferStateAsync(mergedCount);
     } catch (err) {
-      console.log(`  ${C.yellow}Push check skipped: ${err?.message || String(err)}${C.reset}`);
+      console.log(`  ${C.yellow}Deploy check failed: ${err?.message || String(err)}${C.reset}`);
       console.log("");
-      return;
+      return { pushed: false, reason: "state_unavailable" };
     }
 
     if (!state?.hasRemote) {
-      console.log("");
-      return;
+      console.log(`\n  ${C.dim}No remote is configured; nothing to deploy to.${C.reset}\n`);
+      return { pushed: false, reason: "no_remote" };
     }
 
     if (state.effectiveRemote && state.pushBranch
@@ -457,29 +516,26 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
         state.pushBranch,
         "shared_trunk_publishes_automatically",
       );
-      console.log("");
-      return;
+      console.log(`\n  ${C.dim}${state.pushBranch} is a shared trunk: merged work is published automatically.${C.reset}\n`);
+      return { pushed: false, reason: "shared_trunk_automatic_publication" };
     }
 
     const targetBranch = state.targetBranch || currentTargetBranch();
     const pushBranchInfo = state.pushBranchInfo || {};
     if (!pushBranchInfo.branch) {
-      if (mergedCount > 0) {
-        console.log(`\n  ${C.bold}${mergedCount} work item(s) merged, but no local branch is available to push.${C.reset}`);
-        console.log(`  ${C.yellow}Configured target branch ${C.cyan}${targetBranch}${C.yellow} is not a local branch.${C.reset}`);
-        console.log(`  ${C.dim}Create/check out the target branch or update Posse admin setting target_branch before pushing.${C.reset}`);
-      }
+      console.log(`\n  ${C.yellow}Configured target branch ${C.cyan}${targetBranch}${C.yellow} is not a local branch.${C.reset}`);
+      console.log(`  ${C.dim}Create/check out the target branch or update Posse admin setting target_branch before pushing.${C.reset}`);
       console.log("");
-      return;
+      return { pushed: false, reason: "no_push_branch" };
     }
 
     // The offer is warranted by unpushed commits on the push branch, not just
     // by merges performed in this wrap-up pass: WIs auto-merged mid-run land
     // before the wrap-up counts them and would otherwise strand unpushed.
     const aheadCount = Number.isFinite(state.aheadCount) ? state.aheadCount : 0;
-    if (mergedCount <= 0 && aheadCount <= 0) {
-      console.log("");
-      return;
+    if (aheadCount <= 0 && state.aheadCount !== null) {
+      console.log(`\n  ${C.dim}Nothing to deploy: ${state.pushBranch} has no commits ${state.effectiveRemote} lacks.${C.reset}\n`);
+      return { pushed: false, reason: "nothing_to_push" };
     }
 
     const pushBranch = state.pushBranch;
@@ -490,16 +546,10 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       console.log(`  ${C.yellow}WI#${wiId} must be merged into ${targetBranch} before any remote push.${C.reset}`);
       console.log(`  ${C.dim}Set Repo -> git & merge -> target_branch if trunk was detected incorrectly, then run posse merge/review.${C.reset}`);
       console.log("");
-      return;
+      return { pushed: false, reason: "work_item_push_target" };
     }
-    if (mergedCount > 0) {
-      console.log(`\n  ${C.bold}${mergedCount} work item(s) merged into ${C.cyan}${pushBranch}${C.reset}`);
-    } else {
-      console.log(`\n  ${C.bold}${aheadCount} unpushed commit(s) on ${C.cyan}${pushBranch}${C.reset}${C.bold} from earlier merges${C.reset}`);
-    }
-    if (mergedCount > 0 && aheadCount > 0) {
-      console.log(`  ${C.dim}${aheadCount} commit(s) ahead of ${effectiveRemote}/${pushBranch}${C.reset}`);
-    }
+    console.log(`\n  ${C.bold}${state.aheadCount === null ? "Unpublished commits" : `${aheadCount} unpushed commit(s)`} on ${C.cyan}${pushBranch}${C.reset}${C.bold} to deploy to ${effectiveRemote}${C.reset}`);
+    printDeployRange(state, { showDiff });
     if (pushBranchInfo.fallback) {
       console.log(`  ${C.yellow}Configured target branch ${C.cyan}${pushBranchInfo.missingBranch}${C.yellow} is not a local branch; using ${C.cyan}${pushBranch}${C.yellow} for push.${C.reset}`);
     }
@@ -535,43 +585,22 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       console.log(`  ${C.dim}Use 'posse review' or 'posse merge' to include them.${C.reset}`);
     }
 
-    // Persist the offer as a bridge gate FIRST, regardless of TTY: the
-    // phone (or a later CLI session) can deploy even when nobody answers
-    // here. Pushing below closes the gate; declining leaves it open.
-    let pushGate = { ok: false };
+    // Keep the gate current with what is shown; pushing below closes it.
     try {
-      pushGate = upsertPushOfferGate(state, { createdBy: "run_wrapup" });
-    } catch (err) {
-      console.log(`  ${C.dim}Push gate not created: ${err?.message || err}${C.reset}`);
-    }
+      upsertPushOfferGate(state, { createdBy: "deploy_command" });
+    } catch { /* the gate is a convenience; the push does not depend on it */ }
 
-    if (pushGate.reason === "previously_declined") {
-      console.log(`  ${C.dim}Push was already declined for this exact ${pushBranch} HEAD; a new commit will create a new offer.${C.reset}`);
-      console.log("");
-      return;
-    }
-    if (pushGate.reused === true) {
-      console.log(`  ${C.dim}The existing push offer is still pending for this exact ${pushBranch} HEAD.${C.reset}`);
-      console.log("");
-      return;
-    }
-
-    // Headless/explicit batch mode: never prompt. The gate above carries the
-    // offer for the app or a later terminal session.
-    if (!process.stdin.isTTY || nonInteractive) {
-      const detail = pushGate.ok
-        ? "Push offer available \u2014 answer from the Posse app, or run: git push"
-        : `Push offer could not be persisted (${pushGate.reason || "unknown"}); run: git push`;
-      console.log(`  ${C.dim}${detail}${C.reset}`);
-      console.log("");
-      return;
-    }
-
-    const answer = await askSingleKeyYesNo(`  Push to remote? [y/N] `, { fallbackAsk: askFn });
-    if (answer.toLowerCase() !== "y" && answer.toLowerCase() !== "yes") {
-      console.log(`  ${C.dim}Skipped push. You can push manually, or from the Posse app.${C.reset}`);
-      console.log("");
-      return;
+    if (!assumeYes) {
+      if (!process.stdin.isTTY || nonInteractive) {
+        console.log(`\n  ${C.dim}Not pushed. Run ${C.reset}${C.cyan}posse deploy --yes${C.reset}${C.dim} to push without a prompt.${C.reset}\n`);
+        return { pushed: false, reason: "confirmation_required" };
+      }
+      const answer = await askSingleKeyYesNo(`\n  Push ${pushBranch} to ${effectiveRemote}? [y/N] `, { fallbackAsk: askFn });
+      if (answer.toLowerCase() !== "y" && answer.toLowerCase() !== "yes") {
+        console.log(`  ${C.dim}Not pushed. The work stays ready: posse deploy${C.reset}`);
+        console.log("");
+        return { pushed: false, reason: "declined" };
+      }
     }
 
     console.log(`  ${C.dim}Pushing ${pushBranch} to ${effectiveRemote}...${C.reset}`);
@@ -619,6 +648,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     }
 
     console.log("");
+    return { pushed: pushed.ok === true, reason: pushed.ok ? undefined : pushed.reason || "push_failed" };
   }
 
   /**
@@ -631,6 +661,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     collectPushOfferState,
     collectPushOfferStateAsync,
     refreshPushOfferGate,
+    runDeploy,
     executePush,
     executePushAsync,
     validatePushCandidate,

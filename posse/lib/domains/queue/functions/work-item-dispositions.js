@@ -9,12 +9,12 @@
 //   commits), accept (operator-pass jobs that failed only at assessment, so
 //   the work item completes into review and merge) and abandon (cancel it and
 //   delete its branch).
-// - A completed work item whose cross-WI merge dependency points at a failed
-//   or canceled upstream, so its merge defers forever. Its gate offers wait
-//   (keep deferring; resolved automatically once the upstream merges; not
-//   offered once an upstream was canceled), rebuild (drop the branch with
-//   its inherited handoff commits and replan from the target branch) and
-//   abandon.
+// - A completed work item whose cross-WI merge dependency points at a failed,
+//   canceled or purged upstream, so its merge defers forever. Its gate offers
+//   wait (keep deferring; resolved automatically once the upstream merges;
+//   not offered once an upstream was canceled or purged), rebuild (drop the
+//   branch with its inherited handoff commits and replan from the target
+//   branch) and abandon.
 //
 // Both gates belong to the work item, not to a job (no original job). They
 // are parked like push offers and post-merge database gates: they never count
@@ -34,13 +34,14 @@ import {
   humanInputChoicesForReviewType,
 } from "../../../catalog/human-input.js";
 import {
+  ASSESSMENT_ONLY_FAILURE_STATES,
   FAILED_JOB_STATUSES,
   MUTATING_JOB_TYPES,
   NON_COMPLETION_BLOCKING_JOB_TYPES,
   QUEUE_LOCKING_JOB_TYPES,
   TERMINAL_JOB_STATUSES_SQL,
 } from "../../../catalog/job.js";
-import { getWorkItemMergeDependencies, reviewedDependencyGenerationMismatch } from "./cross-wi-deps.js";
+import { CROSS_WI_UPSTREAM_MISSING, getWorkItemMergeDependencies, reviewedDependencyGenerationMismatch } from "./cross-wi-deps.js";
 import { isReviewedTransfer, reviewedSourceMergeProof, workItemBranchGeneration } from "./reviewed-handoff-records.js";
 import { REVIEWED_HANDOFF_REASONS } from "../../../catalog/reviewed-handoffs.js";
 import { parseJobPayload } from "./payload.js";
@@ -50,17 +51,14 @@ import {
   isDbTaskJob,
   postMergeDbHoldRecord,
 } from "./post-merge-db-tasks.js";
+import { latestDeterministicVerificationState } from "./deterministic-verification.js";
+import { DETERMINISTIC_VERIFICATION_STATES } from "../../../catalog/verification.js";
+
+export { latestDeterministicVerificationState };
 
 const DISPOSITION_REVIEW_TYPE_SET = new Set(WORK_ITEM_DISPOSITION_REVIEW_TYPES);
 const FAILED_JOB_STATUS_SET = new Set(FAILED_JOB_STATUSES);
-// The implementation finished and committed; only its assessment failed (or
-// could not complete). An operator pass of such a job is a review decision,
-// not a claim that unexecuted work succeeded.
-const ASSESSMENT_ONLY_FAILURE_STATES = new Set([
-  "assessment_failed",
-  "assessment_needs_human",
-  "assessment_unavailable",
-]);
+const ASSESSMENT_ONLY_FAILURE_STATE_SET = new Set(ASSESSMENT_ONLY_FAILURE_STATES);
 const MAX_LISTED_JOBS = 8;
 // Failures older than this get a gate only from the failing transition
 // itself, not from gate maintenance, so upgrading a long-lived queue does not
@@ -168,48 +166,8 @@ export function latestAttemptFailedAtAssessment(jobId) {
 
 export function isAssessmentOnlyFailedJob(job) {
   if (job?.status !== "failed" || !MUTATING_JOB_TYPES.has(job.job_type)) return false;
-  if (!ASSESSMENT_ONLY_FAILURE_STATES.has(job.assessment_state)) return false;
+  if (!ASSESSMENT_ONLY_FAILURE_STATE_SET.has(job.assessment_state)) return false;
   return latestAttemptFailedAtAssessment(job.id);
-}
-
-// An operator review may override an assessment judgment, but it must not
-// relabel a deterministic product failure as passing. Prefer the configured
-// pre-assessment command; scoped lint/type checks are only the fallback when
-// no configured verification result exists for the latest committed attempt.
-export function latestDeterministicVerificationState(jobId) {
-  const db = getDb();
-  const attempt = db.prepare(`
-    SELECT commit_hash FROM job_attempts
-    WHERE job_id = ? AND commit_hash IS NOT NULL AND commit_hash != ''
-    ORDER BY attempt_number DESC, id DESC LIMIT 1
-  `).get(jobId);
-  const commitHash = String(attempt?.commit_hash || "").trim().toLowerCase();
-  const rows = db.prepare(`
-    SELECT observation_type, detail_json
-    FROM job_observations
-    WHERE job_id = ?
-      AND observation_type IN ('command.pre_assess', 'assessment.scoped_checks')
-    ORDER BY CASE observation_type WHEN 'command.pre_assess' THEN 0 ELSE 1 END, id DESC
-  `).all(jobId);
-  for (const row of rows) {
-    let detail;
-    try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
-    const result = row.observation_type === "assessment.scoped_checks"
-      ? detail?.scoped_check_result || detail
-      : detail;
-    const resultCommit = String(
-      result?.assessed_commit_hash || result?.executed_commit_hash || result?.commit_hash || "",
-    ).trim().toLowerCase();
-    if (commitHash && resultCommit !== commitHash) continue;
-    const outcome = result?.verification_outcome || detail?.verification_outcome || {};
-    if (outcome.type === "product_failed") return "failed";
-    if (outcome.type === "passed") return "passed";
-    if (outcome.type) return "unavailable";
-    if (result?.status === "failed") return "failed";
-    if (result?.status === "passed") return "passed";
-    return "unavailable";
-  }
-  return "unavailable";
 }
 
 /**
@@ -421,26 +379,28 @@ function listed(entries, formatter) {
  * the work item again.
  */
 export function failedWorkItemAcceptance(leaves = []) {
-  const verificationFailed = leaves.filter((job) => (
-    isAssessmentOnlyFailedJob(job) && latestDeterministicVerificationState(job.id) === "failed"
-  ));
+  // The state recorded at each job's verdict, never the pruned telemetry. A
+  // job with none recorded for its committed attempt is not accepted.
+  const states = new Map(leaves.filter(isAssessmentOnlyFailedJob)
+    .map((job) => [job, latestDeterministicVerificationState(job.id)]));
+  const verificationFailed = leaves.filter((job) => states.get(job) === DETERMINISTIC_VERIFICATION_STATES.FAILED);
+  const verificationUnknown = leaves.filter((job) => states.get(job) === DETERMINISTIC_VERIFICATION_STATES.UNKNOWN);
   const acceptable = leaves.filter((job) => (
-    isAssessmentOnlyFailedJob(job) && !verificationFailed.includes(job)
+    states.has(job) && !verificationFailed.includes(job) && !verificationUnknown.includes(job)
   ));
   const notAcceptable = leaves.filter((job) => !acceptable.includes(job));
-  if (leaves.length === 0) {
-    return { ok: false, reason: "no_failed_jobs", acceptable, notAcceptable, verificationFailed };
-  }
+  const result = { acceptable, notAcceptable, verificationFailed, verificationUnknown };
+  if (leaves.length === 0) return { ok: false, reason: "no_failed_jobs", ...result };
   if (notAcceptable.length > 0) {
     return {
       ok: false,
-      reason: verificationFailed.length > 0 ? "verification_failed" : "execution_failures",
-      acceptable,
-      notAcceptable,
-      verificationFailed,
+      reason: verificationFailed.length > 0
+        ? "verification_failed"
+        : verificationUnknown.length > 0 ? "verification_unknown" : "execution_failures",
+      ...result,
     };
   }
-  return { ok: true, reason: null, acceptable, notAcceptable, verificationFailed };
+  return { ok: true, reason: null, ...result };
 }
 
 export function acceptanceRefusalMessage(workItemId, acceptance) {
@@ -449,6 +409,9 @@ export function acceptanceRefusalMessage(workItemId, acceptance) {
   }
   if (acceptance.reason === "verification_failed") {
     return `Cannot accept WI#${workItemId}: ${listed(acceptance.verificationFailed, describeFailedJob)} has failed deterministic verification. Answer retry or abandon.`;
+  }
+  if (acceptance.reason === "verification_unknown") {
+    return `Cannot accept WI#${workItemId}: ${listed(acceptance.verificationUnknown, describeFailedJob)} has no deterministic verification result recorded at its assessment verdict, so the failure is not known to be assessment-only. Answer retry or abandon.`;
   }
   return `Cannot accept WI#${workItemId}: ${listed(acceptance.notAcceptable, describeFailedJob)} did not fail at assessment, so there is no committed result to accept. Answer retry or abandon.`;
 }
@@ -500,7 +463,8 @@ export function hasWorkItemFailureGateForEpisode(workItem) {
 
 /**
  * Upstream work items a completed work item's merge is waiting for although
- * they failed or were canceled, so they will not merge unless recovered.
+ * they failed or were canceled, so they will not merge unless recovered, or
+ * whose row is gone (purged), so they never will (CROSS_WI_UPSTREAM_MISSING).
  */
 export function staleCrossWiUpstreams(workItem) {
   if (!workItem) return [];
@@ -514,14 +478,14 @@ export function staleCrossWiUpstreams(workItem) {
       const source = readSource.get(sourceId);
       const generationChanged = reviewedDependencyGenerationMismatch(dep, source);
       const mergeUnproven = source?.merge_state === "merged" && isReviewedTransfer(dep) && !reviewedSourceMergeProof(source, dep);
-      if (!source || (!generationChanged && !mergeUnproven && (source.merge_state === "merged" || !["failed", "canceled"].includes(source.status)))) continue;
+      if (source && !generationChanged && !mergeUnproven && (source.merge_state === "merged" || !["failed", "canceled"].includes(source.status))) continue;
       bySource.set(sourceId, {
         source_work_item_id: sourceId,
-        title: String(source.title || "").slice(0, 120),
-        status: generationChanged ? REVIEWED_HANDOFF_REASONS.GENERATION : mergeUnproven ? REVIEWED_HANDOFF_REASONS.INCOMPLETE : source.status,
-        ...(generationChanged || mergeUnproven ? { source_generation: workItemBranchGeneration(source), expected_source_generation: dep.source_generation } : {}),
-        completed_at: source.completed_at || null,
-        source_branch: dep.source_branch || source.branch_name || null,
+        title: String(source?.title || "").slice(0, 120),
+        status: !source ? CROSS_WI_UPSTREAM_MISSING : generationChanged ? REVIEWED_HANDOFF_REASONS.GENERATION : mergeUnproven ? REVIEWED_HANDOFF_REASONS.INCOMPLETE : source.status,
+        ...(source && (generationChanged || mergeUnproven) ? { source_generation: workItemBranchGeneration(source), expected_source_generation: dep.source_generation } : {}),
+        completed_at: source?.completed_at || null,
+        source_branch: dep.source_branch || source?.branch_name || null,
         paths: [],
       });
     }
@@ -559,20 +523,27 @@ export function unaskedStaleCrossWiUpstreams(workItem, upstreams = staleCrossWiU
 
 /**
  * "wait" means waiting for the upstreams to be recovered and merged. A
- * canceled work item is terminal and never merges, and the merge needs every
- * upstream merged, so with any upstream canceled the gate offers only
- * rebuild and abandon.
+ * canceled work item is terminal and never merges, nor does a purged one,
+ * and the merge needs every upstream merged, so with any upstream canceled
+ * or purged the gate offers only rebuild and abandon.
  */
 export function crossWiUpstreamWaitAvailable(upstreams = []) {
-  return !upstreams.some((upstream) => upstream.status === "canceled");
+  return !upstreams.some((upstream) => upstream.status === "canceled" || upstream.status === CROSS_WI_UPSTREAM_MISSING);
 }
 
-/** "WI#1, WI#2 was/were canceled and will never merge" for the canceled upstreams, or null. */
+/**
+ * "WI#1, WI#2 was/were canceled and will never merge" for the canceled
+ * upstreams ("no longer exist(s) (purged)" for purged ones), or null.
+ */
 export function canceledCrossWiUpstreamsText(upstreams = []) {
+  const ids = (list) => list.map((upstream) => `WI#${upstream.source_work_item_id}`).join(", ");
   const canceled = upstreams.filter((upstream) => upstream.status === "canceled");
-  if (canceled.length === 0) return null;
-  const ids = canceled.map((upstream) => `WI#${upstream.source_work_item_id}`).join(", ");
-  return `${ids} ${canceled.length === 1 ? "was" : "were"} canceled and will never merge`;
+  const missing = upstreams.filter((upstream) => upstream.status === CROSS_WI_UPSTREAM_MISSING);
+  const parts = [
+    canceled.length > 0 ? `${ids(canceled)} ${canceled.length === 1 ? "was" : "were"} canceled` : null,
+    missing.length > 0 ? `${ids(missing)} ${missing.length === 1 ? "no longer exists" : "no longer exist"} (purged)` : null,
+  ].filter(Boolean);
+  return parts.length > 0 ? `${parts.join(" and ")} and will never merge` : null;
 }
 
 function workItemLabel(workItem) {
@@ -633,7 +604,9 @@ export function workItemFailureDispositionGateSpec(workItem, {
       ? "no failed job remains to accept"
       : acceptance.reason === "verification_failed"
         ? `${listed(acceptance.verificationFailed, (job) => `#${job.id}`)} failed deterministic verification`
-        : `${listed(acceptance.notAcceptable, (job) => `#${job.id}`)} did not fail at assessment`}.`;
+        : acceptance.reason === "verification_unknown"
+          ? `${listed(acceptance.verificationUnknown, (job) => `#${job.id}`)} has no deterministic verification result recorded at its assessment verdict`
+          : `${listed(acceptance.notAcceptable, (job) => `#${job.id}`)} did not fail at assessment`}.`;
   const abandonLine = `abandon: cancel the work item${branch ? " and delete its branch" : ""}.`;
   const gatesLine = leaves.length > 0 && timedOutGates.length > 0
     ? `Gate${timedOutGates.length === 1 ? "" : "s"} ${timedOutGates.join(", ")} timed out with the failed job${timedOutGates.length === 1 ? "" : "s"}; retry or accept retires ${timedOutGates.length === 1 ? "it" : "them"}.`

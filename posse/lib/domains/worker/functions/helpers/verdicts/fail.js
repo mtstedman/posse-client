@@ -1,4 +1,5 @@
 import { inheritRequirementContracts } from "../../../../planning/functions/requirement-contract.js";
+import { serializeWidenedScopeOverlaps } from "../../../../planning/functions/plan-scope-overlap.js";
 import { coordinateContractOwnerRepair } from "../../../../queue/functions/contract-owner-repair.js";
 import { repairInstructions } from "../test-failure-evidence.js";
 // lib/domains/worker/functions/helpers/verdicts/fail.js
@@ -284,6 +285,29 @@ function _fixSatisfiabilityFingerprint({
     plan_generation: Number(planGeneration) || 1,
   };
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+// What the operator reads when a fix would repeat an earlier one: the work,
+// what keeps failing, and what each answer does. The fingerprint that
+// detected the repeat is an internal identity and stays out of the prose.
+export function repeatedFixQuestion({ job, verdict, proposedTitle, files = [] }) {
+  const reasons = (Array.isArray(verdict?.reasons) ? verdict.reasons : [])
+    .map((reason) => String(reason || "").trim()).filter(Boolean);
+  const scope = [...new Set(files.map((file) => String(file || "").trim()).filter(Boolean))];
+  return [
+    `The fix for "${String(job?.title || "this job").slice(0, 160)}" keeps failing the same way, so another automatic fix would only repeat it.`,
+    "",
+    reasons.length > 0 ? "What the assessor reports is still wrong:" : "The assessor gave no reasons for the failure.",
+    ...reasons.slice(0, 6).map((reason) => `- ${reason.slice(0, 600)}`),
+    ...(reasons.length > 6 ? [`- (+${reasons.length - 6} more)`] : []),
+    ...(proposedTitle ? ["", `The fix it asked for again: ${String(proposedTitle).slice(0, 200)}`] : []),
+    ...(scope.length > 0
+      ? ["", `Files in the fix's scope: ${scope.slice(0, 8).join(", ")}${scope.length > 8 ? ` (+${scope.length - 8} more)` : ""}`]
+      : []),
+    "",
+    "retry: try again, with new guidance that changes the approach. replan: send the work back to planning. "
+      + "explicit_waiver: accept the work without this verification. fail: stop this work.",
+  ].join("\n");
 }
 
 // A deterministic verification failure (scoped checks, frozen test) is the
@@ -735,8 +759,10 @@ function _extractOriginalPayloadContext(job) {
     ? origPayload.test_command.trim()
     : "";
   const origTaskAbTestCommand = origPayload._task_ab_test_command === true && !!originalTestCommand;
+  // The compile-time stamp marks an undeclared-runner Node command as
+  // operational; a declared runner has none and is still inherited.
   const originalOperationalCommand = !origTaskAbTestCommand
-    ? operationalCommandApprovalRequest(originalTestCommand)
+    ? operationalCommandApprovalRequest(originalTestCommand, { compiledApproval: origPayload._operational_command_approval_required })
     : null;
   // Exact operational approval is deliberately job-scoped. Passing its command
   // text to a descendant without a fresh gate turns it back into a rejected
@@ -1193,11 +1219,11 @@ function _spawnRecoveryJobsForVerdict({
           review_type: "fix_chain_exhausted",
           question_kind: "fix_chain_exhausted",
           choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
-          questions: [
-            `The same failure/scope fingerprint (${fixFingerprint.slice(0, 12)}) already occurred in this fix lineage.`,
-            "Choose retry with materially new guidance, replan, explicit_waiver, fail, or skip.",
-          ],
-          context: "Posse did not enqueue another identical fix because it would repeat an unsatisfiable repair loop.",
+          questions: [repeatedFixQuestion({
+            job, verdict, proposedTitle: proposedFix.title,
+            files: [...mergedFixModify, ...mergedFixCreate, ...mergedFixDelete],
+          })],
+          context: "An earlier fix in this chain already failed for these same reasons on these same files, so Posse did not queue another identical fix.",
           fix_satisfiability_fingerprint: fixFingerprint,
         }),
       });
@@ -1234,7 +1260,7 @@ function _spawnRecoveryJobsForVerdict({
               "Approve to create the staged fix with these exact paths, or reject to stop the repair chain.",
             ].join("\n"),
           ],
-          context: `Pre-enqueue fix satisfiability gate; fingerprint ${fixFingerprint.slice(0, 12)}.`,
+          context: `The fix for "${String(job.title || "").slice(0, 120)}" cannot be queued until these paths are approved: its current scope does not include them.`,
           file_requests: requiredScopeExpansion.map((filePath) => ({
             path: filePath,
             reason: "assessor-required existing path outside inherited fix scope",
@@ -1425,6 +1451,9 @@ export function handle(job, verdict, ctx) {
       log, spawnFromAssessor, spawnedJobs,
     });
     _rewireDependentsToReplacements({ job, dependentsSnapshot, dependencyReplacementJobs });
+    // Paths a fix adds beyond its parent's scope (spawn_jobs.files_to_create)
+    // may belong to a live sibling (K1).
+    for (const spawned of spawnedJobs) serializeWidenedScopeOverlaps(spawned);
     markFailed();
   });
 }

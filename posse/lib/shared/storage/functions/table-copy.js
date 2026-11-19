@@ -2,6 +2,21 @@ import { log } from "../../telemetry/functions/logging/logger.js";
 import { isJsonValidityColumn as isKnownJsonValidityColumn } from "./installers.js";
 import { getTableColumnNames, quoteIdent } from "./table-definitions.js";
 
+// Legacy rebuilds create the replacement from historical inline SQL, which
+// predates columns that startup ALTERs added later; copying only the columns
+// both tables share would drop them and their data. Append each to the
+// replacement with its type, and its NOT NULL and default when the default
+// is a literal (ALTER TABLE cannot add an expression default).
+export function addMissingColumns(db, fromTable, toTable) {
+  const present = new Set(getTableColumnNames(db, toTable));
+  for (const { name, type, notnull, dflt_value: dflt } of db.pragma(`table_info(${quoteIdent(fromTable)})`)) {
+    if (present.has(name)) continue;
+    const literal = dflt !== null && /^(?:'(?:[^']|'')*'|[-+]?\d+(?:\.\d+)?|NULL)$/i.test(dflt);
+    const constraints = literal ? `${notnull ? " NOT NULL" : ""} DEFAULT ${dflt}` : "";
+    db.exec(`ALTER TABLE ${quoteIdent(toTable)} ADD COLUMN ${quoteIdent(name)} ${type}${constraints}`);
+  }
+}
+
 export function copyCompatibleColumns(db, fromTable, toTable, aliases = {}) {
   const oldCols = new Set(getTableColumnNames(db, fromTable));
   const newCols = getTableColumnNames(db, toTable);

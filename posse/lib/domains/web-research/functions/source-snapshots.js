@@ -101,27 +101,33 @@ function ipv4FromGroups(high, low) {
 // Only globally routable addresses may be fetched: a nominated URL comes from
 // a model reading untrusted web content, so it must not reach this machine's
 // loopback, the local network, or cloud metadata endpoints. IPv4 embedded in
-// IPv6 (mapped, compatible, NAT64, 6to4) is judged by its IPv4 address; the
-// URL parser rewrites `[::ffff:127.0.0.1]` to the hex form `[::ffff:7f00:1]`.
+// IPv6 at a fixed position (mapped, well-known NAT64, 6to4) is judged by its
+// IPv4 address; the URL parser rewrites `[::ffff:127.0.0.1]` to the hex form
+// `[::ffff:7f00:1]`. Any other IPv6 address must be global unicast outside
+// the special-purpose blocks; a form whose IPv4 cannot be placed for certain
+// (SIIT-translated, local-use NAT64, Teredo) is refused rather than decoded.
 export function isPublicAddress(address) {
   const value = String(address || "").trim().toLowerCase();
   if (net.isIPv4(value)) return isPublicIpv4(value);
-  if (!net.isIPv6(value)) return false;
+  // A zone index scopes the address to a local interface.
+  if (!net.isIPv6(value) || value.includes("%")) return false;
   const groups = ipv6Groups(value);
   if (!groups || groups.some((group) => !Number.isInteger(group))) return false;
   const [g0, g1, g2, g3, g4, g5, g6, g7] = groups;
-  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0) {
-    if (g5 === 0xffff) return isPublicIpv4(ipv4FromGroups(g6, g7)); // ::ffff:0:0/96 mapped
-    return false; // ::, ::1, and deprecated IPv4-compatible ::/96
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) {
+    return isPublicIpv4(ipv4FromGroups(g6, g7)); // IPv4-mapped ::ffff:0:0/96
   }
   if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
-    return isPublicIpv4(ipv4FromGroups(g6, g7)); // NAT64 64:ff9b::/96
+    return isPublicIpv4(ipv4FromGroups(g6, g7)); // NAT64 well-known 64:ff9b::/96
   }
   if (g0 === 0x2002) return isPublicIpv4(ipv4FromGroups(g1, g2)); // 6to4 2002::/16
-  if ((g0 & 0xfe00) === 0xfc00) return false; // unique local fc00::/7
-  if ((g0 & 0xffc0) === 0xfe80) return false; // link-local fe80::/10
-  if ((g0 & 0xffc0) === 0xfec0) return false; // deprecated site-local fec0::/10
-  if ((g0 & 0xff00) === 0xff00) return false; // multicast ff00::/8
+  // Global unicast is 2000::/3. Outside it: ::/8 (unspecified, loopback,
+  // IPv4-compatible, SIIT ::ffff:0:0:0/96), local-use NAT64 64:ff9b:1::/48,
+  // discard-only 100::/64, unique local, link-local, site-local, multicast.
+  if ((g0 & 0xe000) !== 0x2000) return false;
+  if (g0 === 0x2001 && g1 < 0x200) return false; // IETF protocol assignments 2001::/23, incl. Teredo 2001::/32
+  if (g0 === 0x2001 && g1 === 0xdb8) return false; // documentation 2001:db8::/32
+  if (g0 === 0x3fff && g1 < 0x1000) return false; // documentation 3fff::/20
   return true;
 }
 
@@ -424,8 +430,10 @@ function recordSnapshotObservation(context, result) {
  * Snapshot nominated sources as durable work-item refs, visible to the
  * parent call through an issued traversal. Never throws for one source: each
  * returns a status the planner can see.
+ * `onSource` receives each source's result as it settles, so a caller whose
+ * deadline interrupts capture keeps the snapshots already taken.
  * @param {Array<{url: string, label: string}>} sources
- * @param {{ context?: Record<string, any>, projectDir?: string | null, fetchImpl?: typeof fetch, lookup?: any, signal?: AbortSignal | null, dispatchId?: string | null }} [options]
+ * @param {{ context?: Record<string, any>, projectDir?: string | null, fetchImpl?: typeof fetch, lookup?: any, signal?: AbortSignal | null, dispatchId?: string | null, onSource?: ((result: Record<string, any>) => void) | null }} [options]
  */
 export async function captureWebSources(sources, {
   context = {},
@@ -434,6 +442,7 @@ export async function captureWebSources(sources, {
   lookup = defaultLookup,
   signal = null,
   dispatchId = null,
+  onSource = null,
 } = {}) {
   const results = [];
   const workItemId = workItemIdFrom(context);
@@ -520,6 +529,7 @@ export async function captureWebSources(sources, {
     }
     recordSnapshotObservation(context, result);
     results.push(result);
+    onSource?.(result);
   }
   return results;
 }

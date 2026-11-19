@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { SESSION_PUBLISH_MODES } from "../../../catalog/session-sync.js";
+import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { runImmediateTransaction } from "../../queue/functions/common.js";
 import { readSessionLink } from "./session-link.js";
 import { normalizeComputeOwner } from "./compute-lease.js";
@@ -38,6 +39,17 @@ export function getLivePairingState(db = getDb()) {
     ORDER BY created_at DESC
     LIMIT 1
   `).get());
+}
+
+/**
+ * This clone's identity in the live session: the instance id the session row
+ * joined or activated with, which the Remote lists to peers and which every
+ * session record (offers, claims, delegations, trunk trailers) carries. The
+ * bridge identity is the relay's and can change mid-session (a first phone
+ * pairing adopts a relay-minted id), so it stands in only without a session.
+ */
+export function sessionInstanceId(projectDir = process.cwd(), state = getLivePairingState()) {
+  return state?.instance_id || ensureBridgeInstanceId(projectDir);
 }
 
 export function getPairingState(id, db = getDb()) {

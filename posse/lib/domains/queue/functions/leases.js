@@ -9,9 +9,11 @@
 // from the same source.
 
 import crypto from "crypto";
-import { hasReviewedReservation } from "./reviewed-handoff-records.js";
+import { hasReviewedReservation, reviewedTransfers } from "./reviewed-handoff-records.js";
+import { restoreReviewedDonorClaim } from "./reviewed-handoff-journal.js";
 import { LeaseManager } from "../classes/LeaseManager.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { normPath } from "../../../shared/scope/functions/path.js";
 import { LEASE_HOLDING_STATUSES_SQL, PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES_SQL, now, runImmediateTransaction } from "./common.js";
 import { logEvent } from "./events.js";
 import { isLeaseValid } from "./attempts.js";
@@ -355,15 +357,24 @@ export function releaseLeaseWithoutAttemptPenalty(jobId, leaseToken, finalStatus
   const db = getDb();
   const execute = () => {
     const released = releaseLeaseInternal(db, jobId, leaseToken, finalStatus, { readyAt });
-    if (released && finalStatus === "queued" && attemptId == null
-        && !hasReviewedReservation(db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId))) {
+    const job = released ? db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId) : null;
+    if (released && finalStatus === "queued" && attemptId == null && !hasReviewedReservation(job)) {
       // A freshness deferral has no implementation attempt. Remove only
       // work-item locks inserted by this lease; an older attempt may own the
       // same work item's other paths and must keep them through the retry.
-      db.prepare(`DELETE FROM work_item_file_locks
+      const leaseLocks = `FROM work_item_file_locks
         WHERE source_job_id = ? AND released_at IS NULL
           AND json_valid(metadata_json)
-          AND json_extract(metadata_json, '$.lease_token') = ?`).run(jobId, leaseToken);
+          AND json_extract(metadata_json, '$.lease_token') = ?`;
+      const dropped = new Set(db.prepare(`SELECT path ${leaseLocks}`).all(jobId, leaseToken).map((row) => row.path));
+      db.prepare(`DELETE ${leaseLocks}`).run(jobId, leaseToken);
+      // An import applied under this lease no longer has a lock: its donor
+      // owns the path again until the receiver reserves it anew (K6).
+      for (const transfer of reviewedTransfers(job, { applied: true })) {
+        for (const file of transfer.files || []) {
+          if (dropped.has(normPath(file.path))) restoreReviewedDonorClaim(transfer, file.path, db);
+        }
+      }
     }
     // Pre-attempt deferrals have nothing to refund. The execution owner must
     // supply the attempt it created under this lease; assessment attempts use

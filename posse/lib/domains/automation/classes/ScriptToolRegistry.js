@@ -9,6 +9,8 @@ import { runScriptTool } from "../functions/script-runner.js";
 import { runMediaTool } from "../functions/media-runner.js";
 
 const SECRET_KIND = "script_secrets";
+// Per-run spend cap of an agent-invocation tool whose manifest sets none.
+const AGENT_TOOL_DEFAULT_SPEND_CAP_USD = 1;
 
 // Operator-authored script tools in <automation data dir>/tools/<name>/.
 // A tool becomes an automation entry only after a passing test; the entry
@@ -107,13 +109,21 @@ export class ScriptToolRegistry {
     const tool = this.load(name);
     demand(typeof expectedDigest === "string" && expectedDigest === tool.digest, "Tool changed since it was opened; reload before saving", "script_changed");
     const existing = tool.manifest;
-    const { description, effect = existing.effect, input_schema = null, inputs = null, output_schema = null, env = [], secrets = [], generate = null, invoke_agent = null, timeout_seconds } = spec || {};
+    const fields = spec || {};
+    const { description, effect = existing.effect, input_schema = null, inputs = null, output_schema = null, env, secrets, generate = null, invoke_agent = null, timeout_seconds } = fields;
     demand(timeout_seconds === undefined || Number.isInteger(timeout_seconds), "timeout_seconds must be an integer", "script_invalid");
     demand(existing.generate || generate == null, `${name} is a script tool; only image and video tools take generation settings`, "script_invalid");
+    // A setting the spec does not name keeps its stored value. Environment
+    // variables and secrets merge per kind. The agent-facing params, caller
+    // inputs and output schema are one field set (inputs may not overlap the
+    // params), so naming any of them rewrites all three, as the Bossy editor
+    // sends them; naming none keeps the stored set.
     const variables = [
-      ...env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item),
-      ...secrets.map(secret => ({ name: secret, secret: true })),
+      ...(env === undefined ? existing.env.filter(item => !item.secret)
+        : env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item)),
+      ...(secrets === undefined ? existing.env.filter(item => item.secret) : secrets.map(secret => ({ name: secret, secret: true }))),
     ];
+    const rewritesFields = ["input_schema", "inputs", "output_schema"].some(key => fields[key] !== undefined);
     // Re-render to normalize the edited schemas, then keep the tool's own
     // entry/interpreter so its existing script stays valid. The manifest is
     // part of the tool digest, so this write makes its test and grants stale.
@@ -135,11 +145,16 @@ export class ScriptToolRegistry {
     }) : renderScriptTemplate({
       name, template: "bash", effect,
       description: String(description || "").trim() || existing.description,
-      params: [], inputSchema: input_schema, userInputSchema: inputs, outputSchema: output_schema, env: variables,
+      params: [], inputSchema: rewritesFields ? input_schema : existing.params,
+      userInputSchema: rewritesFields ? inputs : existing.inputs ?? null,
+      outputSchema: rewritesFields ? output_schema : existing.output_schema ?? null, env: variables,
     });
+    const spendCap = fields.spend_cap_usd === undefined ? existing.spend_cap_usd : fields.spend_cap_usd;
     const manifest = normalizeScriptManifest({
-      ...rendered.manifest, name, ...(existing.generate || existing.invoke_agent ? {} : { entry: existing.entry, interpreter: existing.interpreter }),
+      ...rendered.manifest, name, ...(existing.generate || existing.invoke_agent ? {} : { entry: existing.entry, interpreter: existing.interpreter,
+        exit_codes_are_data: spec?.exit_codes_are_data ?? existing.exit_codes_are_data }),
       timeout_seconds: timeout_seconds === undefined ? existing.timeout_seconds : timeout_seconds, max_output_bytes: existing.max_output_bytes,
+      ...(spendCap === undefined ? {} : { spend_cap_usd: spendCap }),
     });
     const manifestPath = path.join(tool.dir, SCRIPT_TOOL_MANIFEST_FILE);
     const temporary = path.join(tool.dir, `.manifest-${randomUUID()}`);
@@ -180,7 +195,10 @@ export class ScriptToolRegistry {
       id: this.entryID(tool.manifest.name), source: "script", kind: "script", script: tool.manifest.name,
       description: tool.manifest.description, input_schema: tool.manifest.params, output_schema: { type: "object" },
       effect: SCRIPT_TOOL_ENTRY_EFFECTS[tool.manifest.effect],
-      limits: { wall_time_seconds: Math.min(3600, tool.manifest.timeout_seconds + 10), calls: 1, turns: 1, spend_cap_usd: 1 },
+      // An agent tool's manifest may raise the default spend cap; each run
+      // is still bounded by the caller's remaining budget (AutomationService).
+      limits: { wall_time_seconds: Math.min(3600, tool.manifest.timeout_seconds + 10), calls: 1, turns: 1,
+        spend_cap_usd: (tool.manifest.invoke_agent && tool.manifest.spend_cap_usd) || AGENT_TOOL_DEFAULT_SPEND_CAP_USD },
       enabled: true, digest: tool.digest,
     };
   }
@@ -197,7 +215,7 @@ export class ScriptToolRegistry {
     const result = tool.manifest.invoke_agent
       ? await this.agentTools.run(tool, input, { privateInputs: selected, signal, invocation: { unbudgeted: true } })
       : tool.manifest.generate
-      ? await runMediaTool(tool, input, { generators: this.mediaGenerators })
+      ? await runMediaTool(tool, input, { signal, generators: this.mediaGenerators })
       : await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected, signal });
     signal?.throwIfAborted();
     if (!result.ok) return { tool: name, digest: tool.digest, result, published: null, revoked_grants: [] };
@@ -237,6 +255,15 @@ export class ScriptToolRegistry {
       ? await runMediaTool(tool, input, { signal, generators: this.mediaGenerators })
       : await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected, signal });
     demand(tool.manifest.invoke_agent || !result.timed_out, `Script tool ${entry.script} timed out after ${tool.manifest.timeout_seconds}s`, "script_timeout");
+    // A failing script fails its run, so run history, schedules, recipe
+    // steps and skill tests see it: killed by a signal, or a non-zero exit
+    // the manifest does not declare as data (the runner then reports ok).
+    // The result rides on the error for the run record and calling agents.
+    // An agent tool reports its child's own status instead.
+    if (!tool.manifest.invoke_agent && !result.ok) {
+      throw Object.assign(new Error(result.signal ? `Script tool ${entry.script} was killed by ${result.signal}`
+        : `Script tool ${entry.script} failed with exit code ${result.exit_code}`), { code: "script_failed", result });
+    }
     this.validateOutput(tool, result);
     return result;
   }

@@ -5,6 +5,7 @@ import { fit, stripAnsi, visiblePad, _sanitizeDisplayLine } from "../../function
 import { posseWordmark, roleBrandColor } from "../../functions/display/helpers/brand.js";
 import { jobLabel, jobIsBackgroundAtlasWarm } from "../../functions/display/helpers/job-status.js";
 import { BRIDGE_OPEN_GATE_STATUSES } from "../../../../catalog/bridge.js";
+import { AGENT_CONVERSATION_BOUNDS, AGENT_CONVERSATION_TIER } from "../../../../catalog/agent-conversation.js";
 import { ACTIVE_LEASE_STATUSES, TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 import { humanGateStateAllowsAnswer } from "../../../../catalog/human-input.js";
 import { getAgentActivityEvents, getHumanGate, listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
@@ -16,6 +17,9 @@ import {
   monitorActivityState, monitorFeedbackMeta, monitorFeedbackSuffix,
 } from "../../functions/display/monitor-presentation.js";
 import { monitorToolMeta, monitorToolRowParts } from "../../functions/display/tool-observation-presentation.js";
+import { buildMonitorConversationRows, monitorConversationAnswerGate, monitorConversationEntries } from "../../functions/display/monitor-conversation.js";
+import { projectAgentConversation } from "../../../conversation/functions/conversation-projection.js";
+import { getDb } from "../../../../shared/storage/functions/index.js";
 // Focus-pane mascot uses saddle tan to stay distinct from the brand marks.
 const MASCOT_FG = "\x1b[38;2;201;148;92m";
 const LIVE_CHANNEL_TOOL_TYPES = new Set([
@@ -274,10 +278,12 @@ export class DisplayMonitorRenderer {
       && this.workers?.has?.(selected.jobId),
     );
     return [
-      action("a", "answer", selected?.state === "ask", C.green),
+      action("a", "answer", selected?.state === "ask" || this._monitorConversationAnswerGateJobId(selected) != null, C.green),
       action("n", "nudge", Boolean(selected && this.onNudge), C.yellow),
       action("d", "changes", Boolean(selected), C.magenta),
       action("!", "kill", killable, C.red),
+      // Last slot, so its expand/collapse label never moves the others.
+      action("e", this._monitorToolsExpanded ? "collapse" : "expand", Boolean(selected), C.cyan),
     ].join(" ");
   }
 
@@ -431,6 +437,7 @@ export class DisplayMonitorRenderer {
         wiStatus: wiRow.status || null,
         wiMergeState: wiRow.merge_state || null,
         role: roleLabel(worker?.role || job.job_type || "agent"),
+        jobType: job.job_type || null,
         state,
         activity,
         attempt: worker?.attempt || 1,
@@ -483,6 +490,7 @@ export class DisplayMonitorRenderer {
         wiStatus: wiRow.status || null,
         wiMergeState: wiRow.merge_state || null,
         role: roleLabel(job.job_type || "human"),
+        jobType: job.job_type || null,
         state: isHumanWait || hasActionableQuestion
           ? "ask"
           : (pendingGuidance.length > 0 ? "nudge" : "live"),
@@ -534,6 +542,7 @@ export class DisplayMonitorRenderer {
       this._monitorSelectedJobId = selected.jobId;
       this._monitorSelectedAgentCallId = selected.agentCallId || null;
       this._monitorFeedbackScroll = 0;
+      this._monitorToolsExpanded = false;
       this._monitorChangesMode = false;
       this._monitorDiffOpen = false;
       this._monitorDiffFileIndex = 0;
@@ -804,7 +813,139 @@ export class DisplayMonitorRenderer {
 
 
 
+  // The selected agent's conversation (posse.agent_conversation.v1, local
+  // tier), cached ~750ms per agent like the roster. Without a call filter the
+  // projection shows only top-level calls, so a parent row never carries its
+  // research children's updates. A human-input gate row shows the whole Work
+  // Item: its own job's page is the lone gate card the ask box already shows,
+  // while the Work Item gives the context the operator answers from. Null
+  // when the agent has no Work Item or the projection is unavailable: the
+  // focus pane then keeps the separate feedback and tool lanes.
+  _monitorConversationForAgent(agent, { maxAgeMs = 750 } = {}) {
+    const workItemId = Number(agent?.workItemId);
+    if (!Number.isSafeInteger(workItemId) || workItemId <= 0) return null;
+    const wholeWorkItem = agent.jobType === "human_input";
+    const request = {
+      work_item_id: workItemId,
+      job_id: wholeWorkItem ? null : agent.jobId,
+      agent_call_id: wholeWorkItem ? null : agent.agentCallId || null,
+      tier: AGENT_CONVERSATION_TIER.LOCAL,
+      limit: AGENT_CONVERSATION_BOUNDS.PAGE_ENTRIES,
+    };
+    const key = JSON.stringify(request);
+    const now = Date.now();
+    const cache = this._monitorConversationCache;
+    if (cache?.key === key && now - cache.at < maxAgeMs) return cache.conversation;
+    let conversation = null;
+    try {
+      const page = projectAgentConversation(request, { db: getDb() });
+      conversation = Array.isArray(page?.entries)
+        ? { entries: monitorConversationEntries(page), hasOlder: page.page?.has_older === true }
+        : null;
+    } catch {
+      conversation = null; // DB churn: this tick keeps the legacy lanes
+    }
+    this._monitorConversationCache = { key, at: now, conversation };
+    return conversation;
+  }
+
+
+
+  // The gate [a] answers from an agent row: the newest open gate its
+  // conversation asks. A gate row answers its own gate (state "ask"), so it
+  // needs no lookup here.
+  _monitorConversationAnswerGateJobId(agent) {
+    if (!agent || agent.jobType === "human_input") return null;
+    const conversation = this._monitorConversationForAgent(agent);
+    if (!conversation) return null;
+    return monitorConversationAnswerGate(conversation.entries, {
+      promptedGateJobIds: (this._questionQueue || []).map((entry) => entry?.jobId),
+    });
+  }
+
+
+
+  // [e] works only where keypresses arrive; without a TTY every group stays
+  // folded to its digest line.
+  _monitorIsInteractive() {
+    return Boolean(this._keypressHandler);
+  }
+
+
+
+  _buildMonitorConversationLanes(agent, width, height, conversation) {
+    const total = Math.max(5, height | 0);
+    const inner = Math.max(8, width - 4);
+    if (this._monitorChangesMode && this._monitorDiffOpen) {
+      return this._buildMonitorChangesBox(agent, width, total);
+    }
+    const interactive = this._monitorIsInteractive();
+    const expanded = interactive && this._monitorToolsExpanded === true;
+    const { rows, messageCount } = buildMonitorConversationRows(conversation.entries, {
+      width: inner,
+      interactive,
+      expanded,
+      spinIdx: this._spinIdx | 0,
+      hasOlder: conversation.hasOlder,
+      answerGateJobId: agent.jobType === "human_input" ? agent.jobId : this._monitorConversationAnswerGateJobId(agent),
+      // Queued prompts number their own choices; the chat follows them.
+      promptChoices: new Map((this._questionQueue || [])
+        .filter((entry) => Array.isArray(entry?.choices) && entry.choices.length > 0)
+        .map((entry) => [Number(entry.jobId), entry.choices.map(String)])),
+    });
+    // One chat box: the newest turn sits on the floor and the history scrolls
+    // back from it (_monitorFeedbackScroll counts lines up from the floor).
+    const buildConversation = (content) => {
+      const maxScroll = Math.max(0, rows.length - content);
+      const scroll = clamp(this._monitorFeedbackScroll || 0, 0, maxScroll);
+      this._monitorFeedbackScroll = scroll;
+      let visible = rows.length > content ? rows.slice(rows.length - content - scroll, rows.length - scroll) : rows.slice();
+      if (rows.length > 0) while (visible.length < content) visible.unshift("");
+      return this._monitorBoxedLane({
+        title: `conversation${scroll > 0 ? ` \u2191${scroll}` : ""}${expanded ? " \u00b7 expanded" : ""}`,
+        count: messageCount,
+        color: C.cyan,
+        width,
+        rows: visible,
+        emptyText: `no conversation yet \u2014 current: ${agent.activity || "starting"}`,
+        fixedRows: content,
+      });
+    };
+    const askRows = agent.state === "ask" ? this._monitorPendingQuestionRows(agent, inner) : [];
+    if (total < 11) {
+      if (this._monitorChangesMode) return this._buildMonitorChangesBox(agent, width, total);
+      if (askRows.length > 0) return this._monitorAskBox(askRows, width, Math.max(1, total - 4));
+      return buildConversation(Math.max(1, total - 4));
+    }
+    if (this._monitorChangesMode) {
+      const content = Math.max(2, Math.min(Math.max(1, rows.length), 8));
+      let conversationH = content + 4;
+      let diffH = total - conversationH;
+      if (diffH < 6) { diffH = 6; conversationH = total - diffH; }
+      return [...buildConversation(Math.max(1, conversationH - 4)), ...this._buildMonitorChangesBox(agent, width, diffH)];
+    }
+    // Agent card (top), the pending question while blocked, then the
+    // conversation takes every remaining row.
+    const CARD_BOX_H = 8;
+    let askBoxH = 0;
+    if (askRows.length > 0) {
+      askBoxH = Math.min(askRows.length + 4, 12, Math.max(5, total - 11));
+      if (total - askBoxH < 11) askBoxH = 0; // no room: [a] still opens the answer flow
+    }
+    const showCard = total - askBoxH >= CARD_BOX_H + 7;
+    const cardH = showCard ? CARD_BOX_H : 0;
+    return [
+      ...(showCard ? this._buildMonitorAgentCard(agent, width, cardH) : []),
+      ...(askBoxH > 0 ? this._monitorAskBox(askRows, width, askBoxH - 4) : []),
+      ...buildConversation(Math.max(1, total - cardH - askBoxH - 4)),
+    ];
+  }
+
+
+
   _buildMonitorFeedbackToolLanes(agent, width, height) {
+    const conversation = this._monitorConversationForAgent(agent);
+    if (conversation) return this._buildMonitorConversationLanes(agent, width, height, conversation);
     const toolActivity = this._monitorToolActivityForJob(agent.jobId, { limit: 60, agentCallId: agent.agentCallId, excludeCallIds: agent.excludeCallIds });
     const feedbackEntries = this._monitorFeedbackEntries(agent, toolActivity.feedbackToolRows, { limit: 60 });
     const toolRows = [...toolActivity.toolRows]

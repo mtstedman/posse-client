@@ -1,3 +1,4 @@
+import { isPushOfferJob } from "../../queue/functions/common.js";
 import { PAIRING_WORK_ITEM_LIMIT, PAIRING_JOB_LIMIT, PAIRING_PEER_SNAPSHOT_MAX_AGE_MS, PAIRING_PEER_SNAPSHOT_PROTOCOL, SESSION_JOB_TYPES, SESSION_IDENTITIES_MAX } from "../../../catalog/pairing-presence.js";
 export { PAIRING_WORK_ITEM_LIMIT, PAIRING_JOB_LIMIT, PAIRING_PEER_SNAPSHOT_MAX_AGE_MS } from "../../../catalog/pairing-presence.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
@@ -81,6 +82,8 @@ export function collectPairingJobs({ limit = PAIRING_JOB_LIMIT } = {}) {
     .filter((job) => (
       !TERMINAL_JOB_STATUS_SET.has(job.status)
       && !BACKGROUND_JOB_TYPES.has(job.job_type)
+      // A push offer is a standing option, not work waiting on an approval.
+      && !isPushOfferJob(job)
     ))
     .slice(-capped)
     .map((job) => ({

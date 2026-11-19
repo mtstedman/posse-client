@@ -174,7 +174,9 @@ function runProcess(command, args, cwd, { timeoutMs = 120000, input = undefined,
   });
   return {
     command: [command, ...args].join(" "),
-    exitCode: result.status ?? (result.error ? 1 : 0),
+    // A child killed by a signal (a heap-OOM abort, a kernel OOM kill) has no
+    // status and no spawn error. It did not complete, so it must not pass.
+    exitCode: result.status ?? 1,
     signal: result.signal || null,
     timedOut: result.error?.code === "ETIMEDOUT",
     stdout: String(result.stdout || ""),
@@ -182,6 +184,14 @@ function runProcess(command, args, cwd, { timeoutMs = 120000, input = undefined,
     error: result.error?.message || null,
     durationMs: Date.now() - startedAt,
   };
+}
+
+function exitDescription(result) {
+  return result.signal ? `terminated by ${result.signal}` : `exited ${result.exitCode}`;
+}
+
+function signalReason(name, result) {
+  return result.signal ? { reason: `${name} ${exitDescription(result)}` } : {};
 }
 
 function eslintBin(cwd) {
@@ -452,16 +462,17 @@ function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
     name: "eslint",
     ...(managed ? { tool_source: "managed", reason: projectConfig ? "project rules with Posse-managed ESLint" : "Posse baseline defect rules" } : {}),
     status: result.exitCode === 0 && findings.length === 0 ? "passed" : "failed",
+    ...signalReason("eslint", result),
     targets,
     command: result.command,
     durationMs: result.durationMs,
     failures: findings,
-    output: result.exitCode === 0 ? null : compact(result.stderr || result.stdout || result.error || ""),
+    output: result.exitCode === 0 ? null : compact(result.stderr || result.stdout || result.error || `eslint ${exitDescription(result)}`),
   };
 }
 
 function parsePythonLintFinding(result, cwd, file) {
-  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `python AST parse exited ${result.exitCode}`;
+  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `python AST parse ${exitDescription(result)}`;
   const lineMatch = text.match(/\bFile\s+"[^"]+",\s+line\s+(\d+)\b/i);
   const errorMatch = text.match(/\b(?:SyntaxError|IndentationError|TabError):\s*([^\n]+)/i);
   return {
@@ -530,7 +541,7 @@ function runScopedPythonLint(cwd, targets) {
 }
 
 function parseGenericLintFinding({ result, cwd, file, rule, fallback }) {
-  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `${rule} exited ${result.exitCode}`;
+  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `${rule} ${exitDescription(result)}`;
   const lineMatch = text.match(/(?:^|\b)(?:line\s+)?(\d+)(?::\d+)?(?::|\b)/i);
   return {
     file: toRepoRelativePath(cwd, file) || file,
@@ -958,10 +969,11 @@ function runTypecheck(cwd, {
       durationMs: result.durationMs,
     };
   }
-  const failureOutput = compact(`${result.stdout}\n${result.stderr}`) || result.error || `typecheck exited ${result.exitCode}`;
+  const failureOutput = compact(`${result.stdout}\n${result.stderr}`) || result.error || `typecheck ${exitDescription(result)}`;
   return {
     name: "typecheck",
     status: result.exitCode === 0 ? "passed" : "failed",
+    ...signalReason("typecheck", result),
     ...(invocation.tool_source ? { tool_source: invocation.tool_source } : {}),
     command: result.command,
     durationMs: result.durationMs,

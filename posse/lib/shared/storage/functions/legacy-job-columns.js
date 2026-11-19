@@ -1,6 +1,7 @@
 import { JOB_STATUS_LIST_SQL } from "../../../catalog/job.js";
 import { WORK_ITEM_STATUS_LIST_SQL } from "../../../catalog/work-item.js";
 import { withForeignKeysDisabled } from "./table-definitions.js";
+import { addMissingColumns } from "./table-copy.js";
 
 export function repairLegacyJobColumns(_db) {
   // ── Migration: branch lifecycle columns ──────────────────────────────────
@@ -95,6 +96,7 @@ export function repairLegacyJobColumns(_db) {
           FOREIGN KEY (parent_job_id) REFERENCES _jobs_new(id) ON DELETE SET NULL
         )
       `);
+      addMissingColumns(_db, "jobs", "_jobs_new");
       const oldJobCols = _db.pragma("table_info(jobs)").map(c => c.name);
       const newJobCols = _db.pragma("table_info(_jobs_new)").map(c => c.name);
       const commonCols = oldJobCols.filter(c => newJobCols.includes(c)).join(", ");
@@ -132,6 +134,7 @@ export function repairLegacyJobColumns(_db) {
           completed_at TEXT
         )
       `);
+      addMissingColumns(_db, "work_items", "_work_items_new");
       const oldCols = _db.pragma("table_info(work_items)").map(c => c.name);
       const newCols = _db.pragma("table_info(_work_items_new)").map(c => c.name);
       const commonWiCols = oldCols.filter(c => newCols.includes(c)).join(", ");
@@ -205,6 +208,7 @@ export function repairLegacyJobColumns(_db) {
           FOREIGN KEY (parent_job_id) REFERENCES _jobs_new2(id) ON DELETE SET NULL
         )
       `);
+      addMissingColumns(_db, "jobs", "_jobs_new2");
       const oldCols = _db.pragma("table_info(jobs)").map(c => c.name);
       const newCols = _db.pragma("table_info(_jobs_new2)").map(c => c.name);
       const commonCols = oldCols.filter(c => newCols.includes(c)).join(", ");
@@ -332,6 +336,8 @@ export function repairLegacyJobColumns(_db) {
     ["long_context_tier_input_tokens", "INTEGER"],
     ["provider_request_duration_ms", "INTEGER"],
     ["usage_segment_count", "INTEGER"],
+    // Tool calls attributed at completion (queue/functions/agent-calls.js).
+    ["tool_call_count", "INTEGER"],
   ]) {
     const present = _db.prepare(`SELECT COUNT(*) AS cnt FROM pragma_table_info('agent_calls') WHERE name = ?`).get(column);
     if (present.cnt === 0) _db.exec(`ALTER TABLE agent_calls ADD COLUMN ${column} ${sqlType}`);

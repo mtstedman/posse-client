@@ -157,7 +157,13 @@ export class AutomationOwner {
       return this.exposures.probe(request.agent, identity);
     return this.registered.execute(request, { identity, transport: "local_gateway" }, { onProgress });
   }
-  health() { return { ...this.service.health(), build: this.build, launch: this.launch }; }
+  // A client of another build replaces an idle ad-hoc owner, so every kind of
+  // in-flight work counts: tool runs, registered-agent turns, and scheduled
+  // agent runs (the last two hold no automation run between tool calls).
+  health() {
+    const service = this.service.health();
+    return { ...service, active_runs: service.active_runs + this.registered.active.size + this.agentSchedules.active.size, build: this.build, launch: this.launch };
+  }
   dispatchAgent(request) {
     const claims = verifyMcpOAuthToken(request.token);
     const config = bootConfigFromMcpOAuthClaims(claims);
@@ -256,6 +262,7 @@ export class AutomationOwner {
       case "agent.session.list": return this.agents.list(args.agent || "");
       case "run.list": return this.store.runs(args.limit || 100);
       case "run.cancel": this.service.cancel(args.id); return this.store.run(args.id);
+      case "run.reconcile": return this.service.reconcileRun(args.id, args.resolution);
       default: demand(false, "Unknown operator automation operation");
     }
   }
@@ -308,6 +315,6 @@ function timingSafeEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function safeError(error) {
-  const allowed = new Set(["request_too_large", "response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "agent_request_busy", "agent_session_expired", "receipt_expired", "agent_budget_exceeded", "usage_unknown", "external_outcome_unknown", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable", "sql_capability_invalid", "sql_capability_not_found", "sql_capability_unavailable", "prompt_tool_invalid", "prompt_tool_not_found", "prompt_tool_result_missing", "prompt_tool_result_unknown", "agent_invalid", "agent_not_found", "agent_changed", "agent_scope_mismatch", "agent_session_invalid", "agent_session_not_found", "agent_session_mismatch", "agent_session_busy", "agent_turn_changed", "agent_confirmation_required", "agent_confirmation_missing", "agent_tool_failed"]);
+  const allowed = new Set(["request_too_large", "response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "agent_request_busy", "agent_session_expired", "receipt_expired", "agent_budget_exceeded", "usage_unknown", "external_outcome_unknown", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_failed", "script_secret_missing", "script_unavailable", "sql_capability_invalid", "sql_capability_not_found", "sql_capability_unavailable", "prompt_tool_invalid", "prompt_tool_not_found", "prompt_tool_result_missing", "prompt_tool_result_unknown", "agent_invalid", "agent_not_found", "agent_changed", "agent_scope_mismatch", "agent_session_invalid", "agent_session_not_found", "agent_session_mismatch", "agent_session_busy", "agent_turn_changed", "agent_confirmation_required", "agent_confirmation_missing", "agent_tool_failed"]);
   return { code: allowed.has(error?.code) ? error.code : "automation_error", message: allowed.has(error?.code) ? error.message : "Automation request failed; inspect local diagnostics" };
 }

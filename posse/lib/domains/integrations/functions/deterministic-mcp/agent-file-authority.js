@@ -1,5 +1,6 @@
 // @ts-check
 
+import fs from "node:fs";
 import path from "node:path";
 import { runtimeRoleForAgentCallRole } from "../../../../catalog/agent-call.js";
 import { ACTIVE_LEASE_STATUSES } from "../../../../catalog/job.js";
@@ -80,9 +81,35 @@ function stringList(value, label) {
   return out;
 }
 
+/**
+ * The project's subpath in its repository, "" at the repository root, as
+ * configureWorktreeScopeAsync takes it (nestedProjectSubpathAsync): relative
+ * to the physical top level `git rev-parse --show-toplevel` reports, and ""
+ * when the project dir is not lexically inside it. The top level is found from
+ * the nearest enclosing `.git` entry so the tool boundary runs no git process.
+ * A project dir that does not exist reads as the root layout.
+ */
+function projectRepoPrefix(projectRoot) {
+  try {
+    if (!fs.statSync(projectRoot).isDirectory()) return "";
+  } catch {
+    return "";
+  }
+  for (let dir = projectRoot; ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, ".git"))) {
+      const top = fs.realpathSync.native(dir);
+      return isInsideRoot(projectRoot, top, { allowEqual: false, followSymlinks: false })
+        ? path.relative(top, projectRoot)
+        : "";
+    }
+    if (path.dirname(dir) === dir) return "";
+  }
+}
+
 function authorityRoots({ projectRoot, resourcesRoot, workItemId }) {
   const worktreeRoot = path.join(projectRoot, ".posse-worktrees");
   const worktree = path.join(worktreeRoot, `wi-${workItemId}`);
+  const prefix = projectRepoPrefix(projectRoot);
   const wiResources = Object.freeze(Object.fromEntries(
     WI_RESOURCE_CATEGORIES.map((category) => [
       category,
@@ -94,6 +121,9 @@ function authorityRoots({ projectRoot, resourcesRoot, workItemId }) {
     resourcesRoot,
     worktreeRoot,
     worktree,
+    // A nested project's worktree is a sparse checkout of its whole
+    // repository; its code jobs run at wi-N/<prefix> (configureWorktreeScopeAsync).
+    projectWorktree: prefix ? path.join(worktree, prefix) : worktree,
     wiResources,
     wiResourceRoots: Object.freeze(Object.values(wiResources)),
     wiWriteRoots: Object.freeze([wiResources.artifacts, wiResources.workspace]),
@@ -116,7 +146,7 @@ function assertRuntimeCwd({ cwd, job, payload, role, roots }) {
     : null;
 
   if (CODE_WORKTREE_JOB_TYPES.has(String(job.job_type || "")) && taskMode === "code") {
-    if (!samePath(cwd, roots.worktree)) {
+    if (!samePath(cwd, roots.projectWorktree)) {
       throw authorityError(
         "POSSE_AGENT_AUTHORITY_ROOT_MISMATCH",
         `Job #${job.id} must execute in Work Item #${job.work_item_id}'s worktree`,
@@ -263,7 +293,7 @@ export function resolveAgentFileAuthority(attachment = {}, deps = {}) {
     ...stringList(payload.input_roots, "input_roots"),
   ];
 
-  const writeRoots = runtime.artifactMode ? roots.wiWriteRoots : [roots.worktree];
+  const writeRoots = runtime.artifactMode ? roots.wiWriteRoots : [roots.projectWorktree];
   assertPathsWithin(scopedFiles, { cwd, allowedRoots: writeRoots, label: "files_to_modify" });
   assertPathsWithin(createFiles, { cwd, allowedRoots: writeRoots, label: "files_to_create" });
   assertPathsWithin(deleteFiles, { cwd, allowedRoots: writeRoots, label: "files_to_delete" });

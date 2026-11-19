@@ -1,7 +1,8 @@
+import { JOB_TOOL_USAGE_PAYLOAD_KEY } from "../../../../catalog/job.js";
 import fs from "fs";
 import path from "path";
 import { getDependencies, getJob } from "../../../queue/functions/index.js";
-import { parseJsonObject } from "../../../queue/functions/payload.js";
+import { parseJsonObject, resetJobPayloadForReexecution } from "../../../queue/functions/payload.js";
 import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
 
 export function extractHumanAnswers(output) {
@@ -179,7 +180,12 @@ export function buildDeadLetterRetryPayload(origJob, origPayload, humanAnswer, r
   providerOverride = null,
   failureRepeatKey = null,
 } = {}) {
-  const retryPayload = { ...(origPayload || {}) };
+  // The replacement job has no attempts of its own, so it always implements:
+  // an assess-only flag copied from the dead-lettered job would leave it
+  // assessing a candidate it never produced.
+  const retryPayload = resetJobPayloadForReexecution({ ...(origPayload || {}) });
+  // The operator authorized this replacement: it starts with fresh tool allowances.
+  delete retryPayload[JOB_TOOL_USAGE_PAYLOAD_KEY];
   const previousRecovery = retryPayload._dead_letter_recovery && typeof retryPayload._dead_letter_recovery === "object"
     ? retryPayload._dead_letter_recovery
     : null;

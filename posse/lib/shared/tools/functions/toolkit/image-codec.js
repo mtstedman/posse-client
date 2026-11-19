@@ -14,7 +14,7 @@ import fs from "fs";
 import zlib from "zlib";
 import { execFile, spawnSync } from "child_process";
 
-import { IMAGE_CONVERTER_TIMEOUT_MS } from "../../../../catalog/artifact.js";
+import { IMAGE_CONVERTER_TIMEOUT_MS, PNG_DECODE_MAX_SIDE } from "../../../../catalog/artifact.js";
 import { findCommandOnPath } from "../../../platform/functions/command-launch.js";
 
 export const PNG_SIGNATURE = Buffer.from("89504e470d0a1a0a", "hex");
@@ -123,6 +123,9 @@ export function decodePngToRgba(buffer) {
   }
 
   if (!width || !height) throw new Error("PNG is missing IHDR metadata.");
+  if (width > PNG_DECODE_MAX_SIDE || height > PNG_DECODE_MAX_SIDE) {
+    throw new Error(`PNG is ${width}x${height}; decoding is limited to ${PNG_DECODE_MAX_SIDE} px per side.`);
+  }
   if (bitDepth !== 8) throw new Error(`Unsupported PNG bit depth ${bitDepth}; only 8-bit PNGs are supported.`);
   if (![0, 2, 4, 6].includes(colorType)) {
     throw new Error(`Unsupported PNG color type ${colorType}; only grayscale/RGB/RGBA PNGs are supported.`);

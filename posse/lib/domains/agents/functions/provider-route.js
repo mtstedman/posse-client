@@ -9,9 +9,9 @@ const PROVIDERS = new Set(PROVIDER_OPTIONS);
 // best installed model; "local:<slug or model id>" pins one.
 const LOCAL_ALIAS = "local", LOCAL_PROVIDER = "posse-local";
 const MODEL_TIERS = new Map([
-  ["fable", "cheap"], ["haiku", "cheap"], ["cheap", "cheap"],
+  ["haiku", "cheap"], ["cheap", "cheap"],
   ["sonnet", "standard"], ["standard", "standard"],
-  ["opus", "strong"], ["best", "strong"], ["opusplan", "strong"], ["strong", "strong"],
+  ["fable", "strong"], ["opus", "strong"], ["best", "strong"], ["opusplan", "strong"], ["strong", "strong"],
 ]);
 
 export function resolveAgentProvider(model, override = "") {

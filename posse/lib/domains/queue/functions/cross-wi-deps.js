@@ -15,12 +15,16 @@ import { isReviewedTransfer, workItemBranchGeneration, reviewedSourceMergeProof 
 import { REVIEWED_HANDOFF_REASONS } from "../../../catalog/reviewed-handoffs.js";
 import { cancelUnusedReviewedTransfers } from "./reviewed-handoff-journal.js";
 
-const CROSS_WI_MERGE_DEPENDENCIES_KEY = "cross_wi_merge_dependencies";
+export const CROSS_WI_MERGE_DEPENDENCIES_KEY = "cross_wi_merge_dependencies";
 // Work-item metadata key: { at, reason, branch } of the last time the work
 // item's branch was deleted with its content (review rejection, rebuild,
 // abandon). Applied-sync records from before then describe content that is
 // gone (collectCrossWiPathProvenance).
 export const WORK_ITEM_BRANCH_RESET_KEY = "branch_reset";
+// Merge-blocker reason for an upstream work item whose row is gone (purged
+// from history). It never merges, so the merge defers until the operator
+// answers the cross-WI upstream gate.
+export const CROSS_WI_UPSTREAM_MISSING = "upstream_missing";
 
 function readWorkItem(id) {
   return getDb().prepare(`SELECT * FROM work_items WHERE id = ?`).get(id);
@@ -52,6 +56,14 @@ function parseWorkItemMetadata(workItemOrMetadata = null) {
   } catch {
     return {};
   }
+}
+
+/**
+ * SQL for the source work item id of one dependency entry (a JSON object in
+ * `entrySql`), read the way normalizeCrossWiMergeDependency reads it.
+ */
+export function crossWiMergeDependencySourceIdSql(entrySql) {
+  return `COALESCE(json_extract(${entrySql}, '$.source_work_item_id'), json_extract(${entrySql}, '$.work_item_id'), json_extract(${entrySql}, '$.id'))`;
 }
 
 function normalizeCrossWiMergeDependency(dep = {}) {
@@ -664,7 +676,8 @@ export function listCrossWiMergeBlockers(workItemOrId) {
     if (source?.status === "failed" && !hasUnresolvedJobsForWorkItem(source.id)) {
       logStaleCrossWiDependencyOnce(workItem.id, entry.source_work_item_id, "upstream_failed", source);
     }
-    const generationChanged = entry.dependencies.some((dep) => reviewedDependencyGenerationMismatch(dep, source));
+    // A missing (purged) source has no generation to compare: it is reported missing.
+    const generationChanged = !!source && entry.dependencies.some((dep) => reviewedDependencyGenerationMismatch(dep, source));
     const mergeUnproven = source?.merge_state === "merged" && entry.dependencies.some((dep) => isReviewedTransfer(dep) && !reviewedSourceMergeProof(source, dep));
     if (generationChanged) logStaleCrossWiDependencyOnce(workItem.id, entry.source_work_item_id, REVIEWED_HANDOFF_REASONS.GENERATION, source);
     if (!source || source.merge_state !== "merged" || generationChanged || mergeUnproven) {
@@ -672,7 +685,7 @@ export function listCrossWiMergeBlockers(workItemOrId) {
         ...entry,
         source_work_item: source || null,
         reason: generationChanged ? REVIEWED_HANDOFF_REASONS.GENERATION : mergeUnproven ? REVIEWED_HANDOFF_REASONS.INCOMPLETE : !source
-          ? "upstream_missing"
+          ? CROSS_WI_UPSTREAM_MISSING
           : source.status === "canceled"
             ? "upstream_canceled"
             : source.status === "failed" && !hasUnresolvedJobsForWorkItem(source.id)
@@ -692,10 +705,11 @@ export function listCrossWiMergeBlockers(workItemOrId) {
  * upstream is not in flight: a merge authorization still goes through the
  * deferral path, which reports the stale dependency.
  *
- * `includeStale` also returns failed and canceled upstreams. Such a merge
- * defers just the same until the operator recovers the upstream or rebuilds
- * this work item through its cross-WI upstream gate, so the auto-merge pass
- * skips it quietly too, including after the gate was answered "wait".
+ * `includeStale` also returns failed, canceled and missing (purged)
+ * upstreams. Such a merge defers just the same until the operator recovers
+ * the upstream or rebuilds this work item through its cross-WI upstream gate,
+ * so the auto-merge pass skips it quietly too, including after the gate was
+ * answered "wait".
  */
 export function pendingCrossWiMergeUpstreamIds(workItemOrId, { includeStale = false } = {}) {
   const workItem = resolveWorkItem(workItemOrId);
@@ -703,8 +717,12 @@ export function pendingCrossWiMergeUpstreamIds(workItemOrId, { includeStale = fa
   const ids = new Set();
   for (const dep of getWorkItemMergeDependencies(workItem)) {
     const source = readWorkItem(dep.source_work_item_id);
-    if (!source || (source.merge_state === "merged" && !reviewedDependencyGenerationMismatch(dep, source)
-        && (!isReviewedTransfer(dep) || reviewedSourceMergeProof(source, dep)))) continue;
+    if (!source) {
+      if (includeStale) ids.add(Number(dep.source_work_item_id));
+      continue;
+    }
+    if (source.merge_state === "merged" && !reviewedDependencyGenerationMismatch(dep, source)
+        && (!isReviewedTransfer(dep) || reviewedSourceMergeProof(source, dep))) continue;
     if (!includeStale && (source.status === "failed" || source.status === "canceled")) continue;
     ids.add(Number(source.id));
   }

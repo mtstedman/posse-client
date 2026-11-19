@@ -87,6 +87,15 @@ export function parseAgentHandoffEvidenceSelector(value) {
     : { path: sourcePath, start, end };
 }
 
+// A ref can hold windows from several files, so one selector string
+// ("#ref:1-2") can name different source in each. Evidence is identified by
+// its selector plus the source path it resolved to.
+export function materializedEvidenceIdentity(evidence) {
+  const selector = String(evidence?.selector || "");
+  const sourcePath = evidence?.path ?? evidence?.provenance?.path;
+  return selector && sourcePath ? `${selector}\0${sourcePath}` : selector;
+}
+
 export function normalizedLines(payload) {
   const text = String(payload ?? "").replace(/\r\n?/g, "\n");
   const lines = text.split("\n");

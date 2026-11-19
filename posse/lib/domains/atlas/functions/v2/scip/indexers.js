@@ -670,9 +670,13 @@ function filesetSpecForPlan(plan = {}) {
 function gitTreeFilesetEntries(repoRoot, ref, spec) {
   let buf;
   try {
-    buf = gitExecBuffer(["ls-tree", "-rz", "-r", "--full-tree", ref], repoRoot, {
+    // Without --full-tree the listing is the project's subtree with
+    // project-relative names, the same space as the worktree route: a project
+    // nested in its repository must not fingerprint sibling directories or
+    // match its own ancestors' names against the ignored directories.
+    buf = gitExecBuffer(["ls-tree", "-rz", "-r", ref], repoRoot, {
       maxBuffer: 64 * 1024 * 1024,
-      // Full-tree listings on large repos legitimately run minutes; do not
+      // Recursive listings on large repos legitimately run minutes; do not
       // inherit the 30s gitExec default.
       timeoutMs: 10 * 60_000,
     });

@@ -1,6 +1,22 @@
 // Shared validation of structured question vocabulary and conditional choices.
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./tools/interaction.js";
 import { MERGE_FAILURE_RECOVERY_REVIEW_TYPE, mergeFailureRecoveryChoices } from "./human-input.js";
+import { QUESTION_CHOICE_DANGERS } from "./agent-conversation.js";
+import { readonlyMap } from "./readonly-collections.js";
+
+const [NORMAL, CAUTION, DESTRUCTIVE] = QUESTION_CHOICE_DANGERS;
+
+// The danger every surface shows for a choice: destructive choices discard
+// work or a work item, cautionary ones turn work back or away. Any choice not
+// listed (including retry:<provider>) is normal.
+export const QUESTION_CHOICE_DANGER_BY_ID = readonlyMap([
+  ...["fail", "revert", "abandon", "waive_tests"].map((id) => [id, DESTRUCTIVE]),
+  ...["reject", "skip", "replan", "cancel", "decline", "rebuild"].map((id) => [id, CAUTION]),
+]);
+
+export function questionChoiceDanger(choiceId) {
+  return QUESTION_CHOICE_DANGER_BY_ID.get(String(choiceId || "")) || NORMAL;
+}
 
 // Review kinds may persist an ordered subset of their vocabulary (a gate
 // narrowed to the actions that can still apply); their order never changes.

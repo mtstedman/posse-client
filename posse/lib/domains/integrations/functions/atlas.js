@@ -37,7 +37,13 @@ import { listScipFiles } from "../../atlas/functions/v2/scip/ingester.js";
 import { scopePathsForScipSourceLanguages } from "../../atlas/functions/v2/scip/source-scope.js";
 import { scipBasenameSourceLanguages } from "../../atlas/functions/v2/scip-progress.js";
 import { openViewWithMeta, viewFreshness } from "../../atlas/functions/v2/view-health.js";
-import { mainIntakeStatePath, readAtlasMainIntakeState } from "../../atlas/functions/v2/main-intake-state.js";
+import {
+  atlasMainRecheckRequestApplies,
+  mainIntakeStatePath,
+  readAtlasMainIntakeState,
+  readAtlasMainRecheckRequest,
+  requestAtlasMainRepositoryRecheck,
+} from "../../atlas/functions/v2/main-intake-state.js";
 import { adoptPublishedAtlasMainGeneration, withAtlasMainSourceProofLock } from "../../atlas/functions/v2/main-generation.js";
 import { runSqliteWrite } from "../../../shared/concurrency/functions/sqlite-gate.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
@@ -51,7 +57,12 @@ import { warmReadinessProgress, warmReadinessSeed, warmReadinessStarted } from "
 import { formatAtlasError, isVerboseAtlasErrors, logAtlasError } from "../../atlas/functions/v2/verbose-errors.js";
 import { isAuthoritativeAtlasV2Mode, normalizeAtlasScipMode, shouldRunScipPhase, shouldUseAtlasV2 } from "./atlas-v2-mode.js";
 import { ATLAS_ROLE_ORDER, applyAtlasBootEnv, buildAtlasBootEnv, __resetAtlasRuntimeDisabledForTests, disableAtlasForRun, getAtlasIntegrationConfig, getAtlasProviderSupport as getConfiguredAtlasProviderSupport, getAtlasRouteForRole, getAtlasRuntimeDisabledReason, invalidateAtlasIntegrationConfigCache, isAtlasRuntimeDisabled, loadAdaptiveSplitTarget, normalizeAtlasRuntimeDisableRepoKey, resolveAtlasAssignmentUnit, resolveSplitAssignment, withAtlasConfigOverrides } from "./atlas/config.js";
-import { emitMainAdvanced as emitAtlasV2MainAdvanced, isAtlasV2EmissionEnabled as isAtlasV2PipelineEmissionEnabled } from "../../atlas/classes/v2/PipelineHooks.js";
+import {
+  emitMainAdvanced as emitAtlasV2MainAdvanced,
+  emitWiCleanup as emitAtlasV2WiCleanup,
+  isAtlasV2EmissionEnabled as isAtlasV2PipelineEmissionEnabled,
+  observeAtlasHostLease,
+} from "../../atlas/classes/v2/PipelineHooks.js";
 import { resolveAtlasRepoTarget, resolveAtlasRepoTargetAsync } from "./atlas/repo.js";
 import { normalizeWaitingLaneGeneration, waitingLaneGenerationsEqual } from "../../../catalog/waiting-lane.js";
 import { normalizeAtlasCodeWindowPolicy } from "../../../catalog/atlas-tools.js";
@@ -583,6 +594,145 @@ export async function requestAtlasMainRefreshForFreshnessGate({
   };
 }
 
+/**
+ * While this clone's lease names the session host, ATLAS emission is off and
+ * the boot warm is skipped, so commits and merges landing meanwhile never hint
+ * a main warm. Persist that the main index needs a repository recheck; the
+ * next main intake for the baseline branch takes it over.
+ */
+export async function requestAtlasMainRecheckForHostLease({
+  cwd = null,
+  config = getAtlasIntegrationConfig(),
+  reason = "host_lease_suppressed",
+} = {}) {
+  if (!config?.enabled || !isAtlasIndexMaintenanceEnabled(config)) {
+    return { ok: false, skipped: "atlas_disabled" };
+  }
+  const storage = repoStorageFor({ cwd, config });
+  const branch = String(await resolveAtlasBaselineBranchAsync(storage.repoRoot) || "main").trim() || "main";
+  const request = requestAtlasMainRepositoryRecheck(storage.repoRoot, { targetBranch: branch, reason });
+  return { ok: true, storage, targetBranch: branch, request };
+}
+
+// Mirrors worktree-lifecycle's atlasCleanupDisposition: a complete WI that is
+// not merged keeps its warmed view.
+function wiCleanupDisposition(wi) {
+  if (wi?.status === "complete") return wi?.merge_state === "merged" ? "merged" : null;
+  if (wi?.status === "canceled") return "abandoned";
+  if (wi?.status === "failed") return "purged";
+  return null;
+}
+
+/**
+ * The WI cleanups a host lease suppressed: warmed WI views left behind by work
+ * items that have since become terminal.
+ */
+function pendingWiCleanups(storage) {
+  let names = [];
+  try { names = fs.readdirSync(storage.warmedRoot); } catch { return []; }
+  const ids = [...new Set(names
+    .map((name) => /^wi-(\d+)\.view\.db$/u.exec(name)?.[1])
+    .filter(Boolean)
+    .map(Number))];
+  if (ids.length === 0) return [];
+  const rows = getDb().prepare(`
+    SELECT id, status, merge_state, branch_name
+    FROM work_items
+    WHERE id IN (SELECT value FROM json_each(?))
+    ORDER BY id ASC
+  `).all(JSON.stringify(ids));
+  return rows
+    .map((wi) => ({ wi, disposition: wiCleanupDisposition(wi) }))
+    .filter((entry) => entry.disposition);
+}
+
+/**
+ * Catch up once the lease stops naming the host: persist the repository
+ * recheck, enqueue one main warm (its intake honours the recheck), and run the
+ * WI cleanups that were suppressed meanwhile.
+ */
+export async function catchUpAtlasAfterHostLease({
+  cwd = null,
+  config = getAtlasIntegrationConfig(),
+} = {}) {
+  const recheck = await requestAtlasMainRecheckForHostLease({ cwd, config, reason: "host_lease_released" });
+  if (!recheck.ok) return recheck;
+  if (!isAtlasV2PipelineEmissionEnabled(config)) {
+    return { ok: true, targetBranch: recheck.targetBranch, skipped: "atlas_v2_emission_disabled" };
+  }
+  const head = await currentGitHeadAsync(recheck.storage.repoRoot);
+  const warm = emitAtlasV2MainAdvanced({
+    payload: {
+      from_sha: "",
+      to_sha: head,
+      target_branch: recheck.targetBranch,
+      paths: [],
+      source: "host_lease_released",
+    },
+    onError: () => {},
+  });
+  const cleanups = pendingWiCleanups(recheck.storage).map(({ wi, disposition }) => emitAtlasV2WiCleanup({
+    payload: {
+      wi_id: Number(wi.id),
+      branch: String(wi.branch_name || ""),
+      disposition,
+    },
+    onError: () => {},
+  }));
+  return {
+    ok: warm.ok === true && cleanups.every((cleanup) => cleanup.ok === true),
+    targetBranch: recheck.targetBranch,
+    warmJobId: warm.warmJobId,
+    wiCleanups: cleanups.length,
+  };
+}
+
+/**
+ * Watch this clone's session lease for the run. A lease naming the host
+ * persists a repository recheck; when it stops naming the host, the
+ * suppressed ATLAS work is caught up (retried on later ticks until it lands).
+ *
+ * @returns {() => void} stop
+ */
+export function startAtlasHostLeaseWatch({
+  cwd = null,
+  config = getAtlasIntegrationConfig(),
+  intervalMs = 2_000,
+  observe = observeAtlasHostLease,
+  requestRecheck = requestAtlasMainRecheckForHostLease,
+  catchUp = catchUpAtlasAfterHostLease,
+} = {}) {
+  if (!config?.enabled || !isAtlasIndexMaintenanceEnabled(config)) return () => {};
+  let recheckRecorded = false;
+  let catchUpPending = false;
+  let busy = false;
+  // A skipped request (ATLAS disabled) has nothing left to retry.
+  const settled = (result) => result?.ok === true || !!result?.skipped;
+  const tick = async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const { leased, released } = observe();
+      if (leased) {
+        if (!recheckRecorded) recheckRecorded = settled(await requestRecheck({ cwd, config, reason: "host_lease_suppressed" }));
+        return;
+      }
+      if (released) catchUpPending = true;
+      if (!catchUpPending) return;
+      recheckRecorded = false;
+      catchUpPending = !settled(await catchUp({ cwd, config }));
+    } catch {
+      // The next tick retries; ATLAS catch-up must never break the run.
+    } finally {
+      busy = false;
+    }
+  };
+  void tick();
+  const timer = setInterval(() => { void tick(); }, Math.max(10, Number(intervalMs) || 2_000));
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 export async function checkAtlasMainFreshnessGate({
   cwd = null,
   config = getAtlasIntegrationConfig(),
@@ -1086,6 +1236,9 @@ async function inspectAtlasBootMaterialization({
   if (intake?.generation && !waitingLaneGenerationsEqual(intake.generation, generation)) {
     return { ok: false, reason: "main_intake_generation_mismatch" };
   }
+  if (atlasMainRecheckRequestApplies(readAtlasMainRecheckRequest(repoRoot), targetBranch)) {
+    return { ok: false, reason: "main_intake_recheck_requested" };
+  }
   if (generation.view_fingerprint !== atlasBootViewFingerprint(repoRoot, config)) {
     return { ok: false, reason: "view_fingerprint_mismatch" };
   }
@@ -1110,6 +1263,23 @@ async function inspectAtlasBootMaterialization({
     try { ledger?.close?.(); } catch { /* proof is already fail-closed */ }
   }
 }
+
+/**
+ * Only a complete bookkeeping row proves a staged artifact is represented at
+ * this OID: a partial row's failed documents are still owed, exactly as the
+ * ingester's own bytes-hash skip refuses partial rows.
+ *
+ * @param {Array<{ status?: string, scip_bytes_hash?: string | null, ingested_head?: string | null }>} rows
+ * @param {string} bytesHash
+ * @param {string} gitOid
+ */
+function scipArtifactIngestedAtHead(rows, bytesHash, gitOid) {
+  return rows.some((row) => (
+    row.status === "complete" && row.scip_bytes_hash === bytesHash && row.ingested_head === gitOid
+  ));
+}
+
+export const __testScipArtifactIngestedAtHead = scipArtifactIngestedAtHead;
 
 /**
  * Prove that every staged SCIP artifact is already represented in the ledger
@@ -1151,7 +1321,7 @@ async function inspectExactScipBootState({ repoRoot, ledgerDbPath, targetBranch,
     for (const scipPath of files) {
       const bytesHash = sha256Hex(await fs.promises.readFile(scipPath));
       signature.push(bytesHash);
-      if (!ingested.some((row) => row.scip_bytes_hash === bytesHash && row.ingested_head === gitOid)) {
+      if (!scipArtifactIngestedAtHead(ingested, bytesHash, gitOid)) {
         // Main intake can supersede a persistent whole-project artifact with
         // exact path-preserving batches (for example when a project indexer
         // omits ignored-but-tracked files). The durable batch receipt is an

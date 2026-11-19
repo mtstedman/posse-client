@@ -214,9 +214,17 @@ async function attributeFailuresToBaseline({
     baseline = { error: error?.message || String(error) };
   }
   const baselineChecks = new Map((baseline?.checks || []).map((check) => [check.name, check]));
-  const baselineIdentities = new Set(
-    (baseline?.failures || []).flatMap(failureIdentities).map((entry) => entry.identity),
-  );
+  // Counted, not a set: each baseline occurrence excuses one occurrence after
+  // the change, so a second copy of a baseline error is still novel.
+  const baselineIdentities = new Map();
+  for (const { identity } of (baseline?.failures || []).flatMap(failureIdentities)) {
+    baselineIdentities.set(identity, (baselineIdentities.get(identity) || 0) + 1);
+  }
+  const inBaseline = ({ identity }) => {
+    const remaining = baselineIdentities.get(identity) || 0;
+    if (remaining > 0) baselineIdentities.set(identity, remaining - 1);
+    return remaining > 0;
+  };
   const attribution = {
     commit: baselineCommit,
     ...(baseline?.error ? { error: baseline.error } : {}),
@@ -232,7 +240,7 @@ async function attributeFailuresToBaseline({
       continue;
     }
     const identities = failureIdentities(failure);
-    const novel = identities.filter((entry) => !baselineIdentities.has(entry.identity));
+    const novel = identities.filter((entry) => !inBaseline(entry));
     if (novel.length === 0) {
       suppressed += 1;
       continue;

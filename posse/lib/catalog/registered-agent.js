@@ -5,7 +5,9 @@ export const REGISTERED_AGENT_CAPABILITIES = Object.freeze(["progress"]);
 export const REGISTERED_AGENT_OPERATIONS = Object.freeze(["chat", "run"]);
 export const REGISTERED_AGENT_MAX_CONTEXT_BYTES = 256 * 1024;
 export const REGISTERED_AGENT_MAX_REPLY_BYTES = 1024 * 1024;
-export const REGISTERED_AGENT_RETRYABLE_CODES = Object.freeze(["agent_request_busy", "agent_session_busy", "owner_unavailable"]);
+// owner_timeout: the local gateway stopped waiting on an accepted request; repeating
+// the idempotency key collects its outcome.
+export const REGISTERED_AGENT_RETRYABLE_CODES = Object.freeze(["agent_request_busy", "agent_session_busy", "owner_unavailable", "owner_timeout"]);
 // Receipt statuses that end a registered request. A receipt in any other
 // status (today only "active") is still running inside the owner.
 export const REGISTERED_AGENT_TERMINAL_STATUSES = Object.freeze(["done", "failed", "needs_confirmation"]);

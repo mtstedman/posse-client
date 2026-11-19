@@ -29,8 +29,9 @@ import {
   parseBooleanSetting,
   snapshotRefFromNative,
 } from "./worktree-snapshots.js";
-import { worktreeRoot } from "./worktree-path.js";
+import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 import { MANAGED_WORKTREE_ROOT_DIR_NAME } from "../../../catalog/workspace-traversal.js";
+import { normalizeGitPrefix, repoPathToProjectPath } from "./project-paths.js";
 
 export async function worktreePorcelainAsync(wtPath, { signal = null } = {}) {
   return (await gitExecAsync(["status", "--porcelain"], wtPath, { signal })).trim();
@@ -262,6 +263,9 @@ async function restoreForeignStagedEntriesAsync(wtPath, hidden) {
 // `selectPaths(dirtyPaths)` limits the stash to the caller's own paths in a
 // worktree that sibling jobs share. It runs under the worktree lock and
 // returns null to stash everything, or the paths to stash (none: no stash).
+// Paths in both directions are relative to the `wtPath` the caller passed (a
+// nested project's directory: `../` names dirt outside it), the space job
+// scopes use; status itself names them from the worktree root.
 export async function stashDirtyWorktreeAsync(
   wtPath,
   projectDir,
@@ -294,9 +298,11 @@ export async function stashDirtyWorktreeAsync(
       const porcelain = await worktreePorcelainZAsync(wtPath, { signal });
       if (porcelain === null) throw new Error(`Could not read worktree status before a scoped stash: ${wtPath}`);
       const entries = porcelainStatusEntries(porcelain);
-      const selected = await selectPaths([...entries.keys()]);
+      const prefix = normalizeGitPrefix(String(await gitExecAsync(["rev-parse", "--show-prefix"], lockWtPath, { signal, trim: false }) ?? "").replace(/\r?\n$/, ""));
+      const repoPathByCallerPath = new Map([...entries.keys()].map((file) => [repoPathToProjectPath(file, prefix), file]));
+      const selected = await selectPaths([...repoPathByCallerPath.keys()]);
       if (Array.isArray(selected)) {
-        ownPaths = new Set(selected.filter((file) => entries.has(file)));
+        ownPaths = new Set(selected.map((file) => repoPathByCallerPath.get(file)).filter(Boolean));
         pathspec = await stashablePathsAsync(wtPath, [...ownPaths], { signal });
         if (pathspec.length === 0) return false;
         scopedEntries = entries;
@@ -330,9 +336,10 @@ export async function stashDirtyWorktreeAsync(
 
 /**
  * Last-resort recovery when a worktree's git metadata is unreadable. Copies
- * the entire worktree (skipping `.git`) into a sibling recovery directory so
- * the caller can safely `git worktree remove --force` afterward without losing
- * user-visible files. Symlinks are skipped and noted in the manifest so
+ * the entire worktree (skipping `.git`) into a recovery directory (by default
+ * the runtime's recovered-worktrees, where snapshot GC prunes it with the
+ * other recovered snapshots) so the caller can safely
+ * `git worktree remove --force` afterward without losing user-visible files. Symlinks are skipped and noted in the manifest so
  * recovery never materializes target contents through a link. Returns the
  * recovery path, or null if no files or symlink notes were preserved.
  */
@@ -343,7 +350,7 @@ export function preserveCorruptWorktreeContents(wtPath, projectDir, {
   reason = "git_metadata_corrupt",
 } = {}) {
   if (!fs.existsSync(wtPath)) return null;
-  const root = recoveryRoot ? path.resolve(recoveryRoot) : worktreeRoot(projectDir, { disabled: true });
+  const root = path.resolve(recoveryRoot || path.join(getRuntimeRoot(projectDir), "recovered-worktrees"));
   fs.mkdirSync(root, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const wiTag = wiId != null ? `wi-${wiId}-` : "";

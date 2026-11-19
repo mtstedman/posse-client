@@ -37,6 +37,7 @@ import {
   staleCrossWiUpstreams,
   updateWorkItemStatus,
 } from "../../../queue/functions/index.js";
+import { CROSS_WI_UPSTREAM_MISSING } from "../../../queue/functions/cross-wi-deps.js";
 import { withMergeLock } from "../../../queue/functions/locks.js";
 import { createGitWorkflowHelpers } from "../../../git/functions/workflows.js";
 import { resolveTargetBranchForAdmin } from "../../../git/functions/target-branch.js";
@@ -187,10 +188,29 @@ function abandonWorkItem(job, payload, { actorType, actorLabel }) {
   return { ok: true, message: `Abandoned WI#${workItemId}; its branch was deleted` };
 }
 
+// Why stale upstreams (staleCrossWiUpstreams) will not merge what they
+// handed off; a reviewed transfer whose upstream changed or merged without
+// it is neither failed nor gone.
+function upstreamFate(status, count) {
+  if (status === "failed") return "failed";
+  if (status === "canceled") return count === 1 ? "was canceled" : "were canceled";
+  if (status === CROSS_WI_UPSTREAM_MISSING) return `${count === 1 ? "no longer exists" : "no longer exist"} (purged)`;
+  return `no longer ${count === 1 ? "carries" : "carry"} the handed-off edits`;
+}
+
 function rebuildFeedback(upstreams, note) {
   const ids = upstreams.map((upstream) => `WI#${upstream.source_work_item_id}`).join(", ") || "the upstream work item";
+  const byStatus = new Map();
+  for (const upstream of upstreams) {
+    const status = ["failed", "canceled", CROSS_WI_UPSTREAM_MISSING].includes(upstream.status) ? upstream.status : "changed";
+    byStatus.set(status, [...(byStatus.get(status) || []), `WI#${upstream.source_work_item_id}`]);
+  }
+  const fates = [...byStatus].map(([status, list]) => `${list.join(", ")} ${upstreamFate(status, list.length)}`);
+  const why = fates.length === 0
+    ? `${ids} failed or was canceled`
+    : fates.length === 1 ? fates[0] : `${fates.slice(0, -1).join(", ")} and ${fates.at(-1)}`;
   return [
-    `REBUILD ON THE TARGET BRANCH: ${ids} failed or was canceled and will not merge, so this work item's branch was deleted together with every earlier task's commits and the cross-WI edits it inherited from ${ids}.`,
+    `REBUILD ON THE TARGET BRANCH: ${why} and will not merge, so this work item's branch was deleted together with every earlier task's commits and the cross-WI edits it inherited from ${ids}.`,
     "Plan and re-implement this work item's own changes from the current target branch. Do not depend on, or re-create, the inherited edits.",
     note ? `Operator note: ${note}` : null,
   ].filter(Boolean).join(" ");
@@ -295,7 +315,7 @@ function applyWorkItemDispositionTransition({
         feedback: rebuildFeedback(upstreams, note),
       });
       if (!rebuilt.ok) return { ok: false, message: `WI#${workItemId} could not be requeued for a rebuild (${rebuilt.reason})` };
-      resolvedEvent(job, payload, "rebuild", actorType, `${actorLabel} rebuilt WI#${workItemId} on the target branch without the edits inherited from its failed upstream: replan #${rebuilt.plan_job_id}`, {
+      resolvedEvent(job, payload, "rebuild", actorType, `${actorLabel} rebuilt WI#${workItemId} on the target branch without the edits inherited from its upstream: replan #${rebuilt.plan_job_id}`, {
         upstream_work_item_ids: upstreams.map((upstream) => upstream.source_work_item_id),
         plan_job_id: rebuilt.plan_job_id,
         superseded_db_task_ids: rebuilt.superseded_db_task_ids,

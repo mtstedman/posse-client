@@ -5,9 +5,11 @@ import { isUtf8 } from "node:buffer";
 import {
   BRIDGE_EVENT_KINDS,
   BRIDGE_FRAME_TYPES,
+  BRIDGE_TRANSPORTS,
   BRIDGE_PROTOCOL_VERSION,
 } from "../../../catalog/bridge.js";
 import { createBridgeEventFrame } from "./ChangeStream.js";
+import { AGENT_CONVERSATION_TIER } from "../../../catalog/agent-conversation.js";
 import {
   createErrorAck,
   dispatchBridgeCommandFrame,
@@ -26,12 +28,17 @@ import {
 } from "../functions/state-snapshot.js";
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const LOOPBACK_PEERS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 const MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_MAX_WS_FRAME_BYTES = 1024 * 1024;
 const MAX_WS_CLIENT_FRAME_OVERHEAD_BYTES = 14;
 const DEFAULT_WS_HELLO_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_WS_BUFFERED_BYTES = 2 * DEFAULT_MAX_WS_FRAME_BYTES;
 const WS_CLOSE_REASON_MAX_BYTES = 123;
+
+function isLoopbackPeer(req) {
+  return LOOPBACK_PEERS.has(req.socket?.remoteAddress);
+}
 
 function localHttpUrl(host, port) {
   const hostname = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -345,8 +352,7 @@ export class LocalServer {
     // Lifecycle control is local-only and bound to the exact running identity.
     // It is deliberately absent from relay/WebSocket command dispatch.
     if (req.method === "POST" && url.pathname === "/v1/bridge/stop") {
-      const peer = req.socket?.remoteAddress;
-      if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(peer)) {
+      if (!isLoopbackPeer(req)) {
         sendJson(res, 403, { error: "local_control_only" });
         return;
       }
@@ -367,7 +373,12 @@ export class LocalServer {
     }
     if (req.method === "POST" && url.pathname === "/v1/command") {
       const frame = await readJsonBody(req);
-      const ack = await this.dispatch(frame, this.dispatchContext());
+      // Bossy's path: the local token from a loopback peer may read the local
+      // detail tier. Every other transport stays on the remote tier.
+      const ack = await this.dispatch(frame, this.dispatchContext({
+        detailTier: isLoopbackPeer(req) ? AGENT_CONVERSATION_TIER.LOCAL : AGENT_CONVERSATION_TIER.REMOTE,
+        transport: BRIDGE_TRANSPORTS.HTTP,
+      }));
       sendJson(res, 200, ack);
       return;
     }
@@ -514,10 +525,12 @@ export class LocalServer {
     void this.handleWsText(client, payload.toString("utf8"));
   }
 
-  dispatchContext() {
+  dispatchContext({ detailTier = AGENT_CONVERSATION_TIER.REMOTE, transport = BRIDGE_TRANSPORTS.WEBSOCKET } = {}) {
     return {
       projectDir: this.projectDir,
       actor: "bridge",
+      detailTier,
+      transport,
       instanceId: this.instanceId,
       tailBridgeEvents: typeof this.tailBridgeEvents === "function" ? this.tailBridgeEvents : null,
       getHeadEventId: typeof this.getHeadEventId === "function" ? this.getHeadEventId : null,

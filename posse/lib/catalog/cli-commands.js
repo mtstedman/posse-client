@@ -55,6 +55,8 @@ const POLICY_ENTRIES = [
   // agent/provider dispatch and must not initialize artifact or native Git
   // infrastructure before Bossy can approve a completed work item.
   { name: "merge", requiresWritableArtifacts: false },
+  // Push merged work to the remote, after showing what would go.
+  { name: "deploy", requiresWritableArtifacts: false, requiresNativeGit: true },
   { name: "prune", requiresWritableArtifacts: false, requiresNativeGit: true },
   { name: "purge", requiresWritableArtifacts: false, requiresNativeGit: true },
   { name: "cleanup", requiresWritableArtifacts: false, requiresNativeGit: true },

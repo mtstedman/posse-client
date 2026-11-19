@@ -16,7 +16,7 @@ import { slugify } from "../../../../shared/format/functions/slug.js";
 import { recordWaitingLaneTelemetry } from "../../../observability/functions/waiting-lane-telemetry.js";
 import { cleanupArtifactDirsAsync, isArtifactMode, contextDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../queue/functions/common.js";
-import { SETUP_DEFERRED_BEHIND_KEY, SETUP_DEFERRED_SINCE_KEY } from "../../../queue/functions/file-locks.js";
+import { SETUP_DEFERRED_BEHIND_KEY, SETUP_DEFERRED_SINCE_KEY, setupDeferredBehindLiveSibling } from "../../../queue/functions/file-locks.js";
 import { clearWaitingLanePreparedAssetProof, completeAttempt, crossWiSyncSourceRejection, getJob, getWaitingLanePreparation, getWorkItem, incrementAndCreateAttempt, logEvent, setJobError, recordWorkItemBranchReset, setWorkItemBranch, poisonWaitingLanePreparation, retireWaitingLanePreparation, rollbackPendingCrossWiSyncHandoffsForJob, storeArtifact, updateJobPayload } from "../../../queue/functions/index.js";
 
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
@@ -29,7 +29,7 @@ const MAX_SETUP_TRANSIENT_INFRA_RETRIES = 3;
 // evicts entries idle for 4× the notice interval. Stale entries are harmless
 // (a finished job's key is simply never consulted again).
 const setupDeferNoticeLastSeen = new Map();
-import { MUTATING_JOB_TYPES, WORKTREE_JOB_TYPES } from "../../../../catalog/job.js";
+import { WORKTREE_JOB_TYPES } from "../../../../catalog/job.js";
 import { jobNeedsGitWorktreeAsync } from "../../../git/functions/policy.js";
 import { disposeWorkItemAtlasGraph, ensureWorkItemAtlasJoinAsync, getAtlasIntegrationConfig } from "../../../integrations/functions/atlas.js";
 import { emitDevLeased as emitAtlasV2DevLeased, emitWiCleanup as emitAtlasV2WiCleanup, isAtlasV2EmissionEnabled } from "../../../atlas/classes/v2/PipelineHooks.js";
@@ -45,7 +45,8 @@ import { removePreparedWorktreeIfSafeAsync } from "../../../git/functions/prepar
 import { tombstoneWaitingLanePreparationForCleanup } from "../../../git/functions/waiting-lane-cleanup.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { clearActiveWorktreeSentinel, isSentinelProcessAlive, readActiveWorktreeSentinel, sentinelHasOtherLiveJob, sentinelJobStillActive, writeActiveWorktreeSentinel } from "./worktree-sentinel.js";
-import { classifyIgnorableSetupDirty, inspectIgnorableSetupDirty, isRuntimeResidualPath, normalizeRepoPath, parsePorcelainEntries, payloadExplicitlyClaimsPath, snapshotAndResetSetupBlockingPathsAsync, targetedSetupDirtyRecoveryEligible, unfinishedSiblingDirtyLocks } from "./worktree-dirty-classification.js";
+import { classifyIgnorableSetupDirty, inspectIgnorableSetupDirty, isRuntimeResidualPath, normalizeRepoPath, parsePorcelainEntries, payloadExplicitlyClaimsPath, snapshotAndResetSetupBlockingPathsAsync, reusedWorktreeDirtAsync, targetedSetupDirtyRecoveryEligible, unfinishedSiblingDirtyLocks } from "./worktree-dirty-classification.js";
+import { linkFailedAttemptSnapshot } from "./failed-attempt-recovery.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
 import { jobHasSetupCleanupPrecedence, nextTransientSetupRetryPayload, transientSetupRetryCountFromPayload } from "./worktree-setup-policy.js";
 import { pendingCrossWiFileSyncs } from "./cross-wi-sync.js";
@@ -620,7 +621,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
   if (!WORKTREE_JOB_TYPES.has(job?.job_type)) {
     return { ok: true, wtPath: null, branchName: null, sentinelPath: null };
   }
-  const earlyPayload = MUTATING_JOB_TYPES.has(job.job_type) ? worker.parsePayload(job) : null;
+  // Setup classifies dirt against this payload before any reset. One that
+  // does not parse is empty, never null: the null branches below skipped
+  // sibling ownership and reset a parked sibling's edits with the tree.
+  const earlyPayload = worker.parsePayload(job) || {};
   const isArtifactJob = earlyPayload
     ? (job.job_type === "artificer" || isArtifactMode(earlyPayload.task_mode || "code"))
     : false;
@@ -636,6 +640,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
   let pendingTargetMerge = false;
   let toleratedResidualLogged = false;
   let toleratedSiblingDirtyLogged = false;
+  let mismatchHoldsOwnDirt = false;
   try {
     if (!await jobNeedsGitWorktreeAsync(job, { signal })) {
       return { ok: true, wtPath: null, branchName: null, sentinelPath: null };
@@ -660,7 +665,27 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       if (!earlyPayload) return false;
       const actual = String(currentBranch || "").trim();
       const expected = String(expectedBranch || "").trim();
-      if (actual && expected && actual !== expected) return false;
+      if (actual && expected && actual !== expected) {
+        // Mismatch recovery snapshot-resets the tree and removes it. A branch
+        // switched inside it carried any parked sibling's edits along, so
+        // dirt an unfinished sibling still owns defers setup instead.
+        const dirt = await reusedWorktreeDirtAsync(job, candidatePath, worker.projectDir, { signal });
+        // A queued owner is waiting on setup like this job. When this job
+        // also holds dirt here, each would defer behind the other forever:
+        // that case goes to the operator's recovery choice instead.
+        const holdsOwnDirt = dirt.paths.some((file) => payloadExplicitlyClaimsPath(earlyPayload, file));
+        if (holdsOwnDirt && dirt.owners.length > 0
+          && dirt.owners.every((owner) => getJob(owner.job_id)?.status === "queued")) {
+          throw Object.assign(new Error("Dirty worktree on another branch holds edits of this job and of queued same-work-item jobs; it needs an operator recovery choice"), {
+            code: DIRTY_WORKTREE_RECOVERY_ERROR, paths: dirt.paths, deferWorktreeCleanup: true,
+          });
+        }
+        deferSetupIfLiveSiblingLocks(worker, job, wi, "branch-mismatch-sibling-dirt", dirt.owners);
+        // What is left may be this job's own parked work; its snapshot is
+        // linked to the job (onReusedDirtySnapshot) so the next turn gets it.
+        mismatchHoldsOwnDirt = dirt.paths.some((file) => payloadExplicitlyClaimsPath(earlyPayload, file));
+        return false;
+      }
       // Resume the journal before generic reused-worktree recovery inspects
       // or resets its partial materialization. The later guard preserves any
       // unexplained destination edits as a named blocker.
@@ -700,6 +725,28 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
         toleratedSiblingDirtyLogged = true;
       }
       return true;
+    };
+
+    // Reuse recovery reset the tree after this snapshot. Link it to the jobs
+    // whose dirt it holds: sibling-deferred paths of this job or of failed
+    // owners, and, after a branch mismatch, this job's own parked work.
+    const onReusedDirtySnapshot = (snapshotDir) => {
+      if (!snapshotDir) return;
+      worker.emit(job.id, `${C.dim}[system] WI#${wi.id} preserved dirty worktree snapshot: ${snapshotDir}${C.reset}`);
+      linkSiblingDirtyRecoverySnapshot({
+        workItemId: wi.id, snapshotDir, jobId: job.id, reason: "reused-dirty-worktree", ownerJobIds: [job.id],
+      });
+      if (!mismatchHoldsOwnDirt) return;
+      linkFailedAttemptSnapshot(job, snapshotDir);
+      job.payload_json = getJob(job.id)?.payload_json || job.payload_json;
+      logEvent({
+        work_item_id: wi.id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.WORKTREE_DIRTY_RECOVERED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Snapshotted this job's uncommitted work before re-adding its worktree on ${branchName}: ${snapshotDir}`,
+        event_json: JSON.stringify({ reason: "reused-dirty-worktree", snapshot_dir: snapshotDir }),
+      });
     };
 
     const waitingLaneActivation = !job._worktreePath && !wi.branch_name
@@ -795,11 +842,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
             },
             shouldSkipDirtyRecovery: shouldSkipReusedDirtyRecovery,
             shouldDeferCorruptRecovery: () => guardReviewedWorktreeReuse(job, leaseToken, "corrupt worktree recovery"),
-            onDirtySnapshot: (snapshotDir) => {
-              if (snapshotDir) {
-                worker.emit(job.id, `${C.dim}[system] WI#${wi.id} preserved dirty worktree snapshot: ${snapshotDir}${C.reset}`);
-              }
-            },
+            onDirtySnapshot: onReusedDirtySnapshot,
           });
           return base;
         });
@@ -829,11 +872,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
             shouldSkipDirtyRecovery: shouldSkipReusedDirtyRecovery,
             shouldDeferCorruptRecovery: () => guardReviewedWorktreeReuse(job, leaseToken, "corrupt worktree recovery"),
             shouldDeferBranchCreation: () => guardReviewedWorktreeReuse(job, leaseToken, "missing branch recreation"),
-            onDirtySnapshot: (snapshotDir) => {
-              if (snapshotDir) {
-                worker.emit(job.id, `${C.dim}[system] WI#${wi.id} preserved dirty worktree snapshot: ${snapshotDir}${C.reset}`);
-              }
-            },
+            onDirtySnapshot: onReusedDirtySnapshot,
             onBranchMismatch: ({ expected, actual }) => {
               worker.emit(job.id, `${C.yellow}[system] WI#${wi.id} discarded stale worktree branch ${actual || "(detached)"}; expected ${expected}${C.reset}`);
               logEvent({
@@ -1261,7 +1300,9 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     }
     if (gitErr?.code === "WORKTREE_ACTIVE_SIBLING_LOCKS") {
       // Record who we are waiting on so the scheduler leases this job again only
-      // once they release, instead of re-running setup on a fixed timer.
+      // once they release, instead of re-running setup on a fixed timer. The
+      // scheduler gate only holds for a sibling on a live lease; record the
+      // deferral only when that gate will hold, or the job re-leases at once.
       const blockers = [...new Set((gitErr.siblingLocks || [])
         .filter((lock) => lock?.job_status === "running" || lock?.job_status === "leased")
         .map((lock) => Number(lock.job_id))
@@ -1269,12 +1310,15 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       let gated = false;
       if (blockers.length > 0) {
         try {
-          const payload = JSON.parse(job.payload_json || "{}");
+          const payload = JSON.parse((getJob(job.id) || job).payload_json || "{}");
           payload[SETUP_DEFERRED_BEHIND_KEY] = blockers;
           payload[SETUP_DEFERRED_SINCE_KEY] = new Date().toISOString();
-          job.payload_json = JSON.stringify(payload);
-          updateJobPayload(job.id, job.payload_json);
-          gated = true;
+          const payloadJson = JSON.stringify(payload);
+          if (setupDeferredBehindLiveSibling({ ...job, payload_json: payloadJson })) {
+            job.payload_json = payloadJson;
+            updateJobPayload(job.id, payloadJson);
+            gated = true;
+          }
         } catch { /* fall back to the timed retry */ }
       }
       const readyAt = new Date(Date.now() + (gated ? 1_000 : SETUP_DEFER_RETRY_DELAY_MS)).toISOString();

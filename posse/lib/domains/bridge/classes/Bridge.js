@@ -138,6 +138,26 @@ export class Bridge {
     }
   }
 
+  /**
+   * Tell a freshly authenticated relay which gates are open right now. The
+   * relay turns `gate_opened` into the owner's push notification, but frames
+   * are dropped while the socket is down and gates open at startup are seeded
+   * as already announced, so a gate that opened while serve was stopped or
+   * disconnected would otherwise never ping the phone. The relay pushes at
+   * most once per open gate, so repeating this on every reconnect is safe.
+   * Relay only: local stream clients already have these gates in their
+   * snapshot and must not see a second `gate_opened`.
+   */
+  announceOpenGatesToRelay() {
+    let frames;
+    try {
+      frames = this.changeStream?.openGateFrames() || [];
+    } catch {
+      return; // A busy DB skips this connection's reminder; serve stays up.
+    }
+    for (const frame of frames) this.relayClient?.send(frame);
+  }
+
   start({ restarting = false } = {}) {
     if (this.stopPromise) return this.stopPromise.then(() => this.start({ restarting }));
     if (this.startPromise) return this.startPromise;
@@ -182,6 +202,7 @@ export class Bridge {
         });
         this.relayClient.on("operator_activity", () => this.noteOperatorActivity());
         this.relayClient.on("status", () => this.writeOperatorPresence());
+        this.relayClient.on("authenticated", () => this.announceOpenGatesToRelay());
         this.relayClient.on("error", (err) => {
           try {
             console.warn(`[posse][bridge] relay error: ${formatRelayErrorLog(err, {

@@ -366,6 +366,5 @@ export const SETTING_DEFINITIONS = [
   { key: "atlas_embedded_queue_wait_ms",  default: "90000",              numeric: { integer: true, min: 0 }, adminVisible: false, description: "Maximum milliseconds embedded ATLAS calls wait for protected ATLAS assets (default 90s)" },
   { key: "atlas_job_cache_ttl_ms",        default: "300000",             numeric: { integer: true, min: 0 }, adminVisible: false, description: "TTL in milliseconds for per-job embedded ATLAS result cache entries" },
   { key: "atlas_prefetch_cache_ttl_ms",   default: "600000",             numeric: { integer: true, min: 0 }, adminVisible: false, description: "TTL in milliseconds for ATLAS prefetch cache entries" },
-  { key: "atlas_corruption_cooldown_ms",  default: "120000",             numeric: { integer: true, min: 0 }, adminVisible: false, description: "Cooldown in milliseconds after ATLAS graph corruption before retrying embedded ATLAS" },
   { key: "atlas_job_cache",               default: "true",               valueType: "boolean", adminVisible: false, description: "Cache repeated read-only embedded ATLAS tool results within a single job" },
 ];

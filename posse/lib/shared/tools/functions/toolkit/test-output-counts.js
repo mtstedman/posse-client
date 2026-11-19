@@ -70,6 +70,12 @@ export function testExecutionCounts(output = "") {
     total: minitest.reduce((sum, match) => sum + Number(match[1]), 0),
     skipped: minitest.reduce((sum, match) => sum + Number(match[2]), 0),
   };
+  // test-unit: "2 tests, 2 assertions, 0 failures, 0 errors, 0 pendings, 1 omissions, 0 notifications".
+  const testUnit = [...text.matchAll(/^(\d+) tests?, \d+ assertions?, \d+ failures?, \d+ errors?, (\d+) pendings?, (\d+) omissions?\b/gm)];
+  if (testUnit.length) return {
+    total: testUnit.reduce((sum, match) => sum + Number(match[1]), 0),
+    skipped: testUnit.reduce((sum, match) => sum + Number(match[2]) + Number(match[3]), 0),
+  };
   // `go test -v` reports each case, subtests included, as --- PASS/FAIL/SKIP.
   const goCases = [...text.matchAll(/^\s*--- (PASS|FAIL|SKIP): /gm)];
   if (goCases.length) return {

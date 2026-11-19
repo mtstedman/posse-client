@@ -22,6 +22,7 @@ import os from "os";
 import path from "path";
 import { randomBytes } from "node:crypto";
 import { normPath } from "../../../shared/scope/functions/path.js";
+import { gitWorktreeRoot, topLiteralPathspec } from "./project-paths.js";
 
 export const HANDOFF_SYNC_SUBJECT_RE = /^posse: sync cross-WI file handoff for job #\d+/;
 export const DETERMINISTIC_MERGE_FAILURE_KEY = "last_deterministic_merge_failure";
@@ -477,12 +478,13 @@ export function resolveHandoffSquashConflicts({ exec, cwd, branch }) {
   if (typeof exec !== "function" || !cwd || !branch) {
     return { resolved: false, reason: "missing_arguments" };
   }
+  // Names are repository-relative and never C-quoted (`-z`, core.quotePath),
+  // whether `cwd` is the repository root or a project nested in it.
   let conflicted = [];
   try {
-    conflicted = exec(["diff", "--name-only", "--diff-filter=U"], cwd)
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
+    conflicted = [...new Set(String(exec(["diff", "--name-only", "-z", "--diff-filter=U"], cwd, { trim: false }) ?? "")
+      .split("\0")
+      .filter(Boolean))];
   } catch (error) {
     return { resolved: false, transient: true, reason: `conflict_listing_failed: ${error?.message || error}` };
   }
@@ -492,7 +494,7 @@ export function resolveHandoffSquashConflicts({ exec, cwd, branch }) {
   try {
     const mergeBase = exec(["merge-base", "HEAD", branch], cwd);
     const logText = exec(
-      ["log", "--format=%x00%s", "--name-only", `${mergeBase}..${branch}`],
+      ["-c", "core.quotePath=false", "log", "--format=%x00%s", "--name-only", `${mergeBase}..${branch}`],
       cwd,
       { trim: false },
     );
@@ -541,9 +543,10 @@ export function resolveHandoffSquashConflicts({ exec, cwd, branch }) {
       if (!union.safe) return { resolved: false, reason: `${union.reason}: ${relPath}` };
       resolutions.push({ relPath, content: union.content });
     }
+    const repoRoot = gitWorktreeRoot(exec, cwd);
     for (const { relPath, content } of resolutions) {
-      fs.writeFileSync(path.join(cwd, relPath), content);
-      exec(["add", "--", relPath], cwd);
+      fs.writeFileSync(path.join(repoRoot, relPath), content);
+      exec(["add", "--", topLiteralPathspec(relPath)], cwd);
     }
   } catch (error) {
     return { resolved: false, transient: true, reason: `resolution_write_failed: ${error?.message || error}` };

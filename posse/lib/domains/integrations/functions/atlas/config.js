@@ -571,7 +571,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
       researchPrefetchFocusMode: "off",
       surveyBriefEdgeCount: 8,
       surveyEdgeCap: 0,
-      corruptionCooldownMs: 120000,
       jobCacheEnabled: false,
       driftCheckEnabled: false,
       runtimeDisabled: true,
@@ -642,7 +641,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbResearchPrefetchFocus = useLiveSettings ? readDbSetting("atlas_research_prefetch_focus") : null;
   const dbSurveyBriefEdgeCount = useLiveSettings ? readDbSetting("atlas_survey_brief_edge_count") : null;
   const dbSurveyEdgeCap = useLiveSettings ? readDbSetting("atlas_survey_edge_cap") : null;
-  const dbCorruptionCooldownMs = useLiveSettings ? readDbSetting("atlas_corruption_cooldown_ms") : null;
   const dbJobCache = useLiveSettings ? readDbSettingBool("atlas_job_cache") : null;
   const dbDriftCheck = useLiveSettings ? readDbSettingBool("atlas_drift_check") : null;
   const dbDriftCheckIntervalMs = useLiveSettings ? readDbSetting("atlas_drift_check_interval_ms") : null;
@@ -788,7 +786,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     explicitValue("surveyEdgeCap", "atlas_survey_edge_cap"),
     dbSurveyEdgeCap,
   )) ?? 0);
-  const corruptionCooldownMs = parseIntOrNull(firstProvided(explicitValue("corruptionCooldownMs", "atlas_corruption_cooldown_ms", "POSSE_ATLAS_CORRUPTION_COOLDOWN_MS"), dbCorruptionCooldownMs)) ?? 120000;
   const explicitJobCache = explicitValue("jobCacheEnabled", "atlas_job_cache", "POSSE_ATLAS_JOB_CACHE");
   const jobCacheEnabled = provided(explicitJobCache) && String(explicitJobCache).trim() !== ""
     ? parseBool(explicitJobCache)
@@ -856,7 +853,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     researchPrefetchFocusMode,
     surveyBriefEdgeCount,
     surveyEdgeCap,
-    corruptionCooldownMs,
     jobCacheEnabled,
     driftCheckEnabled,
     driftCheckIntervalMs,

@@ -86,7 +86,9 @@ export function reviewedHandoffAdmission(job, scope, { order, workItemLocks, job
   const rows = scope.files.map((path) => ({ path, lock_kind: "file" }));
   if (sameWorkItemConflict) return { conflict: sameWorkItemConflict, transfers: [] };
   const blocked = blockedReviewedReservation(job);
-  if (blocked) return wait(job, { work_item_id: job.work_item_id }, blocked.path, blocked.reason || REASONS.RECOVERY);
+  // The waiter waits on the source work item (as findWriteLockConflict names
+  // it), never on itself, so the stall detector awaits the source's merge.
+  if (blocked) return wait(job, { work_item_id: blocked.source_work_item_id }, blocked.path, blocked.reason || REASONS.RECOVERY);
   // Every earlier planned writer remains a reservation. Only a completed
   // path, with no further writer in its source WI, can be exported.
   const wiRows = [...(order.byId.get(job.work_item_id)?.planned || []), ...rows];

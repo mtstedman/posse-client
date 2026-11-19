@@ -2,6 +2,10 @@ import { approvePlan, rejectPlan } from "../../planning/functions/plan-approval.
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { answerHumanInput } from "./human-input-answer.js";
 import { executeGitPushGate } from "./git-push-gate.js";
+import { AGENT_CONVERSATION_TIER } from "../../../catalog/agent-conversation.js";
+import { BRIDGE_TRANSPORTS } from "../../../catalog/bridge.js";
+import { OPERATOR_ACTION_SOURCES } from "../../../catalog/work-item-interactions.js";
+import { HUMAN_GATE_FEEDBACK_MAX_CHARS } from "../../../catalog/human-input.js";
 import {
   WORK_ITEM_ACTION_PROTOCOL,
   commonEnvelope,
@@ -12,7 +16,7 @@ import {
 const OWNER_MODULE = "../../queue/functions/interaction-contract.js";
 const TRANSITION_HANDLERS = new Set(["plan", "scope", "review", "human_input", "one_shot", "git_push"]);
 const TRANSITION_DESCRIPTOR_KEYS = new Set([
-  "handler", "work_item_id", "job_id", "question_id", "question_generation", "choice_id", "decline",
+  "handler", "work_item_id", "job_id", "question_id", "question_generation", "choice_id", "decline", "feedback",
 ]);
 
 function requiredText(value, maxBytes = 128) {
@@ -20,7 +24,16 @@ function requiredText(value, maxBytes = 128) {
   return text && Buffer.byteLength(text, "utf8") <= maxBytes ? text : null;
 }
 
-function actionIdentityArgs(args = {}, kind) {
+// The action's recorded source names the surface: Bossy reaches the bridge
+// only over loopback HTTP with the local token (the local detail tier); the
+// phone and web app arrive over the LAN WebSocket or the relay.
+function actionSource(context = {}) {
+  return context.detailTier === AGENT_CONVERSATION_TIER.LOCAL
+    ? OPERATOR_ACTION_SOURCES.BOSSY
+    : OPERATOR_ACTION_SOURCES.BRIDGE;
+}
+
+function actionIdentityArgs(args = {}, kind, context = {}) {
   const actionId = requiredText(args.action_id, 128);
   const workItemId = requiredText(args.work_item_id, 128);
   const jobId = requiredText(args.job_id, 128);
@@ -30,6 +43,8 @@ function actionIdentityArgs(args = {}, kind) {
     const generation = requiredText(args.question_generation, 128);
     const choiceId = requiredText(args.choice_id, 128);
     if (!questionId || !generation || !choiceId) return { ok: false, reason: "invalid_identity" };
+    const feedback = args.feedback == null ? "" : String(args.feedback).trim();
+    if (Array.from(feedback).length > HUMAN_GATE_FEEDBACK_MAX_CHARS) return { ok: false, reason: "invalid_feedback" };
     return {
       ok: true,
       value: {
@@ -39,7 +54,8 @@ function actionIdentityArgs(args = {}, kind) {
         question_id: questionId,
         question_generation: generation,
         choice_id: choiceId,
-        source: "bossy",
+        ...(feedback ? { feedback } : {}),
+        source: actionSource(context),
         author: "operator",
       },
     };
@@ -59,7 +75,7 @@ function actionIdentityArgs(args = {}, kind) {
       ...(agentCallId ? { agent_call_id: agentCallId } : {}),
       body,
       ...(replaceId ? { replace_interaction_id: replaceId } : {}),
-      source: "bossy",
+      source: actionSource(context),
       author: "operator",
     },
   };
@@ -92,7 +108,23 @@ function validateTransitionDescriptor(descriptor) {
   } else if (descriptor.decline != null) {
     return null;
   }
+  if (descriptor.feedback != null) {
+    const feedback = typeof descriptor.feedback === "string" ? descriptor.feedback.trim() : "";
+    if (!feedback || Array.from(feedback).length > HUMAN_GATE_FEEDBACK_MAX_CHARS || descriptor.handler === "git_push") return null;
+    normalized.feedback = feedback;
+  }
   return normalized;
+}
+
+// ask's answer form: "<choice>: note" with the validated selection beside
+// it, so a note naming another choice cannot change the selection.
+function humanInputAnswer(descriptor) {
+  if (!descriptor.feedback) return { job_id: descriptor.job_id, answer: descriptor.choice_id };
+  return {
+    job_id: descriptor.job_id,
+    answer: `${descriptor.choice_id}: ${descriptor.feedback}`,
+    answer_metadata: { selected_action: descriptor.choice_id },
+  };
 }
 
 export function createWorkItemTransitionExecutor(context = {}, deps = {}) {
@@ -116,19 +148,16 @@ export function createWorkItemTransitionExecutor(context = {}, deps = {}) {
               actor: context.actor || "bridge",
               gateJobId: Number(descriptor.job_id),
               gateGeneration: Number(descriptor.question_generation),
+              ...(descriptor.feedback ? { feedback: descriptor.feedback } : {}),
             });
       case "review":
-        return executeHumanInput(Number(descriptor.job_id), {
-          job_id: descriptor.job_id,
-          answer: descriptor.choice_id,
-        }, { ...context, projectDir, allowReviewGateAnswer: true });
+        return executeHumanInput(Number(descriptor.job_id), humanInputAnswer(descriptor),
+          { ...context, projectDir, allowReviewGateAnswer: true, allowChoiceFeedback: Boolean(descriptor.feedback) });
       case "scope":
       case "human_input":
       case "one_shot":
-        return executeHumanInput(Number(descriptor.job_id), {
-          job_id: descriptor.job_id,
-          answer: descriptor.choice_id,
-        }, { ...context, projectDir });
+        return executeHumanInput(Number(descriptor.job_id), humanInputAnswer(descriptor),
+          { ...context, projectDir, allowChoiceFeedback: Boolean(descriptor.feedback) });
       case "git_push":
         return executePush(Number(descriptor.job_id), {
           decline: descriptor.decline === true,
@@ -139,21 +168,41 @@ export function createWorkItemTransitionExecutor(context = {}, deps = {}) {
   };
 }
 
+// The relay and the LAN WebSocket reach a bridge that serves exactly one
+// project, and an absolute local path must not cross them (decision D1).
+function remoteTransport(context = {}) {
+  return context.transport === BRIDGE_TRANSPORTS.RELAY || context.transport === BRIDGE_TRANSPORTS.WEBSOCKET;
+}
+
+// question.answer from a remote transport may omit repo_path: the bridge's
+// own project is the only one it could name. A supplied path is still
+// checked. Loopback HTTP (Bossy, which may serve several repositories)
+// keeps requiring it.
+function answerRepositoryBinding(args, context) {
+  const omitted = typeof args.repo_path !== "string" || !args.repo_path.trim();
+  if (remoteTransport(context) && omitted) {
+    return validateRepositoryBinding({ ...args, repo_path: context.projectDir || process.cwd() }, context);
+  }
+  return validateRepositoryBinding(args, context);
+}
+
 function actionEnvelope(ownerResult, repoPath, context) {
   const db = context.db || getDb();
-  return {
+  const envelope = {
     ...commonEnvelope(WORK_ITEM_ACTION_PROTOCOL, repoPath, context, db),
     ...ownerResult,
     protocol: WORK_ITEM_ACTION_PROTOCOL,
     repo_path: repoPath,
     observed_at: ownerResult?.observed_at || observedAt(context),
   };
+  if (remoteTransport(context)) delete envelope.repo_path;
+  return envelope;
 }
 
 export async function answerWorkItemQuestion(args = {}, context = {}) {
-  const binding = validateRepositoryBinding(args, context);
+  const binding = answerRepositoryBinding(args, context);
   if (!binding.ok) return binding;
-  const normalized = actionIdentityArgs(args, "question.answer");
+  const normalized = actionIdentityArgs(args, "question.answer", context);
   if (!normalized.ok) return normalized;
   const owner = await loadOwnerFunctions(context);
   if (typeof owner.answerWorkItemQuestionChoice !== "function") throw new Error("Lane A answer API unavailable");
@@ -166,7 +215,7 @@ export async function answerWorkItemQuestion(args = {}, context = {}) {
 export async function nudgeWorkItemAgent(args = {}, context = {}) {
   const binding = validateRepositoryBinding(args, context);
   if (!binding.ok) return binding;
-  const normalized = actionIdentityArgs(args, "agent.nudge");
+  const normalized = actionIdentityArgs(args, "agent.nudge", context);
   if (!normalized.ok) return normalized;
   const owner = await loadOwnerFunctions(context);
   if (typeof owner.replaceOperatorNudge !== "function") throw new Error("Lane A nudge API unavailable");

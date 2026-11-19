@@ -28,6 +28,7 @@ import { getLivePairingState } from "../../pairing/functions/state.js";
 import { getRuntimeDbPath, getRuntimeResourcesDir, getRuntimeRoot, normalizeProjectDir } from "../../runtime/functions/paths.js";
 import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
 import { classifyScopedCommit, collectScopedCommitDiff, getGitCommitStyle } from "./commit-message-policy.js";
+import { projectPathToRepoPath, repoPathToProjectPath } from "./project-paths.js";
 
 const GIT_COMMAND_TIMEOUT_MS = 60_000;
 const DEFAULT_GIT_COMMIT_CORE_TIMEOUT_MS = 60_000;
@@ -546,21 +547,42 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     }
     return { nestedRepoPrefix: null, nestedRepoRoot: null };
   })();
-  const scopeCompatiblePath = (input) => {
+  // Every path below is cwd-relative (project-relative when cwd is nested in
+  // its repository; `../` names a path outside it). Names are converted where
+  // they are read: `git diff` output and native results are
+  // repository-relative, `ls-files` output is already cwd-relative. A prefix
+  // is never stripped "if present": with project `backend` and a package
+  // `backend/backend/`, `backend/x.py` is valid in both spaces.
+  const nestedPrefix = nestedRepoPrefix ? `${nestedRepoPrefix}/` : "";
+  const fromRepoPath = (input) => {
     const normalized = normRaw(input);
-    if (!normalized || normalized === "*" || !nestedRepoPrefix) return normalized;
-    const prefix = `${nestedRepoPrefix}/`;
-    return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
+    if (!normalized || normalized === "*") return normalized;
+    return repoPathToProjectPath(normalized, nestedPrefix);
   };
-  // Inverse of scopeCompatiblePath: the native scoped-commit transaction
-  // requires repository-relative paths (git status reports them that way), so
-  // cwd-relative scope paths must be re-prefixed when cwd is nested inside the
-  // repository.
+  // The native scoped-commit transaction takes repository-relative paths.
   const repoRelativePath = (input) => {
     const normalized = normRaw(input);
-    if (!normalized || normalized === "*" || !nestedRepoPrefix) return normalized;
-    const prefix = `${nestedRepoPrefix}/`;
-    return normalized.startsWith(prefix) ? normalized : `${prefix}${normalized}`;
+    if (!normalized || normalized === "*") return normalized;
+    return projectPathToRepoPath(normalized, nestedPrefix);
+  };
+  // Scope paths are project-relative: the project is the agent's cwd. Some
+  // callers still hand repository-relative names read from `git diff`
+  // (merge-dirty-recovery's target scope), so a prefixed scope entry is read
+  // that way only when, relative to the project, it names nothing on disk or
+  // in the index while its repository reading does.
+  let trackedProjectPaths = null;
+  const knownProjectPath = (file) => {
+    if (fs.lstatSync(path.resolve(cwd, file), { throwIfNoEntry: false })) return true;
+    trackedProjectPaths ??= new Set(String(gitForCommit(["-c", "core.quotePath=false", "ls-files", "-z"], { trim: false }) || "")
+      .split("\0").map(norm).filter(Boolean));
+    return trackedProjectPaths.has(norm(file));
+  };
+  const scopePath = (input) => {
+    const normalized = normRaw(input);
+    if (!normalized || normalized === "*" || !nestedPrefix || !normalized.startsWith(nestedPrefix)) return normalized;
+    const repoReading = normalized.slice(nestedPrefix.length);
+    if (!repoReading || knownProjectPath(normalized) || !knownProjectPath(repoReading)) return normalized;
+    return repoReading;
   };
   const wiId = opts?.wiId || null;
   const jobId = opts?.jobId || null;
@@ -574,24 +596,24 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   let snapshotRestoreError = null;
   let snapshotRestoreRef = null;
 
-  const modifyFilesRaw = (scope?.modifyFiles || []).map(scopeCompatiblePath).filter(Boolean);
-  const createFilesRaw = (scope?.createFiles || []).map(scopeCompatiblePath).filter(Boolean);
-  const deleteFilesRaw = (scope?.deleteFiles || []).map(scopeCompatiblePath).filter(Boolean);
+  const modifyFilesRaw = (scope?.modifyFiles || []).map(scopePath).filter(Boolean);
+  const createFilesRaw = (scope?.createFiles || []).map(scopePath).filter(Boolean);
+  const deleteFilesRaw = (scope?.deleteFiles || []).map(scopePath).filter(Boolean);
   const reservedScopePaths = filterPosseRuntimePaths([
     ...modifyFilesRaw,
     ...createFilesRaw,
     ...deleteFilesRaw,
-    ...(scope?.createRoots || []).map(scopeCompatiblePath).filter(Boolean),
+    ...(scope?.createRoots || []).map(scopePath).filter(Boolean),
   ]);
   if (reservedScopePaths.length > 0) {
     throw reservedRuntimePathError(reservedScopePaths, "admit a scoped commit containing");
   }
-  const splitNulPaths = (value) => String(value || "").split("\0").map(scopeCompatiblePath).filter(Boolean);
+  const splitNulPaths = (value, fromGit) => String(value || "").split("\0").map(fromGit).filter(Boolean);
   const reservedWorkingPaths = filterPosseRuntimePaths([
-    ...splitNulPaths(gitForCommit(headAtScopeStart
-      ? ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "HEAD", "--"]
-      : ["-c", "core.quotePath=false", "ls-files", "-z"], { trim: false })),
-    ...splitNulPaths(gitForCommit(["-c", "core.quotePath=false", "ls-files", "-z", "--others", "--exclude-standard"], { trim: false })),
+    ...(headAtScopeStart
+      ? splitNulPaths(gitForCommit(["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "HEAD", "--"], { trim: false }), fromRepoPath)
+      : splitNulPaths(gitForCommit(["-c", "core.quotePath=false", "ls-files", "-z"], { trim: false }), normRaw)),
+    ...splitNulPaths(gitForCommit(["-c", "core.quotePath=false", "ls-files", "-z", "--others", "--exclude-standard"], { trim: false }), normRaw),
   ]);
   if (reservedWorkingPaths.length > 0) {
     throw reservedRuntimePathError(reservedWorkingPaths, "commit");
@@ -601,7 +623,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const deleteFiles = deleteFilesRaw.map(caseFold);
   // Fold createRoots to the same case as norm() so isUnderRoot prefix matches
   // line up on Windows where git output and user-authored paths may diverge.
-  const createRoots = normalizeRoots(scope?.createRoots || [], cwd).map(scopeCompatiblePath).filter(Boolean).map(caseFold);
+  const createRoots = normalizeRoots(scope?.createRoots || [], cwd).map(scopePath).filter(Boolean).map(caseFold);
   const hasScope = modifyFiles.length > 0 || createFiles.length > 0 || deleteFiles.length > 0 || createRoots.length > 0;
   if (createRoots.includes("*")) {
     const taskMode = String(opts?.taskMode || opts?.task_mode || "").trim().toLowerCase();
@@ -660,19 +682,19 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     ...gitNameList("diff", "--name-only", "--diff-filter=D")
       .split("\n")
       .filter(Boolean)
-      .map(scopeCompatiblePath)
+      .map(fromRepoPath)
       .filter(Boolean)
       .map(norm),
     ...gitNameList("diff", "--cached", "--name-only", "--diff-filter=D")
       .split("\n")
       .filter(Boolean)
-      .map(scopeCompatiblePath)
+      .map(fromRepoPath)
       .filter(Boolean)
       .map(norm),
   ]);
   const collectMergeBroughtInPaths = (leftRev = "HEAD", rightRev = "MERGE_HEAD") => {
     const raw = gitForCommit(["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", `${leftRev}...${rightRev}`]);
-    const rawPaths = raw.split("\n").map(scopeCompatiblePath).filter(Boolean);
+    const rawPaths = raw.split("\n").map(fromRepoPath).filter(Boolean);
     return {
       rawPaths,
       normalized: new Set(rawPaths.map(norm)),
@@ -700,7 +722,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       quarantined.add(file);
     };
 
-    for (const f of gitNameList("diff", "--cached", "--name-only").split("\n").map(scopeCompatiblePath).filter(Boolean)) {
+    for (const f of gitNameList("diff", "--cached", "--name-only").split("\n").map(fromRepoPath).filter(Boolean)) {
       const normalized = norm(f);
       if (isSnapshotPath(normalized) || mergePathAllowed(normalized, mergeBroughtIn)) continue;
       try {
@@ -718,18 +740,18 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       ...new Set(
         `${gitNameList("diff", "--name-only")}\n${gitNameList("diff", "--name-only", "--cached")}`
           .split("\n")
-          .map(scopeCompatiblePath)
+          .map(fromRepoPath)
           .filter(Boolean)
       ),
     ];
     const untrackedFiles = gitNameList("ls-files", "--others", "--exclude-standard")
       .split("\n")
-      .map(scopeCompatiblePath)
+      .map(normRaw)
       .filter(Boolean);
     const unmergedPaths = gitNameList("ls-files", "-u")
       .split("\n")
       .filter(Boolean)
-      .map((line) => scopeCompatiblePath(line.split("\t").pop()))
+      .map((line) => normRaw(line.split("\t").pop()))
       .filter(Boolean);
 
     for (const f of dirtyFiles) {
@@ -764,7 +786,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       indexedByFold ??= firstValueByFold(
         gitNameList("ls-files")
           .split("\n")
-          .map(scopeCompatiblePath)
+          .map(normRaw)
           .filter(Boolean),
         norm
       );
@@ -791,7 +813,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
 
     const stillStagedOutOfScope = gitNameList("diff", "--cached", "--name-only")
       .split("\n")
-      .map(scopeCompatiblePath)
+      .map(fromRepoPath)
       .filter(Boolean)
       .filter((f) => {
         const normalized = norm(f);
@@ -811,7 +833,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
 
     const blocked = gitNameList("diff", "--cached", "--name-only")
       .split("\n")
-      .map(scopeCompatiblePath)
+      .map(fromRepoPath)
       .filter(Boolean)
       .filter((f) => {
         const normalized = norm(f);
@@ -823,7 +845,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       err.gitAddWarnings = gitAddWarnings;
       throw err;
     }
-    return [...new Set([...quarantined].map(scopeCompatiblePath).filter(Boolean))];
+    return [...new Set([...quarantined].map(normRaw).filter(Boolean))];
   };
 
   if (hasScope && !mergeInProgress) {
@@ -833,19 +855,19 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       ...new Set(
         allDirty
           .split("\n")
-          .map(scopeCompatiblePath)
+          .map(fromRepoPath)
           .filter(Boolean)
       ),
     ];
     const untrackedFiles = gitNameList("ls-files", "--others", "--exclude-standard")
       .split("\n")
-      .map(scopeCompatiblePath)
+      .map(normRaw)
       .filter(Boolean);
     const actualDirtyByFold = firstValueByFold([...dirtyFiles, ...untrackedFiles], norm);
     const trackedByFold = firstValueByFold(
       gitNameList("ls-files")
         .split("\n")
-        .map(scopeCompatiblePath)
+        .map(normRaw)
         .filter(Boolean),
       norm
     );
@@ -870,17 +892,19 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       const deleted = collectDeletedTracked();
       const created = new Set([
         ...gitNameList("ls-files", "--others", "--exclude-standard")
-          .split("\n").map(scopeCompatiblePath).filter(Boolean).map(norm),
+          .split("\n").map(normRaw).filter(Boolean).map(norm),
         ...gitNameList("diff", "--cached", "--name-only", "--diff-filter=A")
-          .split("\n").map(scopeCompatiblePath).filter(Boolean).map(norm),
+          .split("\n").map(fromRepoPath).filter(Boolean).map(norm),
       ]);
       const paths = [
-        ...new Set(
-          `${gitNameList("diff", "--name-only")}\n${gitNameList("diff", "--cached", "--name-only")}\n${gitNameList("ls-files", "--others", "--exclude-standard")}`
+        ...new Set([
+          ...`${gitNameList("diff", "--name-only")}\n${gitNameList("diff", "--cached", "--name-only")}`
             .split("\n")
-            .map(scopeCompatiblePath)
-            .filter(Boolean),
-        ),
+            .map(fromRepoPath),
+          ...gitNameList("ls-files", "--others", "--exclude-standard")
+            .split("\n")
+            .map(normRaw),
+        ].filter(Boolean)),
       ];
       return paths.map((file) => ({
         path: file,
@@ -1000,7 +1024,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
 
     const stagedBeforeCommit = gitNameList("diff", "--cached", "--name-only")
       .split("\n")
-      .map(scopeCompatiblePath)
+      .map(fromRepoPath)
       .filter(Boolean);
     for (const f of stagedBeforeCommit) {
       const normalized = norm(f);
@@ -1039,11 +1063,11 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       const currentDeleted = collectDeletedTracked();
       const currentDirty = `${gitNameList("diff", "--name-only")}\n${gitNameList("diff", "--cached", "--name-only")}`
         .split("\n")
-        .map(scopeCompatiblePath)
+        .map(fromRepoPath)
         .filter(Boolean);
       const currentUntracked = gitNameList("ls-files", "--others", "--exclude-standard")
         .split("\n")
-        .map(scopeCompatiblePath)
+        .map(normRaw)
         .filter(Boolean);
       for (const file of currentDirty) {
         const normalized = norm(file);
@@ -1059,7 +1083,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       }
       const currentStaged = gitNameList("diff", "--cached", "--name-only")
         .split("\n")
-        .map(scopeCompatiblePath)
+        .map(fromRepoPath)
         .filter(Boolean);
       for (const file of currentStaged) {
         const normalized = norm(file);
@@ -1131,7 +1155,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       modifyRoots: [],
       createRoots: [],
       deleteRoots: [],
-      allowEmptyCreatePaths: (opts?.allowEmptyCreatePaths || []).map(repoRelativePath),
+      allowEmptyCreatePaths: (opts?.allowEmptyCreatePaths || []).map(scopePath).map(repoRelativePath),
       requiredPaths: expectedToCommit.map((entry) => repoRelativePath(entry.path)),
       // Rust applies this only to paths that are creations relative to
       // expectedHead, so a legitimately empty file already in history remains
@@ -1139,7 +1163,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       nonEmptyCreatePaths: [...new Set([
         ...createFilesRaw.filter((file) => !opts?.allowEmptyCreatePaths?.includes(file)),
         ...(Array.isArray(opts?.nonEmptyCreatePaths) ? opts.nonEmptyCreatePaths : []),
-      ].map(scopeCompatiblePath).filter(Boolean).map(resolveScopedPath))]
+      ].map(scopePath).filter(Boolean).map(resolveScopedPath))]
         .map(repoRelativePath),
       options: {
         allowEmpty: false,
@@ -1166,11 +1190,11 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
 
     // Native results come back repository-relative; fold them to the same
     // cwd-relative space as the admitted scope paths before comparing.
-    const committedSet = new Set(nativeResult.committedPaths.map((entry) => norm(scopeCompatiblePath(entry))));
+    const committedSet = new Set(nativeResult.committedPaths.map((entry) => norm(fromRepoPath(entry))));
     const skippedForPath = new Map();
     for (const entry of nativeResult.skippedPaths) {
       if (!entry || typeof entry !== "object") continue;
-      const key = norm(scopeCompatiblePath(entry.path));
+      const key = norm(fromRepoPath(entry.path));
       if (!key) continue;
       const values = skippedForPath.get(key) || [];
       values.push({
@@ -1240,11 +1264,11 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       mergeAuditFailed,
       mergeAuditError,
       committedPaths: Array.isArray(nativeResult.committedPaths)
-        ? nativeResult.committedPaths.map(scopeCompatiblePath)
+        ? nativeResult.committedPaths.map(fromRepoPath)
         : [],
       nativeSkippedPaths: Array.isArray(nativeResult.skippedPaths)
         ? nativeResult.skippedPaths.map((entry) => (entry && typeof entry === "object"
-          ? { ...entry, path: scopeCompatiblePath(entry.path) }
+          ? { ...entry, path: fromRepoPath(entry.path) }
           : entry))
         : [],
       rollbackStatus,
@@ -1366,10 +1390,10 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
         const [p1, p2] = mergeParents;
         const mergeBroughtIn = new Set(
           gitExec(["diff", "--no-renames", "--name-only", `${p1}...${p2}`], cwd)
-            .split("\n").map((s) => norm(s)).filter(Boolean)
+            .split("\n").map((s) => norm(fromRepoPath(s))).filter(Boolean)
         );
         const commitChanged = gitExec(["diff", "--no-renames", "--name-only", "HEAD^1", "HEAD"], cwd)
-          .split("\n").map((s) => norm(s)).filter(Boolean);
+          .split("\n").map((s) => norm(fromRepoPath(s))).filter(Boolean);
         const committedOutOfScopeMergeFiles = commitChanged.filter((f) =>
           !policy.canEdit(f)
           && !policy.canCreate(f)

@@ -1,3 +1,5 @@
+import { AGENT_CONVERSATION_COMMAND, AGENT_CONVERSATION_EVENT_KIND } from "./agent-conversation.js";
+
 export const BRIDGE_PROTOCOL_VERSION = 1;
 export const BRIDGE_HEALTH_PROOF_CONTEXT = `posse-bridge-health-v${BRIDGE_PROTOCOL_VERSION}`;
 export const PROVIDER_USAGE_STREAM_PROTOCOL = "posse.provider_usage_stream.v1";
@@ -56,6 +58,7 @@ export const BRIDGE_COMMANDS = Object.freeze({
   WORK_ITEMS_HISTORY: "work_items.history",
   WORK_ITEMS_STATS: "work_items.stats",
   WORK_ITEMS_TAIL: "work_items.tail",
+  WORK_ITEM_CONVERSATION: AGENT_CONVERSATION_COMMAND,
   QUESTION_ANSWER: "question.answer",
   AGENT_NUDGE: "agent.nudge",
   REPAIR_INSPECT: "repair.inspect",
@@ -92,6 +95,15 @@ export const BRIDGE_EVENT_KINDS = Object.freeze({
   AGENT_ACTIVITY: "agent_activity",
   PROVIDER_USAGE: "provider_usage",
   FEED_EVENT: "feed_event",
+  CONVERSATION_ENTRY: AGENT_CONVERSATION_EVENT_KIND,
+});
+
+// How a command reached the bridge. Loopback HTTP with the local token is
+// Bossy's path; the LAN WebSocket and the relay carry the phone and web app.
+export const BRIDGE_TRANSPORTS = Object.freeze({
+  HTTP: "http",
+  WEBSOCKET: "websocket",
+  RELAY: "relay",
 });
 
 export const BRIDGE_FRAME_TYPES = Object.freeze({

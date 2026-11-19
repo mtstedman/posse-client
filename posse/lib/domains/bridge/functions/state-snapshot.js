@@ -1,6 +1,7 @@
 import { tryHumanGateNameForPayload } from "../../../catalog/human-input.js";
 import { promptFromGatePayload } from "./gate-prompt.js";
 import { isReadyOneshotScopeSelection } from "./gate-readiness.js";
+import { remoteEventMessage } from "./agent-activity-privacy.js";
 import { getEvents, getEventsByWorkItem, getEventsByWorkItemSinceId, getEventsSinceId, getHeadEventId, getHumanGate, getJob, getWorkItem, listJobs, listJobsByWorkItem, listWorkItems } from "../../queue/functions/index.js";
 import { isPushOfferJob, TERMINAL_JOB_STATUSES, TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
@@ -109,7 +110,7 @@ export function projectBridgeEventRecord(row) {
     event_type: eventType,
     actor_type: row.actor_type == null ? null : boundedText(row.actor_type, 100),
     actor_id: row.actor_id == null ? null : boundedText(row.actor_id, 200),
-    message: boundedText(row.message, MAX_SUMMARY_CHARS) || "",
+    message: boundedText(remoteEventMessage(row), MAX_SUMMARY_CHARS) || "",
     created_at: row.created_at == null ? null : String(row.created_at),
   };
 }

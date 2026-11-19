@@ -24,9 +24,13 @@ export function sqliteGateKey(dbPath, scope = "sqlite") {
   return `${scope}:${normalizeSqlitePath(dbPath)}`;
 }
 
-const SQLITE_GATE = new SqliteResourceGate({
-  name: "SQLite protected asset",
-});
+// Built on first use: SqliteResourceGate imports sqliteGateKey from this
+// module, so constructing it at load time fails when the class loads first.
+let sqliteGate = null;
+function gate() {
+  sqliteGate ??= new SqliteResourceGate({ name: "SQLite protected asset" });
+  return sqliteGate;
+}
 
 // IMPORTANT: this gate is per-thread (per JS realm), not cross-process or
 // cross-worker. It serializes writers within this thread only; actual
@@ -34,21 +38,21 @@ const SQLITE_GATE = new SqliteResourceGate({
 // not rely on it for exclusivity against other workers or daemons.
 export function runSqliteWrite(dbPath, fn, options = {}) {
   const { label = "sqlite.write", waitMs = 30000 } = options;
-  return SQLITE_GATE.write(dbPath, fn, { ...options, label, waitMs });
+  return gate().write(dbPath, fn, { ...options, label, waitMs });
 }
 
 export function runSqliteReadNonBlocking(dbPath, fn, { label = "sqlite.read" } = {}) {
-  return SQLITE_GATE.read(dbPath, fn, { label });
+  return gate().read(dbPath, fn, { label });
 }
 
 export function sqliteGateReleaseKey(dbPath) {
-  return SQLITE_GATE.blockingReleaseKey(dbPath);
+  return gate().blockingReleaseKey(dbPath);
 }
 
 export function waitForSqliteRelease(dbPathOrBarrierKey, opts = {}) {
-  return SQLITE_GATE.awaitBarrier(dbPathOrBarrierKey, opts);
+  return gate().awaitBarrier(dbPathOrBarrierKey, opts);
 }
 
 export function sqliteGateSnapshot() {
-  return SQLITE_GATE.snapshot();
+  return gate().snapshot();
 }

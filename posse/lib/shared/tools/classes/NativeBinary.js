@@ -47,7 +47,7 @@ import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { Daemon, ProcessTransport, daemonSupervisor } from "./daemon/index.js";
 import { HeartbeatAuthManager } from "../../native/classes/HeartbeatAuthManager.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
-import { PulseTokenManager } from "../../native/classes/PulseTokenManager.js";
+import { PulseTokenManager, pulseSessionContextEpoch } from "../../native/classes/PulseTokenManager.js";
 import { setResponsiveTimeout } from "../../concurrency/functions/responsive-timeout.js";
 import {
   defaultNativeBinRoot,
@@ -253,6 +253,8 @@ export class NativeBinary {
     this._workerAuthFailures = new Map();
     /** Routes refused only because scope enforcement is not yet proven. */
     this._workerRoutesAwaitingScopeProof = new Set();
+    /** Session context epoch the live worker host was started under. */
+    this._workerSessionEpoch = pulseSessionContextEpoch();
     this._workerPullManaged = false;
     this._nativeAuthHandshake = null;
     this._nativeAuthHandshakePulseManager = null;
@@ -390,6 +392,10 @@ export class NativeBinary {
             if (event.kind === "spawn") {
               this.#clearWorkerAuthState();
               this._workerPullManaged = false;
+              // The new host's boot pull re-derives which routes still await
+              // the scope proof, under the Session context current now.
+              this._workerRoutesAwaitingScopeProof.clear();
+              this._workerSessionEpoch = pulseSessionContextEpoch();
             }
           },
           transportFactory: () => ProcessTransport({
@@ -581,6 +587,15 @@ export class NativeBinary {
   async #ensureWorkerRouteAuth(route, fallbackPulse = null) {
     if (isUnsupportedNativeVersionError(this._workerAuthFailures.get(route))) return false;
     const daemon = this.#daemon();
+    if (this._workerSessionEpoch !== pulseSessionContextEpoch() && daemon.isHostAlive()) {
+      // The host authenticates every request with the grants it was handed,
+      // and the native side enforces only the Session scope those grants
+      // carry: one minted before a Session context change would keep
+      // authorizing work under the old scope (or none) until it expires.
+      // Replace the host; its boot pull mints under the current context.
+      this.#clearWorkerAuthState();
+      try { daemon.retire({}); } catch { /* best effort */ }
+    }
     const live = this._workerAuthState.get(route)?.envelope;
     if (daemon.isHostAlive() && isValidPulseEnvelope(live)) return true;
     const existing = this._workerAuthGates.get(route);
@@ -1461,6 +1476,7 @@ export class NativeBinary {
     this._workerAuthHandoffs.clear();
     this._workerAuthGates.clear();
     this._workerAuthFailures.clear();
+    this._workerRoutesAwaitingScopeProof.clear();
     this._coalescedGitReads.clear();
     this._runtimePulseEnvelopes.clear();
     const daemon = this._daemon;

@@ -248,6 +248,7 @@ export class WorkerExecutionCoordinator {
         job,
         payload: baselinePayload,
         cwd: wtPath,
+        signal: executeAbortController?.signal || null,
         cleanupWorktree: wtPath
           ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
               reason: `test-baseline-side-effects-wi-${job.work_item_id}-job-${job.id}`,

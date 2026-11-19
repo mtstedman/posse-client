@@ -21,19 +21,22 @@ export function nodeToolEnvironment(env = process.env, { posseRoot = undefined, 
   if (platform === "win32") {
     for (const key of Object.keys(result)) if (key !== pathKey && key.toUpperCase() === "PATH") delete result[key];
   }
+  // The managed bin directory holds only the pnpm launchers, so scripts that
+  // invoke pnpm reach the managed copy. Posse's Node directory goes last: it
+  // is a fallback for those launchers, and a project-pinned Node stays first.
   const bin = path.join(managedNodeVerificationRoot(posseRoot), "bin");
   const separator = platform === "win32" ? ";" : ":";
-  result[pathKey] = [...new Set([bin, path.dirname(process.execPath), ...current.split(separator).filter(Boolean)])].join(separator);
-  // pnpm otherwise downloads a project-declared version during `pnpm test`.
-  // Keep verification on the installed Posse toolchain, including nested runs.
-  result.npm_config_manage_package_manager_versions = "false";
+  result[pathKey] = [...new Set([bin, ...current.split(separator).filter(Boolean), path.dirname(process.execPath)])].join(separator);
   return result;
 }
 
 export function nodeToolSpawnSpec(command, args = [], { env = process.env, posseRoot = undefined, ...options } = {}) {
   const childEnv = nodeToolEnvironment(env, { posseRoot, ...options });
   const pnpm = /^pnpm(?:\.cmd|\.exe)?$/i.test(command) && resolveManagedPnpm(posseRoot);
-  const invocation = pnpm ? { command: process.execPath, args: [pnpm, ...args], windowsVerbatimArguments: false }
-    : commandSpawnSpec(command, args, { ...options, env: childEnv });
-  return { ...invocation, env: childEnv };
+  if (!pnpm) return { ...commandSpawnSpec(command, args, { ...options, env: childEnv }), env: childEnv };
+  // pnpm otherwise downloads a project-declared version during `pnpm test`.
+  // The runner reapplies this for nested pnpm runs; npm warns about it, so
+  // other commands do not get it.
+  childEnv.npm_config_manage_package_manager_versions = "false";
+  return { command: process.execPath, args: [pnpm, ...args], windowsVerbatimArguments: false, env: childEnv };
 }

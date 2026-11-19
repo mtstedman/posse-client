@@ -5,7 +5,7 @@
 // whether its work is in the trunk, and purges one (branch, repository,
 // credentials, recovery refs) without ever touching the live session.
 
-import { execFileSync } from "node:child_process";
+import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -111,7 +111,8 @@ export function forgetKeptTree(projectDir, branch) {
 }
 
 function defaultGit(args, cwd) {
-  return String(execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 }) || "").trim();
+  // An operator surface: system Git through the sanctioned direct adapter.
+  return String(adminGitExec(args, cwd, { timeoutMs: 60_000 }) || "").trim();
 }
 
 function tryGit(git, args, cwd) {
@@ -123,17 +124,47 @@ function tryGit(git, args, cwd) {
  * @property {string} branch
  * @property {string|null} tip
  * @property {"active"|"integrated"|"unmerged"} status
- * @property {number} ahead commits not reachable from the trunk
+ * @property {number} ahead commits the trunk lacks: those after the recorded
+ *   promotion of the branch when there is one, else those not reachable from the trunk
  * @property {boolean} keptUp a registered tree whose repository and credentials are kept
  * @property {string|null} repository
  * @property {string|null} keptAt
  * @property {string[]} recoveryRefs
  */
 
+const PROMOTION_REF_PREFIX = "refs/posse/pairing-promotions/";
+const SOURCE_REF_PREFIX = "refs/posse/pairing-sources/";
+
+function isAncestor(git, ancestor, descendant, cwd) {
+  return tryGit(git, ["merge-base", "--is-ancestor", ancestor, descendant], cwd) !== null;
+}
+
+/**
+ * The session heads a close published: for each promotion record, the source
+ * it fetched (`refs/posse/pairing-sources/<id>`) when its candidate
+ * (`refs/posse/pairing-promotions/<id>`) is on the trunk. An abandoned
+ * integration keeps its candidate ref, but that candidate never landed.
+ */
+function promotedSources(git, projectDir, trunkRef, recoveryRefs) {
+  if (!trunkRef) return [];
+  const sources = [];
+  for (const ref of recoveryRefs) {
+    if (!ref.startsWith(PROMOTION_REF_PREFIX)) continue;
+    const candidate = tryGit(git, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], projectDir);
+    if (!candidate || !isAncestor(git, candidate, trunkRef, projectDir)) continue;
+    const source = tryGit(git, ["rev-parse", "--verify", "--quiet",
+      `${SOURCE_REF_PREFIX}${ref.slice(PROMOTION_REF_PREFIX.length)}^{commit}`], projectDir);
+    if (source) sources.push(source);
+  }
+  return sources;
+}
+
 /**
  * Every local `posse/pair-*` branch, with where it stands against the trunk.
- * "integrated" means its tree equals the trunk's or the trunk already contains
- * it; "unmerged" means it holds work the trunk lacks.
+ * "integrated" means a recorded promotion published its head (a close squashes
+ * the work, so the branch shares no history with the trunk), or its tree
+ * equals the trunk's, or the trunk already contains it; "unmerged" means it
+ * holds work the trunk lacks, including commits made after its promotion.
  *
  * @param {string} projectDir
  * @param {{ trunkRef: string, activeBranch?: string|null, git?: (args: string[], cwd: string) => string,
@@ -147,17 +178,29 @@ export function listSessionTrees(projectDir, { trunkRef, activeBranch = null, gi
     .split("\n").map((line) => line.trim()).filter(Boolean);
   const recovery = (tryGit(git, ["for-each-ref", "--format=%(refname)", "refs/posse/pairing-sources", "refs/posse/pairing-promotions"], projectDir) || "")
     .split("\n").map((line) => line.trim()).filter(Boolean);
+  const published = heads.length > 0 ? promotedSources(git, projectDir, trunkRef, recovery) : [];
+  const count = (branch, excluded) => {
+    const text = tryGit(git, ["rev-list", "--count", branch, ...excluded.filter(Boolean).map((ref) => `^${ref}`)], projectDir);
+    // A failed count is not zero commits ahead.
+    return /^\d+$/u.test(String(text ?? "")) ? Number(text) : NaN;
+  };
   return heads.map((branch) => {
     const kept = registry.get(branch) || null;
     const tip = tryGit(git, ["rev-parse", "--verify", `refs/heads/${branch}`], projectDir);
-    const aheadText = trunkRef ? tryGit(git, ["rev-list", "--count", `${trunkRef}..${branch}`], projectDir) : null;
-    const ahead = Number(aheadText);
+    // The promotion record first: a head it published is in the trunk whatever
+    // the git shape; commits after the newest promoted head it extends are not.
+    const promoted = tip !== null && published.some((source) => isAncestor(git, tip, source, projectDir));
+    const extended = tip !== null && !promoted
+      ? published.filter((source) => isAncestor(git, source, tip, projectDir)) : [];
+    const ahead = promoted ? 0
+      : extended.length > 0 ? Math.min(...extended.map((source) => count(branch, [source, trunkRef])))
+        : trunkRef ? count(branch, [trunkRef]) : NaN;
     const identical = trunkRef
       ? tryGit(git, ["diff", "--quiet", trunkRef, branch], projectDir) !== null
       : false;
     /** @type {SessionTree["status"]} */
     const status = branch === activeBranch ? "active"
-      : (identical || ahead === 0) ? "integrated" : "unmerged";
+      : (promoted || identical || ahead === 0) ? "integrated" : "unmerged";
     const ids = [...new Set([kept?.sessionId, kept?.remoteSessionId, ...sessionIdsFor(branch)].filter(Boolean))];
     return {
       branch,
@@ -182,7 +225,7 @@ export function listSessionTrees(projectDir, { trunkRef, activeBranch = null, gi
  * @param {string} branch
  * @param {{ trunkRef: string, activeBranch?: string|null, force?: boolean,
  *   git?: (args: string[], cwd: string) => string, sessionIdsFor?: (branch: string) => string[],
- *   deleteRepository?: (repository: string) => { ok: boolean, message?: string },
+ *   deleteRepository?: (repository: string) => { ok: boolean, absent?: boolean, message?: string },
  *   removeCredentials?: (directory: string) => unknown }} options
  */
 export function purgeSessionTree(projectDir, branch, {
@@ -212,7 +255,7 @@ export function purgeSessionTree(projectDir, branch, {
   const problems = [];
   if (kept?.repository) {
     const outcome = deleteRepository(kept.repository);
-    if (outcome?.ok) removed.push(`GitHub repository ${kept.repository}`);
+    if (outcome?.ok) removed.push(`GitHub repository ${kept.repository}${outcome.absent ? " (already gone)" : ""}`);
     else problems.push(`could not delete ${kept.repository}: ${outcome?.message || "unknown error"} (gh repo delete ${kept.repository} --yes)`);
   }
   if (kept?.credentialDirectory) {

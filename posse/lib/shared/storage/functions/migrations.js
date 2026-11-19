@@ -347,7 +347,15 @@ function copyEventsForAtlasV2HostRepair(db, fromTable, toTable) {
   const targetCols = [];
   const sourceExprs = [];
   for (const col of newCols) {
-    if (!oldCols.has(col)) continue;
+    if (!oldCols.has(col)) {
+      // Rows from before the export claim columns are marked mirrored, as
+      // installExportClaimColumns does when it adds them, not re-exported.
+      if (col === "export_state") {
+        targetCols.push(col);
+        sourceExprs.push("'mirrored'");
+      }
+      continue;
+    }
     const quoted = quoteIdent(col);
     targetCols.push(col);
     if (col === "actor_type") {

@@ -2,6 +2,8 @@ import fs from "fs";
 import path from "path";
 import { contextDir, wiScopeId } from "../../artifacts/functions/index.js";
 import { ensureDetachedReadOnlyWorktreeAsync, removeDetachedReadOnlyWorktreeAsync } from "../../git/functions/worktree.js";
+import { gitExecAsync } from "../../git/functions/utils.js";
+import { normalizeGitPrefix } from "../../git/functions/project-paths.js";
 import { buildDiffNarrativeAsync, formatDiffNarrative } from "../../git/functions/diff-narrator.js";
 import { promptLiteral } from "../../../shared/format/functions/prompt-literals.js";
 import { REPLAN_TRIGGERS } from "../../../catalog/job.js";
@@ -96,12 +98,19 @@ export async function resolveAssessmentReplanCwd(baseProjectDir, job, payload, {
       REPLAN_READONLY_WORKTREE_DIR,
       `job-${job.id}`,
     );
-    const cwd = await ensureDetachedReadOnlyWorktreeAsync(baseProjectDir, {
+    const readonlyWorktree = await ensureDetachedReadOnlyWorktreeAsync(baseProjectDir, {
       targetRef,
       worktreeDir: readonlyDir,
       signal,
     });
-    return { cwd, error: "", readonlyWorktree: cwd };
+    // The checkout is of the whole repository: a project nested in it reads
+    // from its own directory there, while teardown removes the checkout root.
+    const prefix = normalizeGitPrefix(String(await gitExecAsync(["rev-parse", "--show-prefix"], baseProjectDir, { signal, trim: false }) ?? "").replace(/\r?\n$/, ""));
+    const cwd = path.resolve(readonlyWorktree, prefix);
+    if (!fs.existsSync(cwd)) {
+      return { cwd: readonlyWorktree, error: `${prefix} does not exist at ${targetRef}; reading from the repository root`, readonlyWorktree };
+    }
+    return { cwd, error: "", readonlyWorktree };
   } catch (err) {
     return {
       cwd: baseProjectDir,

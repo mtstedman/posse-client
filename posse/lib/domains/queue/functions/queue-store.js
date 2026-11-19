@@ -3,6 +3,7 @@ import { recordUnusedScopeGrants } from "./scope-grant-usage.js";
 import { rankRunnableJobs } from "./unlock-ranking.js";
 import { randomUUID } from "node:crypto";
 import { reviewedTransfers } from "./reviewed-handoff-records.js";
+import { restoreReviewedDonorClaimsForWorkItem } from "./reviewed-handoff-journal.js";
 import { PIPELINE_BOOTSTRAP_JOB_TYPES, parseWorkItemMetadataRecord, missingExecutionReason, isActiveIterativeWorkItemRecord } from "./work-item-execution-contract.js";
 import { refreshHumanGateContract } from "./human-gates.js";
 import { registerAttemptStartHook } from "./attempts.js";
@@ -13,19 +14,19 @@ import { registerAttemptStartHook } from "./attempts.js";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { ATLAS_FRESHNESS_PRELEASE_FENCE_MS } from "../../../catalog/atlas.js";
-import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, MERGE_FAILURE_KINDS, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE, humanGateStateAllowsAnswer, tryHumanGateNameForPayload } from "../../../catalog/human-input.js";
+import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, MERGE_FAILURE_KINDS, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE, humanGateStateAllowsAnswer, isPostCompletionGatePayload, tryHumanGateNameForPayload } from "../../../catalog/human-input.js";
 import { MUTATING_JOB_TYPES, NON_COMPLETION_BLOCKING_JOB_TYPES, ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
-import { parseJobPayload } from "./payload.js";
+import { parseJobPayload, resetJobPayloadForReexecution } from "./payload.js";
 import { beginJobRetryGeneration, completeAttempt, hasImplementationAttempts, isLeaseValid, setAssessmentLifecycle } from "./attempts.js";
 import { ACTIVE_LEASE_STATUSES, ACTIVE_LEASE_STATUSES_SQL, DEADLOCK_TERMINAL_STATUSES_SQL, FAILED_JOB_STATUSES, LEASE_HOLDING_STATUSES, LEASE_HOLDING_STATUSES_SQL, TERMINAL_JOB_STATUSES, TERMINAL_JOB_STATUSES_SQL, TERMINAL_WORK_ITEM_STATUSES, isPushOfferJob, normalizeSkillsColumn, now, runImmediateTransaction } from "./common.js";
 import { flushEventsNow, getEvents, logDurableEvent, logEvent } from "./events.js";
 import { APPLIED_DB_TASKS_KEY, POST_MERGE_DB_HOLD_KEY, appliedDbTaskEntries, hasActivePostMergeDbGate, isDbTaskJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, postMergeDbGateJobSpec, postMergeDbHoldRecord, supersededPostMergeDbMessage, supersededPostMergeDbPayload, supersedingPostMergeDbTask } from "./post-merge-db-tasks.js";
 import { findMergeHoldingGate } from "./merge-holding-gate.js";
-import { activeMergeFailureRecoveryGateId, committedJobIdsForWorkItem, isMergeFailureRecoveryPayload, isMergeVerificationReviewJob, mergeFailureRecoveryGateJobSpec, mergeVerificationReviewGateJobSpec, mergeVerificationReviewGateState, mergeVerificationReviewRequirement } from "./merge-verification-review.js";
+import { activeMergeFailureRecoveryGateId, committedJobIdsForWorkItem, mergeFailureRecoveryGateJobSpec, mergeVerificationReviewGateJobSpec, mergeVerificationReviewGateState, mergeVerificationReviewRequirement } from "./merge-verification-review.js";
 import { latestImplementationCommit, postChangeReceiptsAtCommit } from "./verification-receipts.js";
-import { activeWorkItemDispositionGates, crossWiUpstreamDispositionGateSpec, crossWiUpstreamEpisode, crossWiUpstreamGateEpisodes, discardedPlanContext, dispositionGateChoicesText, failedLeafJobs, failedWorkItemRestorationPlan, hasWorkItemFailureGateForEpisode, isCrossWiUpstreamDispositionGateJob, isWorkItemDispositionGateJob, operatorCanceledHeldDbTasks, recoverableHeldDbTasks, staleCrossWiUpstreams, supersededFailedGateJobs, unaskedStaleCrossWiUpstreams, workItemFailureDispositionGateSpec, workItemFailureIsRecoverable } from "./work-item-dispositions.js";
+import { activeWorkItemDispositionGates, crossWiUpstreamDispositionGateSpec, crossWiUpstreamEpisode, crossWiUpstreamGateEpisodes, discardedPlanContext, dispositionGateChoicesText, failedLeafJobs, failedWorkItemRestorationPlan, hasWorkItemFailureGateForEpisode, isCrossWiUpstreamDispositionGateJob, operatorCanceledHeldDbTasks, recoverableHeldDbTasks, staleCrossWiUpstreams, supersededFailedGateJobs, unaskedStaleCrossWiUpstreams, workItemFailureDispositionGateSpec, workItemFailureIsRecoverable } from "./work-item-dispositions.js";
 import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
 import { getQueueWakeGeneration, notifyQueueStateChanged, waitForQueueStateChangeAfter } from "./wakeups.js";
@@ -238,6 +239,7 @@ export {
 export {
   acquireMergeLock,
   acquireSchedulerLock,
+  FORCE_ACQUIRE_LIVENESS_SEC,
   forceAcquireSchedulerLock,
   getLiveSchedulerBlockMessage,
   getSchedulerLockInfo,
@@ -1708,6 +1710,8 @@ export function forgetDiscardedWorkItemBranch(workItemId, {
   dependencyReason = reason,
 } = {}) {
   releaseWorkItemFileLocks(workItemId, lockReason);
+  // The donors of its reviewed imports own their unmerged edits again (K2).
+  restoreReviewedDonorClaimsForWorkItem(workItemId);
   clearCrossWiMergeDependenciesForWorkItem(workItemId, dependencyReason);
   const dropped = discardCrossWiSyncRecordsForWorkItem(workItemId, reason);
   recordWorkItemBranchReset(workItemId, { reason, branch });
@@ -1932,7 +1936,8 @@ export function requeueWorkItemAfterRejection(id, {
 
     for (const job of retryJobs) {
       const fresh = getJob(job.id) || job;
-      const payload = parseJobPayload(fresh);
+      // A rejected job re-runs its implementation, whatever phase it ended in.
+      const payload = resetJobPayloadForReexecution(parseJobPayload(fresh));
       const instructionKey = fresh.job_type === "fix" && String(payload.fix_instructions || "").trim()
         ? "fix_instructions"
         : "task_spec";
@@ -2120,9 +2125,9 @@ export function countWorkItemJobs(workItemId) {
 /**
  * Recompute work item status from its jobs. Returns the new status (or null if unchanged).
  */
-function isPostCompletionGateJob(job) {
-  return isPushOfferJob(job) || isMergeVerificationReviewJob(job)
-    || (job?.job_type === "human_input" && isMergeFailureRecoveryPayload(parseJobPayload(job)));
+// A gate the work item owns after its jobs are done (POST_COMPLETION_GATE_KINDS).
+export function isPostCompletionGateJob(job) {
+  return job?.job_type === "human_input" && isPostCompletionGatePayload(parseJobPayload(job));
 }
 
 export function refreshWorkItemStatus(workItemId) {
@@ -2155,8 +2160,7 @@ export function refreshWorkItemStatus(workItemId) {
     const jobs = listJobsByWorkItem(workItemId)
       .filter((job) => !isShadowFanoutJob(job))
       .filter((job) => !isPostCompletionGateJob(job))
-      .filter((job) => !isPostMergeHeldDbJob(job))
-      .filter((job) => !isWorkItemDispositionGateJob(job));
+      .filter((job) => !isPostMergeHeldDbJob(job));
     if (jobs.length === 0) return;
     const completionJobs = jobs.filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
     const stateJobs = completionJobs.length > 0 ? completionJobs : jobs;
@@ -2269,7 +2273,6 @@ export function completionBlockersForWorkItem(workItemId) {
     .filter((job) => !isShadowFanoutJob(job))
     .filter((job) => !isPostCompletionGateJob(job))
     .filter((job) => !isPostMergeHeldDbJob(job))
-    .filter((job) => !isWorkItemDispositionGateJob(job))
     .filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
   if (jobs.length === 0) return [];
 

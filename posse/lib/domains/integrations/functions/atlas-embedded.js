@@ -1,3 +1,4 @@
+import { atlasNestedAction } from "../../../shared/tools/functions/atlas-nested-action.js";
 import { ledgerSupportsViewMeta as embeddedLedgerSupportsViewMeta } from "../../atlas/functions/v2/ledger/view-meta-support.js";
 // @ts-check
 //
@@ -37,7 +38,7 @@ import { branchViewPath, ledgerDbPath, worktreeViewPath } from "../../atlas/func
 import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
-import { gitCurrentHashAsync } from "../../git/functions/utils.js";
+import { atlasTreeVersionId } from "./atlas-tree-version.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
 import { getSharedAtlasToolExecutor, invalidateSharedAtlasToolExecutorReadCaches } from "../../atlas/functions/v2/tools/executor.js";
 import {
@@ -130,6 +131,11 @@ export async function invalidateAtlasEmbeddedResourceCache() {
 }
 
 function handleAtlasIndexingSuccess(event) {
+  // Handoff prefetch entries are keyed by HEAD too, so a reindex of
+  // uncommitted edits must void them or the next handoff at the same HEAD is
+  // seeded with pre-edit windows. A work item's prefetch may be scoped to the
+  // repository rather than the work item, so void the whole small cache.
+  ATLAS_PREFETCH_CACHE.clear();
   if (event?.purpose === "wi-live" && event.viewPath) {
     // Shared-read entries are keyed by the repository's ledger asset key
     // (main and every worktree resolve to the same one), never by the
@@ -150,11 +156,14 @@ function handleAtlasIndexingSuccess(event) {
 
 onConductorIndexingSuccess(handleAtlasIndexingSuccess);
 
-function atlasSharedReadKey({ enabled = true, action = null, assetKey = null, versionId = null, payload = null } = {}) {
+function atlasSharedReadKey({ enabled = true, action = null, assetKey = null, versionId = null, payload = null, workItemId = null } = {}) {
   if (!enabled) return null;
   if (!action || !ATLAS_SHARED_READ_ACTIONS.has(action)) return null;
   if (assetKey == null || versionId == null) return null;
-  return `${assetKey}|${versionId}|${action}:${hashArgs(payload)}`;
+  // Worktrees share the ledger asset key and often the HEAD; each work item
+  // still reads its own view.
+  const scope = workItemId == null ? "" : `wi:${workItemId}|`;
+  return `${assetKey}|${versionId}|${scope}${action}:${hashArgs(payload)}`;
 }
 
 function sharedReadCacheSet(key, value) {
@@ -383,6 +392,21 @@ export function __testAtlasSharedReadCacheSeed(key, value) {
   sharedReadCacheSet(key, value);
 }
 
+export function __testAtlasPrefetchCacheSeed(scopeId, action, payload, value, versionId) {
+  assertTestContext("__testAtlasPrefetchCacheSeed");
+  prefetchCacheSet(scopeId, action, payload, value, versionId);
+}
+
+export function __testAtlasPrefetchVersionId(cwd, deps) {
+  assertTestContext("__testAtlasPrefetchVersionId");
+  return prefetchVersionId(cwd, deps);
+}
+
+export function __testAtlasPrefetchCacheGet(scopeId, action, payload, versionId) {
+  assertTestContext("__testAtlasPrefetchCacheGet");
+  return prefetchCacheGet(scopeId, action, payload, versionId);
+}
+
 export function __testHandleAtlasIndexingSuccess(event) {
   assertTestContext("__testHandleAtlasIndexingSuccess");
   handleAtlasIndexingSuccess(event);
@@ -462,23 +486,15 @@ function prefetchScopeId(ctx, repo) {
   return null;
 }
 
-function gitHeadForCacheAsync(cwd) {
-  if (!cwd) return Promise.resolve(null);
-  return gitCurrentHashAsync(cwd, { timeoutMs: 5000 })
-    .then((sha) => String(sha || "").trim() || null)
-    .catch(() => null);
-}
-
-async function prefetchVersionId(cwd, repo = {}) {
-  const head = await gitHeadForCacheAsync(cwd);
-  if (head) return `head:${head}`;
-  if (repo?.repoPath) return `path:${String(repo.repoPath).replace(/\\/g, "/").toLowerCase()}:unknown`;
-  if (repo?.repoId) return `repo:${String(repo.repoId).toLowerCase()}:unknown`;
-  return "unknown";
+// HEAD plus a dirty-tree fingerprint, so an edit made outside the write tools
+// at the same HEAD misses. Null when the tree state cannot be read: the
+// caches keyed by it then serve nothing.
+function prefetchVersionId(cwd, deps = undefined) {
+  return atlasTreeVersionId(cwd, deps);
 }
 
 function prefetchCacheKey(scopeId, action, payload, versionId = "unknown") {
-  if (!scopeId || !action) return null;
+  if (!scopeId || !action || versionId == null) return null;
   return `${scopeId}|${versionId}|${action}:${hashArgs(payload)}`;
 }
 
@@ -709,8 +725,11 @@ function closeEmbeddedAtlasHandle(handle, label, { action = "unknown", origin = 
 }
 
 function gatewayEffectiveAction(action, args = {}) {
+  // Read the nested action the way dispatch does, in every key spelling, so
+  // the gates below classify what will run.
   const target = String(
-    args?.gatewayAction
+    atlasNestedAction(args)
+    || args?.gatewayAction
     || args?.targetAction
     || args?.actionName
     || args?.action
@@ -1486,8 +1505,11 @@ async function executeEmbeddedAtlasV2Tool({
     const semanticWanted = !!wantsSemanticDispatch;
     const callPayload = payload && typeof payload === "object" ? payload : {};
     const dispatchCall = ATLAS_V2_GATEWAY_ACTIONS.has(action)
-      ? { ...callPayload, action, gatewayAction: typeof callPayload.action === "string" ? callPayload.action : callPayload.gatewayAction }
-      : { action, ...callPayload };
+      ? { ...callPayload, action, gatewayAction: atlasNestedAction(callPayload)
+        || (typeof callPayload.action === "string" ? callPayload.action : callPayload.gatewayAction) }
+      // The resolved action goes last: an `action` key in the arguments must
+      // not replace the action the gates above classified.
+      : { ...callPayload, action };
     // Off-loop dispatch: better-sqlite3 is synchronous, so in-process reads
     // block the orchestrator event loop for their full duration (multi-second
     // for graph walks). Eligible plain reads run in the Atlas-Conductor
@@ -1954,9 +1976,12 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
   const obsCtx = getObservationContext() || {};
   const prefetchLike = isAtlasPrefetchOrigin(origin);
   const prefetchScope = prefetchLike ? prefetchScopeId(obsCtx, repo) : null;
-  const prefetchVersion = prefetchLike ? await prefetchVersionId(cwd, repo) : null;
-  const jobVersion = origin === "agent" ? await prefetchVersionId(cwd || repo.repoPath, repo) : null;
-  const jobCacheEnabled = atlasJobCacheEnabled(config);
+  const prefetchVersion = prefetchLike ? await prefetchVersionId(cwd) : null;
+  // One status call per read, and only for an agent read a cache consults.
+  const agentReadCached = atlasJobCacheEnabled(config)
+    || (atlasExecCoalesceEnabled(config) && ATLAS_SHARED_READ_ACTIONS.has(prepared.action));
+  const jobVersion = origin === "agent" && agentReadCached ? await prefetchVersionId(cwd || repo.repoPath) : null;
+  const jobCacheEnabled = atlasJobCacheEnabled(config) && jobVersion != null;
   if (origin === "agent") {
     const cached = atlasCacheGet(obsCtx.job_id ?? null, prepared.action, prepared.payload, { enabled: jobCacheEnabled, versionId: jobVersion });
     if (cached != null) {
@@ -2064,6 +2089,7 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
       assetKey: protectedAssetKey,
       versionId: origin === "agent" ? jobVersion : prefetchVersion,
       payload: prepared.payload,
+      workItemId,
     });
     let output;
     let sharedReadHit = false;

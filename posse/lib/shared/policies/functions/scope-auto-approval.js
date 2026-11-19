@@ -11,7 +11,10 @@
 //    paths anyway; agents still pre-ask via request_scope.
 //  - test_path: additive test collateral for dev/fix jobs. Assessment
 //    policy demands tests while plans chronically under-enumerate test
-//    files; the diff still goes through assessment.
+//    files; the diff still goes through assessment. Only files in a test
+//    directory, or source files named by a test-runner convention, count
+//    (isRoutineTestScopePath): CI, deploy and executable script paths that
+//    merely look like tests still need a human.
 //  - generated_file: lockfiles and generated snapshots that follow
 //    mechanically from an in-scope change.
 //  - project_manifest: package/build manifests and ignore rules for dev/fix
@@ -57,6 +60,18 @@ const TEST_SEGMENT_RE = /(?:^|\/)(?:tests?|__tests__|__snapshots__|specs?|testda
 const TEST_FILENAME_RE = /(?:^|\/)(?:test_[^/]+|conftest\.py|[^/]+(?:\.test|\.spec|_test|_spec|-test|-spec)\.[a-z0-9]+)$/i;
 const SNAPSHOT_RE = /\.snap$/i;
 
+// Routine (human-free) test approval is narrower than test collateral, which
+// materialization and test ownership still use. Outside a test directory only
+// the colocated naming conventions of test runners count (Jest/Vitest/Mocha
+// `.test`/`.spec`, Go `_test`, RSpec `_spec`, pytest conftest.py), and only on
+// source files a runner loads, so `Makefile.spec.in` or `test_release.sh` is
+// not a test. Never routine: CI and deploy directories, whose files run with
+// pipeline or production credentials, and executable scripts, which run
+// directly wherever they sit.
+const COLOCATED_TEST_FILENAME_RE = /(?:^|\/)(?:conftest\.py|[^/]+(?:\.test|\.spec|_test|_spec)\.(?:[cm]?[jt]sx?|py|go|rb|rs|php|java|kts?|scala|cs|fs|swift|dart|exs?|lua|c|cc|cpp|h|hpp))$/i;
+const NON_ROUTINE_TEST_DIRECTORY_RE = /(?:^|\/)(?:\.github|\.gitea|\.forgejo|\.gitlab|\.circleci|\.buildkite|\.azure-pipelines|\.woodpecker|\.?ci|deploy|deploys|deployment|deployments)\//i;
+const EXECUTABLE_SCRIPT_EXTENSION_RE = /\.(?:sh|bash|zsh|ksh|csh|tcsh|fish|command|ps1|psm1|bat|cmd|vbs|exe)$/i;
+
 const TEST_ELIGIBLE_JOB_TYPES = new Set(["dev", "fix"]);
 
 function normalizeScopePath(value) {
@@ -81,6 +96,15 @@ export function isTestCollateralPath(relPath) {
   if (!normalized) return false;
   return TEST_SEGMENT_RE.test(normalized)
     || TEST_FILENAME_RE.test(normalized)
+    || SNAPSHOT_RE.test(normalized);
+}
+
+export function isRoutineTestScopePath(relPath) {
+  const normalized = normalizeScopePath(relPath);
+  if (!normalized) return false;
+  if (NON_ROUTINE_TEST_DIRECTORY_RE.test(normalized) || EXECUTABLE_SCRIPT_EXTENSION_RE.test(normalized)) return false;
+  return isTestDirectoryPath(normalized)
+    || COLOCATED_TEST_FILENAME_RE.test(normalized)
     || SNAPSHOT_RE.test(normalized);
 }
 
@@ -116,7 +140,7 @@ export function classifyAutoApprovableScopeRequest({
 
   if (!TEST_ELIGIBLE_JOB_TYPES.has(String(jobType || "").trim())) return null;
 
-  if (isTestCollateralPath(relPath)) {
+  if (isRoutineTestScopePath(relPath)) {
     return { reason: "test_path" };
   }
   if (isGeneratedScopePath(relPath)) {

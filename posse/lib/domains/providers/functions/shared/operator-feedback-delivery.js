@@ -26,6 +26,7 @@ export function operatorFeedbackDeliveryForJob(jobId, {
     job_id: normalized,
     attempt_id: attemptId,
     agent_call_id: agentCallId,
+    tool_name: toolName || null,
     // Keep the trusted control envelope comfortably below provider result
     // clipping thresholds. Further pending items attach to a later result.
     limit: 8,

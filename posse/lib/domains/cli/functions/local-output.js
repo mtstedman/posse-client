@@ -85,6 +85,10 @@ export function encodeLocalOutput(result, model, format) {
   return Buffer.from(result.content + (result.content.endsWith("\n") ? "" : "\n"));
 }
 
+// link() failures that mean the volume has no hard links: FAT and exFAT
+// (EPERM), some network and FUSE mounts, and Windows volumes without them.
+const NO_HARD_LINK_CODES = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EISDIR"]);
+
 export async function writeLocalOutput(bytes, destination, stdout) {
   if (!destination || destination === "-") {
     await new Promise((resolve, reject) => stdout.write(bytes, error => error ? reject(error) : resolve()));
@@ -95,7 +99,15 @@ export async function writeLocalOutput(bytes, destination, stdout) {
   try {
     await fs.writeFile(temporary, bytes, { flag: "wx", mode: 0o600 });
     // Publish only complete output, without replacing an existing file or symlink.
-    await fs.link(temporary, target);
+    try {
+      await fs.link(temporary, target);
+    } catch (error) {
+      if (!NO_HARD_LINK_CODES.has(error?.code)) throw error;
+      // Without hard links the complete file is renamed into place, once
+      // nothing has taken the name while it was generated.
+      await checkLocalOutput(destination, null, stdout);
+      await fs.rename(temporary, target);
+    }
   } finally { await fs.rm(temporary, { force: true }); }
 }
 

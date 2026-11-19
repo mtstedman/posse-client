@@ -28,6 +28,11 @@ export const LOCAL_IMAGE_GENERATION_TIMEOUT_MS = 2 * IMAGE_GENERATION_TIMEOUT_MS
 // long before the harness kills it.
 export const IMAGE_CONVERTER_TIMEOUT_MS = 30_000;
 
+// The in-process PNG decoder holds about three RGBA-sized buffers at once, so
+// it refuses headers past the largest image the image tools write
+// (resize_image's 8192 px target) before inflating anything.
+export const PNG_DECODE_MAX_SIDE = 8192;
+
 // compose_sprite_sheet: the artificer packs scoped images into one PNG atlas
 // plus a JSON frame map. Inputs are bounded before any decode: per-file bytes
 // and header dimensions, and the atlas size before its pixel buffer is

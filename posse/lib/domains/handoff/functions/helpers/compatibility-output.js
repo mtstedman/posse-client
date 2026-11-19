@@ -21,9 +21,11 @@ function isGroundedCompatibilityEvidence(evidence) {
 
 function evidenceRefs(report) {
   const lanes = { proof: [], support: [], decoy: [] };
+  // A ref can hold several files, so a ranged selector keeps its source path.
   const selector = (item) => ({
     ref: item.ref,
     ...(item.lines && item.selector !== item.ref ? {
+      ...(item.path ? { path: item.path } : {}),
       lines: {
         start: item.lines.start,
         count: item.lines.end - item.lines.start + 1,
@@ -46,7 +48,7 @@ function evidenceRefs(report) {
   for (const lane of Object.keys(lanes)) {
     const seen = new Set();
     lanes[lane] = lanes[lane].filter((entry) => {
-      const key = JSON.stringify([entry.ref, entry.lines || null]);
+      const key = JSON.stringify([entry.ref, entry.path || null, entry.lines || null]);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;

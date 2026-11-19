@@ -41,10 +41,35 @@ export function nativeProviderNoticeText(err) {
   ].filter(Boolean).join("\n");
 }
 
-/** The text provider-error classifiers read: the message, plus a native CLI notice. */
+// A socket or process errno (ECONNRESET, EAI_AGAIN, ERR_STREAM_PREMATURE_CLOSE,
+// UND_ERR_SOCKET) comes from the transport under a provider call, not from Posse.
+const SYSTEM_ERROR_CODE_RE = /^(?:E[A-Z0-9]+|EAI_[A-Z]+|ERR_[A-Z0-9_]+|UND_ERR_[A-Z0-9_]+)$/;
+
+/**
+ * True for an error Posse raised itself: it carries a Posse `code`
+ * (TERMINAL_PROTOCOL_ERROR, GIT_*, AGENT_HANDOFF_*, tool failures). Its
+ * message is Posse's own text and can quote agent-chosen paths and evidence
+ * ("src/middleware/rateLimiter.js", "server.js:429-812"), so it is never read
+ * as a provider notice. Provider-side failures are the native dispatch's
+ * ProviderDispatchError (fixed messages; the provider's notice rides beside
+ * them), an adapter failure marked `providerFailure` or COPILOT_*, and a
+ * transport errno. Uncoded errors keep the legacy message patterns.
+ */
+export function isPosseRaisedError(err) {
+  const code = err?.code;
+  if (typeof code !== "string" || code === "") return false;
+  if (err?.name === "ProviderDispatchError" || err?.providerFailure === true) return false;
+  return !SYSTEM_ERROR_CODE_RE.test(code) && !code.startsWith("COPILOT_");
+}
+
+/**
+ * The text provider-error classifiers read: the message, unless Posse raised
+ * the error, plus a native CLI notice.
+ */
 export function providerErrorClassificationText(err) {
-  const message = String(err?.message || err || "");
   const notice = nativeProviderNoticeText(err);
+  if (isPosseRaisedError(err)) return notice;
+  const message = String(err?.message || err || "");
   return notice ? `${message}\n${notice}` : message;
 }
 
@@ -115,7 +140,7 @@ function isUsageQuotaText(msg) {
 
 function hasRateLimitTextSignal(msg, status = null) {
   if (status === 429) return true;
-  return /rate.?limit|429|too many requests/i.test(msg) || isUsageQuotaText(msg);
+  return /rate.?limit|\b429\b|too many requests/i.test(msg) || isUsageQuotaText(msg);
 }
 
 export function retryAfterHeader(err) {
@@ -232,7 +257,7 @@ export function classifyProviderError(err, {
     };
   }
 
-  if (status === 429 || /rate.?limit|429|too many requests/i.test(msg)) {
+  if (status === 429 || /rate.?limit|\b429\b|too many requests/i.test(msg)) {
     return { backoffSec: rateLimitBackoffSec, isRateLimit: true, source: "rate_limit" };
   }
 

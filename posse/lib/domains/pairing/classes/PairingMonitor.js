@@ -14,6 +14,7 @@ import {
   getPairingState,
   pairingProcessShouldStop,
   readoptPairingProcess,
+  sessionInstanceId,
   touchPairingState,
   updatePairingEnrollment,
 } from "../functions/state.js";
@@ -28,7 +29,6 @@ import { formatSessionLanding, sessionPrompt } from "../functions/session-landin
 import { sessionPanelMode } from "../functions/session-panel.js";
 import { formatSessionRosterLines, sessionRosterPanelView } from "../functions/session-roster.js";
 import { readSessionRoster } from "../functions/session-roster-source.js";
-import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { newPendingSessionJobLines } from "../functions/pending-session-jobs.js";
 import { collectSessionTrees, describeTree, purgeTrees } from "../functions/session-trees-command.js";
 import { createSessionJobRouter } from "../../queue/classes/SessionJobRouter.js";
@@ -393,9 +393,9 @@ export class PairingMonitor {
       try {
         await sessionJobRouter.poll();
         const lines = newPendingSessionJobLines({
-          // The identity the router imported under, which is not always the
-          // session record's (a phone enrollment can replace the bridge identity).
-          instanceId: ensureBridgeInstanceId(projectDir),
+          // The identity the router imported under: the session record's,
+          // which a phone enrollment's new bridge identity does not replace.
+          instanceId: sessionInstanceId(projectDir),
           announced: announcedPendingJobs,
           peers: readPairingPeerSnapshot()?.peers || [],
         });

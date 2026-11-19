@@ -49,7 +49,8 @@ import "../functions/helpers/insights.js";
 import "../functions/helpers/block-reason.js";
 import { isLongProviderPause } from "../functions/helpers/provider-quota-pause.js";
 import { repairWebAssetCreateScope as repairWebAssetCreateScopeFromModule } from "../../git/functions/commit-scope.js";
-import { gcWorktreesAsync as gcWorktreesAsyncFromModule, preserveDirtyWorktreeSnapshot as preserveDirtyWorktreeSnapshotFromModule, snapshotAndResetDirtyWorktree as snapshotAndResetDirtyWorktreeFromModule, snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule, worktreeRoot as worktreeRootFromModule } from "../../git/functions/worktree.js";
+import { gcWorktreesAsync as gcWorktreesAsyncFromModule, preserveDirtyWorktreeSnapshot as preserveDirtyWorktreeSnapshotFromModule, worktreeRoot as worktreeRootFromModule } from "../../git/functions/worktree.js";
+import { snapshotAndResetSharedWorktree as snapshotAndResetSharedWorktreeFromModule, snapshotAndResetSharedWorktreeAsync as snapshotAndResetSharedWorktreeAsyncFromModule } from "../functions/helpers/shared-worktree-reset.js";
 import { gitExecAsync, gitStash } from "../../git/functions/utils.js";
 import { applyStallStash as applyStallStashFromModule, applyStallStashAsync as applyStallStashAsyncFromModule, detectDrift as detectDriftFromModule } from "../functions/helpers/stall-resume.js";
 import { retryOrFail as retryOrFailFromModule } from "../functions/helpers/dead-letter.js";
@@ -801,14 +802,22 @@ export class Worker {
     return jobIds.length;
   }
 
+  // One target per worktree, carrying every job of this worker in it: the
+  // sweep resets their dirt together and keeps only other jobs' work.
   _activeDirtyWorktreeSweepTargets() {
     const unique = new Map();
     for (const [jobId, ctx] of this._activeWorktrees.entries()) {
       if (!ctx?.wtPath) continue;
       const key = String(ctx.wtPath);
-      if (!unique.has(key)) unique.set(key, { ...ctx, jobId });
+      if (!unique.has(key)) unique.set(key, { ...ctx, jobId, jobIds: [] });
+      unique.get(key).jobIds.push(jobId);
     }
     return [...unique.values()];
+  }
+
+  // The swept job's row, for the shared reset's sibling checks.
+  _sweepTargetJob(ctx) {
+    return getJob(ctx.jobId) || { id: ctx.jobId, work_item_id: ctx.workItemId ?? null };
   }
 
   async _readActiveWorktreeSentinelAtRootAsync(wtPath, sentinelPath = null) {
@@ -861,10 +870,10 @@ export class Worker {
         // Best effort check only.
       }
       try {
-        const snapshotDir = snapshotAndResetDirtyWorktreeFromModule(ctx.wtPath, this.projectDir, {
+        const { snapshotDir } = snapshotAndResetSharedWorktreeFromModule(this._sweepTargetJob(ctx), ctx.wtPath, this.projectDir, {
           reason: `${reason}-job-${ctx.jobId}`,
-          branchName: ctx.branchName || null,
-          wiId: ctx.workItemId ?? null,
+          label: "shutdown sweep",
+          selfJobIds: ctx.jobIds,
           onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", operationErrors = [] }) => {
             resetIncomplete++;
             try {
@@ -950,10 +959,10 @@ export class Worker {
         // Best effort check only.
       }
       try {
-        const snapshotDir = await snapshotAndResetDirtyWorktreeAsyncFromModule(ctx.wtPath, this.projectDir, {
+        const { snapshotDir } = await snapshotAndResetSharedWorktreeAsyncFromModule(this._sweepTargetJob(ctx), ctx.wtPath, this.projectDir, {
           reason: `${reason}-job-${ctx.jobId}`,
-          branchName: ctx.branchName || null,
-          wiId: ctx.workItemId ?? null,
+          label: "shutdown sweep",
+          selfJobIds: ctx.jobIds,
           onResetIncomplete: ({ remainingPaths = [], postResetPorcelain = "", operationErrors = [] }) => {
             resetIncomplete++;
             try {
@@ -1494,7 +1503,8 @@ export class Worker {
         let paths = [];
         if (job._worktreePath) {
           try {
-            paths = (await gitExecAsync(["show", "--name-only", "--pretty=format:", commitHash], job._worktreePath))
+            // Relative to the job's project directory, the Atlas path space.
+            paths = (await gitExecAsync(["show", "--relative", "--name-only", "--pretty=format:", commitHash], job._worktreePath))
               .split("\n")
               .map((line) => String(line || "").replace(/\\/g, "/").trim())
               .filter(Boolean);

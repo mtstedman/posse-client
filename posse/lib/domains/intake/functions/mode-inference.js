@@ -1,4 +1,4 @@
-import { hasExplicitRepoWorkIntent, hasRepoMutationIntent } from "./implementation-intent.js";
+import { hasCodeTaskIntent, hasExplicitRepoWorkIntent, hasRepoMutationIntent } from "./implementation-intent.js";
 import { hasFunctionalFailureIntent } from "./request-semantics.js";
 
 const IMAGE_MODE_ACTION_RE = /\b(generate|create|make|draw|design)\b/i;
@@ -32,6 +32,10 @@ export function inferWiMode(text) {
   // request in build mode.
   const repoMutationIntent = hasRepoMutationIntent(lower, { includeCompletion: true });
   if (repoMutationIntent || hasExplicitRepoWorkIntent(lower)) return null;
+  // A named source file or a code noun as the verb's object ("write unit
+  // tests for the report generator") is repo work; when it and a report
+  // signal both appear, the repo task wins and the planner may still report.
+  if (hasCodeTaskIntent(lower)) return null;
   // Operational failure reports ("generate report doesn't work") are build
   // work, not report requests. Questions remain neutral here so intake hints
   // can retain their read-only contract.

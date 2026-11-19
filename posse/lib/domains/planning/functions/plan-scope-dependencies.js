@@ -5,7 +5,7 @@ import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
 
 export function namedTaskPaths(task = {}) {
   // Exact path tokens only; no basename search, globs, or inferred directories.
-  return [...new Set([...String(task.task_spec || "").matchAll(/(?:^|[\s`"'(\[{:])((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+)/g)].map((match) => match[1]))];
+  return [...new Set([...String(task.task_spec || "").matchAll(/(?:^|[\s`"'(\[{:])((?:[\p{L}\p{M}\p{N}_.-]+\/)*[\p{L}\p{M}\p{N}_.-]+\.[\p{L}\p{M}\p{N}_-]+)/gu)].map((match) => match[1]))];
 }
 
 // Only a code task edits the files its spec names. A report, content or image
@@ -32,8 +32,11 @@ export function plannerDependencyKind(task = {}, upstream = {}) {
   // proven independent by comparing files. Preserve its ordering contract.
   if (![task, upstream].every((entry) => ["dev", "fix", undefined].includes(entry.job_type) && entry.task_mode !== "db")) return "hard";
   const downstream = new Set([...(task.files_to_modify || []), ...(task.files_to_create || []), ...(task.files_to_delete || [])]);
-  const upstreamFiles = [...(upstream.files_to_modify || []), ...(upstream.files_to_create || []), ...(upstream.files_to_delete || [])];
-  if (!downstream.size || !upstreamFiles.length || task.create_roots?.length || upstream.create_roots?.length) return "hard";
+  const ownUpstreamFiles = [...(upstream.files_to_modify || []), ...(upstream.files_to_create || []), ...(upstream.files_to_delete || [])];
+  if (!downstream.size || !ownUpstreamFiles.length || task.create_roots?.length || upstream.create_roots?.length) return "hard";
+  // A file-kind split's last piece also stands for the images its
+  // prerequisite pieces generate and promote.
+  const upstreamFiles = [...ownUpstreamFiles, ...(upstream._split_image_files || [])];
   if (upstreamFiles.some((file) => downstream.has(file))) return "hard";
   // A spec that names an upstream file verbatim depends on that file's final
   // shape whether the upstream creates, modifies or deletes it.

@@ -107,6 +107,14 @@ export const ASSESSMENT_LIFECYCLE = Object.freeze({
   WAIVED: "assessment_waived",
 });
 export const ASSESSMENT_LIFECYCLE_STATES = Object.freeze(Object.values(ASSESSMENT_LIFECYCLE));
+// The implementation finished and committed; only its assessment failed (or
+// could not complete). An operator pass of such a job is a review decision,
+// not a claim that unexecuted work succeeded.
+export const ASSESSMENT_ONLY_FAILURE_STATES = Object.freeze([
+  ASSESSMENT_LIFECYCLE.FAILED,
+  ASSESSMENT_LIFECYCLE.NEEDS_HUMAN,
+  ASSESSMENT_LIFECYCLE.UNAVAILABLE,
+]);
 export const ASSESSMENT_LIFECYCLE_STATE_LIST_SQL = sqlList(ASSESSMENT_LIFECYCLE_STATES);
 
 export const JOB_ASSESSOR_CONFIDENCE = Object.freeze(["low", "medium", "high"]);
@@ -301,3 +309,12 @@ export const REPOSITORY_PREPARATION_JOB_TYPES = readonlySet(["waiting_lane_prepa
 export function jobTypeIsNonCompletionBlocking(jobType) {
   return NON_COMPLETION_BLOCKING_JOB_TYPES.has(jobType);
 }
+
+// Agent-tool allowances a job spends across all of its attempts. The counters
+// live under this private payload key, so a retried attempt (a new agent call)
+// or a respawned tool gateway continues the job's spend.
+export const JOB_TOOL_USAGE_PAYLOAD_KEY = "_tool_usage";
+export const JOB_TOOL_USAGE_COUNTERS = Object.freeze({
+  IMAGE_GENERATION_CALLS: "generate_image_calls",
+  DOWNLOAD_BYTES: "download_file_bytes",
+});

@@ -1,6 +1,7 @@
 import { needsArtifactsSchemaRepair, rebuildArtifactsTable } from "./migrations.js";
 import { ARTIFACT_TYPE_LIST_SQL } from "../../../catalog/artifact.js";
 import { withForeignKeysDisabled, agentCallsCreateSql, agentInteractionsCreateSql, agentInteractionApplicationsCreateSql } from "./table-definitions.js";
+import { addMissingColumns } from "./table-copy.js";
 
 export function repairLegacyReferences(_db) {
   // ── Migration: project_context snapshot table ─────────────────────────────
@@ -137,6 +138,7 @@ export function repairLegacyReferences(_db) {
           UNIQUE (job_id, attempt_number)
         )
       `);
+      addMissingColumns(_db, "job_attempts", "_job_attempts_new");
       const oldCols = _db.pragma(`table_info(job_attempts)`).map(c => c.name);
       const newCols = _db.pragma(`table_info(_job_attempts_new)`).map(c => c.name);
       const common = oldCols.filter(c => newCols.includes(c)).join(", ");
@@ -186,6 +188,7 @@ export function repairLegacyReferences(_db) {
           UNIQUE (job_id, attempt_number)
         )
       `);
+      addMissingColumns(_db, "job_attempts", "_job_attempts_new2");
       const oldCols = _db.pragma(`table_info(job_attempts)`).map(c => c.name);
       const newCols = _db.pragma(`table_info(_job_attempts_new2)`).map(c => c.name);
       const common = oldCols.filter(c => newCols.includes(c)).join(", ");
@@ -224,6 +227,7 @@ export function repairLegacyReferences(_db) {
           FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL
         )
       `);
+      addMissingColumns(_db, "events", "_events_new");
       const oldCols = _db.pragma("table_info(events)").map(c => c.name);
       const newCols = _db.pragma("table_info(_events_new)").map(c => c.name);
       const common = oldCols.filter(c => newCols.includes(c)).join(", ");
@@ -253,6 +257,7 @@ export function repairLegacyReferences(_db) {
         const tmpName = `_${name}_fkfix`;
         const tmpCreate = createSql.replace(name, tmpName);
         _db.exec(tmpCreate);
+        addMissingColumns(_db, name, tmpName);
         const oldCols = _db.pragma(`table_info(${name})`).map(c => c.name);
         const newCols = _db.pragma(`table_info(${tmpName})`).map(c => c.name);
         const common = oldCols.filter(c => newCols.includes(c)).join(", ");

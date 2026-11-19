@@ -175,14 +175,17 @@ function feedbackToolPayload(row) {
   };
 }
 
-function retrievedMetadataJson(row, retrievedAt) {
+function retrievedMetadataJson(row, retrievedAt, toolName = null) {
   const metadata = metadataObject(row.metadata_json);
   const lifecycle = metadata.nudge_lifecycle || {};
+  const deliveredWithTool = normalizeText(toolName).slice(0, 80) || null;
   metadata.nudge_lifecycle = {
     ...lifecycle,
     retrieved_at: lifecycle.retrieved_at || retrievedAt,
     last_retrieved_at: retrievedAt,
     delivery_count: Math.max(0, Number(lifecycle.delivery_count) || 0) + 1,
+    // The first tool result that carried the item, for the operator receipt.
+    ...(deliveredWithTool && !lifecycle.delivered_with_tool ? { delivered_with_tool: deliveredWithTool } : {}),
   };
   return JSON.stringify(metadata);
 }
@@ -305,7 +308,7 @@ function supersedePriorActiveNudges({ jobId, exceptId, agentCallId = null } = {}
   const includeNullScope = scopedCallId == null || scopedIsTopLevel;
   const exactOnly = scopedCallId != null && !scopedIsTopLevel;
   const priors = db.prepare(`
-    SELECT id, work_item_id, job_id
+    SELECT id, work_item_id, job_id, metadata_json
     FROM agent_interactions
     WHERE job_id = ?
       AND id != ?
@@ -328,11 +331,19 @@ function supersedePriorActiveNudges({ jobId, exceptId, agentCallId = null } = {}
   const nowIso = now();
   const update = db.prepare(`
     UPDATE agent_interactions
-    SET status = 'superseded', updated_at = ?
+    SET status = 'superseded', updated_at = ?, metadata_json = ?
     WHERE id = ?
   `);
   for (const prior of priors) {
-    update.run(nowIso, prior.id);
+    // The replaced message's receipt names its replacement, whichever
+    // surface sent it (Bossy's explicit replace already records the same).
+    const metadata = metadataObject(prior.metadata_json);
+    metadata.nudge_lifecycle = {
+      ...(metadata.nudge_lifecycle || {}),
+      superseded_by: metadata.nudge_lifecycle?.superseded_by || keepId,
+      superseded_at: metadata.nudge_lifecycle?.superseded_at || nowIso,
+    };
+    update.run(nowIso, JSON.stringify(metadata), prior.id);
     logEvent({
       work_item_id: prior.work_item_id,
       job_id: prior.job_id,
@@ -569,6 +580,7 @@ export function applyActiveAgentInteractionsForAttempt({
   agent_call_id = null,
   limit = 20,
   first_delivery_only = false,
+  tool_name = null,
 } = {}) {
   const jobId = normalizePositiveInt(job_id);
   if (!jobId) return [];
@@ -641,7 +653,7 @@ export function applyActiveAgentInteractionsForAttempt({
       // the internal recovery getter can still re-read an unacked item.
       const info = insert.run(row.id, row.work_item_id, row.job_id, attemptId, agentCallId, nowIso);
       update.run(nowIso, nowIso, nowIso, row.id);
-      updateMetadata.run(retrievedMetadataJson(row, nowIso), row.id);
+      updateMetadata.run(retrievedMetadataJson(row, nowIso, tool_name), row.id);
       rows.push({ row, firstDelivery: info.changes > 0 });
     }
     return rows;
@@ -830,13 +842,14 @@ export function getOperatorFeedbackForJob({
  * recovery getter, this returns each pending item at most once per attempt so
  * parallel/batched tool results do not repeat the same operator message.
  * @param {{job_id?: number|string, attempt_id?: number|null,
- * agent_call_id?: number|null, limit?: number}} [options]
+ * agent_call_id?: number|null, limit?: number, tool_name?: string|null}} [options]
  */
 export function takeOperatorFeedbackDeliveryForToolResult({
   job_id,
   attempt_id = null,
   agent_call_id = null,
   limit = 20,
+  tool_name = null,
 } = {}) {
   const jobId = normalizePositiveInt(job_id);
   if (!jobId) return null;
@@ -847,6 +860,7 @@ export function takeOperatorFeedbackDeliveryForToolResult({
     agent_call_id,
     limit,
     first_delivery_only: true,
+    tool_name,
   }).map(feedbackToolPayload);
   if (feedback.length === 0) return null;
   return {

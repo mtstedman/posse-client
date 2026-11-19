@@ -38,6 +38,7 @@ import { getDefaultTierModel } from "../../providers/functions/model-catalog.js"
 import { markProviderErrorObserved, providerErrorSource } from "../../providers/functions/shared/api-resilience.js";
 import { resolveEffectiveTierModel } from "../../providers/functions/model-catalog-validate.js";
 import { C } from "../../../shared/format/functions/colors.js";
+import { agentCommentaryNoteObservation } from "../../conversation/functions/commentary-notes.js";
 import { beginToolInvocation, filterProviderToolUseReplay, finishToolInvocation, getObservationContext, isWebToolName, reconcileProviderToolUseReplay, recordObservation, recordProviderToolBatchObservations, recordToolUseObservations, runWithObservationContext } from "../../observability/functions/observations.js";
 import { recordPrompt } from "../../../shared/telemetry/functions/logging/prompt-log.js";
 import { recordOutput } from "../../../shared/telemetry/functions/logging/output-log.js";
@@ -1727,6 +1728,14 @@ export class TrackedProviderClient {
             provider: providerName,
             model: modelName,
           });
+          const note = agentCommentaryNoteObservation({
+            work_item_id,
+            job_id,
+            attempt_id: observationContext?.attempt_id ?? null,
+            agent_call_id: agentCallId,
+            text: commentary.text,
+          });
+          if (note) recordObservation(note);
         } catch {
           // Commentary is observational; persistence failure must not fail work.
         }
@@ -2665,7 +2674,9 @@ export class TrackedProviderClient {
       const recycleSession = recycleDecision?.session || null;
       const recycleLaneId = recycleDecision?.lane?.id || recycleSession?.lane_id || null;
       const mcpAttachMissingProof = err.mcpAttachMissingProof || stats.mcpAttachMissingProof;
-      this.worker._stopSessionRecycleLeaseRenewal?.(job_id);
+      // Renewal is keyed by job; only the call holding the session owns it. A
+      // failed child call of the same job must not lapse the parent's lease.
+      if (recycleSession?.id) this.worker._stopSessionRecycleLeaseRenewal?.(job_id);
       if (recycleSession?.id || (mcpAttachMissingProof && recycleLaneId)) {
         if (err.sessionExpired || stats.sessionExpired || mcpAttachMissingProof) {
           const recycleInvalidationReason = (err.mcpAttachMissingProof || stats.mcpAttachMissingProof)

@@ -49,16 +49,16 @@ CREATE TABLE IF NOT EXISTS work_items (
   source TEXT,
   requested_by TEXT,
   mode TEXT NOT NULL DEFAULT 'build' CHECK (mode IN ('build','image','report')),
-  governance_tier TEXT NOT NULL DEFAULT 'mvp' CHECK (governance_tier IN ('prototype','mvp','production')),
+  governance_tier TEXT NOT NULL DEFAULT 'mvp' CHECK (governance_tier IN ('prototype', 'mvp', 'production')),
   metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
   session_recycle TEXT CHECK (session_recycle IN ('on','off') OR session_recycle IS NULL),
   research_skipped INTEGER NOT NULL DEFAULT 0,
   research_skip_reason TEXT,
   branch_name TEXT,
   merge_base_hash TEXT,
-  merge_state TEXT CHECK (merge_state IN ('pending_review','merge_authorized','merged','merge_failed') OR merge_state IS NULL),
+  merge_state TEXT CHECK (merge_state IN ('pending_review', 'merge_authorized', 'merged', 'merge_failed') OR merge_state IS NULL),
   plan_approval_state TEXT NOT NULL DEFAULT 'not_required' CHECK (
-    plan_approval_state IN ('not_required','pending','approved','rejected')
+    plan_approval_state IN ('not_required', 'pending', 'approved', 'rejected')
   ),
   plan_rejection_feedback TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -454,6 +454,7 @@ CREATE TABLE IF NOT EXISTS job_attempts (
   notes TEXT,
   metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
   commit_hash TEXT,
+  commit_base_hash TEXT,
   session_id INTEGER,
   session_lease_token TEXT,
   session_hop_count INTEGER,
@@ -529,6 +530,12 @@ CREATE TABLE IF NOT EXISTS events (
   event_json TEXT CHECK (event_json IS NULL OR json_valid(event_json)),
 
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+
+  -- Telemetry export claim (lib/shared/telemetry/functions/db-tail.js).
+  export_state TEXT NOT NULL DEFAULT 'pending',
+  export_claim_token TEXT,
+  export_claimed_at TEXT,
+  export_run_id TEXT,
 
   FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
   FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
@@ -727,6 +734,7 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   cache_creation_input_tokens INTEGER,
 
   max_turns_configured INTEGER,
+  turn_limit_mode TEXT,
   turns_used INTEGER,
   max_output_tokens_configured INTEGER,
   output_truncated INTEGER NOT NULL DEFAULT 0 CHECK (output_truncated IN (0,1)),
@@ -749,10 +757,12 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   cost_estimate_usd REAL,
   provider_usage_status TEXT,
   billing_precision TEXT,
+  pricing_basis TEXT,
   exact_billable_input_tokens REAL,
   long_context_tier_input_tokens INTEGER,
   provider_request_duration_ms INTEGER,
   usage_segment_count INTEGER,
+  tool_call_count INTEGER,
   originator_instance_id TEXT,
   executor_instance_id TEXT,
   reasoning_effort TEXT DEFAULT 'medium',
@@ -1453,3 +1463,35 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
   reconciliation_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_work_item ON budget_reservations(work_item_id, state);
+
+-- Durable snapshot of a job's closed conversation tool groups
+-- (posse.agent_conversation.v1). Job closeout writes them before the
+-- job_observations tail prune reclaims the job's rows. Additive and
+-- unversioned (installed on every open by agent-tool-groups-schema.js) so
+-- mixed-version fleet readers keep their schema gate.
+CREATE TABLE IF NOT EXISTS agent_tool_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_item_id INTEGER REFERENCES work_items(id) ON DELETE CASCADE,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  attempt_id INTEGER,
+  agent_call_id INTEGER,
+  parent_agent_call_id INTEGER,
+  partition_key TEXT NOT NULL,
+  group_seq INTEGER NOT NULL CHECK (group_seq >= 0),
+  closed_by TEXT NOT NULL CHECK (closed_by IN ('agent_message','gate','call_end','job_end')),
+  closing_entry_id TEXT,
+  closed_at TEXT NOT NULL,
+  first_observation_id INTEGER,
+  last_observation_id INTEGER,
+  first_at TEXT,
+  last_at TEXT,
+  call_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  rejected_count INTEGER NOT NULL DEFAULT 0,
+  digest_json TEXT NOT NULL CHECK (json_valid(digest_json)),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE (job_id, partition_key, group_seq)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_tool_groups_work_item
+  ON agent_tool_groups(work_item_id, closed_at);

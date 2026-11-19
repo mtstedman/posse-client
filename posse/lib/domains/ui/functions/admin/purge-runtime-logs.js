@@ -8,6 +8,7 @@ import { closeOutputLog } from "../../../../shared/telemetry/functions/logging/o
 import { closePromptLog } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
 import { closeObservationLog } from "../../../observability/functions/observations.js";
 import { TERMINAL_JOB_STATUSES_SQL, TERMINAL_WORK_ITEM_STATUSES_SQL } from "../../../queue/functions/common.js";
+import { CROSS_WI_MERGE_DEPENDENCIES_KEY, crossWiMergeDependencySourceIdSql } from "../../../queue/functions/cross-wi-deps.js";
 import { flushEventsNow } from "../../../queue/functions/events.js";
 import { getLiveSchedulerBlockMessage } from "../../../queue/functions/locks.js";
 import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
@@ -16,11 +17,24 @@ import { getRuntimeLogDir, getRuntimeRoot } from "../../../runtime/functions/pat
 // History is work nothing can still act on. A terminal status alone is not
 // enough: a complete work item keeps its branch until it merges, and a failed
 // one can hold an open recovery gate. Deleting either drops the row that
-// review, merge and recovery need.
+// review, merge and recovery need. So does deleting an upstream (merged or
+// not) that a work item still to merge depends on through a cross-WI merge
+// dependency: its merge reads the upstream's row, and a missing upstream
+// defers it until the operator rebuilds or abandons it.
+// The dependency subquery is uncorrelated: it runs once, not per candidate.
 const PURGEABLE_WORK_ITEM_IDS_SQL = `
   SELECT p.id
   FROM work_items p
   WHERE p.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+    AND p.id NOT IN (
+      SELECT CAST(CASE WHEN dep.type = 'object' THEN ${crossWiMergeDependencySourceIdSql("dep.value")} END AS INTEGER)
+      FROM work_items d,
+        json_each(CASE WHEN json_valid(d.metadata_json) THEN d.metadata_json END, '$.${CROSS_WI_MERGE_DEPENDENCIES_KEY}') dep
+      WHERE d.status != 'canceled'
+        AND COALESCE(d.merge_state, '') != 'merged'
+        AND CAST(CASE WHEN dep.type = 'object' THEN ${crossWiMergeDependencySourceIdSql("dep.value")} END AS INTEGER) IS NOT NULL
+        AND CAST(CASE WHEN dep.type = 'object' THEN ${crossWiMergeDependencySourceIdSql("dep.value")} END AS INTEGER) != d.id
+    )
     AND (
       p.status = 'canceled'
       OR (

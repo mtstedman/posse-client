@@ -102,6 +102,22 @@ export const MERGE_REVIEW_REFRESH_AUDIT_LIMIT = 20;
 // decide when a work item needs operator review (merge-verification-review.js).
 export const BASELINE_TEST_DEBT_PAYLOAD_KEY = "_baseline_test_debt";
 
+// Job payload key holding the deterministic verification state of the job's
+// committed result, recorded when the assessment lifecycle enters an
+// assessment-only failure state (queue/functions/deterministic-verification.js).
+// The failed work item's "accept" guard reads it; it is never re-derived from
+// job_observations, which are pruned once the job is terminal.
+export const DETERMINISTIC_VERIFICATION_PAYLOAD_KEY = "_deterministic_verification";
+export const DETERMINISTIC_VERIFICATION_STATES = Object.freeze({
+  PASSED: "passed",
+  FAILED: "failed",
+  // Recorded: no deterministic result was available for the committed attempt.
+  UNAVAILABLE: "unavailable",
+  // Nothing recorded for the latest committed attempt (a job that failed
+  // before the state was recorded, or a newer attempt since). Fails closed.
+  UNKNOWN: "unknown",
+});
+
 // Deterministic test-execution receipts: `log` artifacts with this media type
 // whose content carries this kind. Written by
 // worker/functions/helpers/test-execution-receipt.js; merge verification and

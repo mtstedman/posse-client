@@ -108,6 +108,13 @@ export const SESSION_JOB_CLAIM_TTL_MS = 120_000;
 export const SESSION_ROUTABLE_JOB_TYPES = Object.freeze([
   "research", "plan", "dev", "assess", "fix", "summarize", "artificer",
 ]);
+// Why a host-leased member holds a routable job instead of offering it: the
+// host is absent or cannot take it yet (the job waits for it), or the host is
+// in the session but does not run the job's provider (waiting cannot help).
+export const SESSION_JOB_HOLD_REASONS = Object.freeze({
+  HOST_UNAVAILABLE: "host_unavailable",
+  HOST_LACKS_PROVIDER: "host_lacks_provider",
+});
 
 // The Remote's membership lease per role (rust/catalog/pairing.rs:6-7): a
 // participant whose heartbeats stop for this long is dropped from the session.

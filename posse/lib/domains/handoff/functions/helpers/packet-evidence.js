@@ -1,11 +1,13 @@
 import { mergeEvidenceCatalog } from "./merged-packet-evidence.js";
+import { materializedEvidenceIdentity } from "./evidence-selector.js";
 import { AGENT_HANDOFF_LIMITS } from "../../../../catalog/handoff.js";
 
 export function packetEvidence(packet) {
-  const bySelector = new Map();
+  const byIdentity = new Map();
   const add = (evidence) => {
-    if (!evidence?.selector || bySelector.has(evidence.selector)) return;
-    bySelector.set(evidence.selector, evidence);
+    const identity = materializedEvidenceIdentity(evidence);
+    if (!identity || byIdentity.has(identity)) return;
+    byIdentity.set(identity, evidence);
   };
   for (const handoff of packet.handoffs || []) {
     for (const claim of handoff.report?.claims || []) {
@@ -16,7 +18,7 @@ export function packetEvidence(packet) {
       for (const [evidence] of detail.decoy || []) add(evidence);
     }
   }
-  return [...bySelector.values()];
+  return [...byIdentity.values()];
 }
 
 export function packetEvidenceMetrics(packet) {

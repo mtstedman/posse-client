@@ -63,8 +63,11 @@ function recoveredEntriesFromEvent(event) {
     .filter((entry) => entry.path && Number.isFinite(entry.owner_job_id));
 }
 
+// `ownerJobIds` adds owners that are still live, such as the failing job whose
+// reset took the snapshot. An owner that finished unsuccessfully always
+// qualifies: no reset keeps its dirt, so the snapshot holds it.
 function ownerNeedsRecovery(ownerJobId, explicitOwnerJobIds) {
-  if (explicitOwnerJobIds) return explicitOwnerJobIds.has(ownerJobId);
+  if (explicitOwnerJobIds?.has(ownerJobId)) return true;
   const owner = getJob(ownerJobId);
   return UNSUCCESSFUL_TERMINAL_JOB_STATUSES.has(owner?.status);
 }

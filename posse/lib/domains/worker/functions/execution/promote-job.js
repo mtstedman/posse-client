@@ -6,8 +6,7 @@ import { resolvePathWithin } from "../../../../shared/scope/functions/path.js";
 import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { gitCommitAllAsync } from "../../../git/functions/commit-scope.js";
 import { listIgnoredRepoPaths } from "../../../git/functions/ignored-paths.js";
-import { gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
-import { snapshotAndResetDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
+import { gitExecAsync } from "../../../git/functions/utils.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import {
@@ -29,9 +28,9 @@ import { refreshAndExtractInsights } from "../helpers/insights.js";
 import { looksLikeFileDestination, normalizeRootRelativePromoteDest, validatePromoteDestinationPath } from "../../../planning/functions/plan-routing.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import { logBadInputFailure } from "./bad-input.js";
-import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
+import { snapshotAndResetSharedWorktreeAsync } from "../helpers/shared-worktree-reset.js";
 import { EVENT_TYPES, EVENT_ACTORS, PROMOTE_SOURCE_PICK_RULES } from "../../../../catalog/event.js";
-import { LEASE_HOLDING_STATUSES } from "../../../../catalog/job.js";
+import { FAILED_JOB_STATUSES, LEASE_HOLDING_STATUSES } from "../../../../catalog/job.js";
 import { assertPromoteCopyPlan, copyPromoteFileSync } from "./promote-files.js";
 import { localImageRenderSpec } from "../../../providers/functions/posse-local/image-render-queue.js";
 
@@ -249,7 +248,7 @@ function findSourceArtificer(job, sourceDir, missingNames) {
 
 // A repair that has not finished: waiting to run, or holding a lease.
 const PENDING_REPAIR_STATUSES = new Set(["queued", ...LEASE_HOLDING_STATUSES]);
-const FAILED_RENDER_STATUSES = new Set(["failed", "dead_letter", "blocked"]);
+const FAILED_RENDER_STATUSES = new Set([...FAILED_JOB_STATUSES, "blocked"]);
 
 // File names an unfinished repair job in this WI is producing into the
 // source directory: the assessor's partial-deliverable repair, or an earlier
@@ -748,39 +747,24 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken, abort
     worker.emit(job.id, `${C.red}[promote] WI#${job.work_item_id} job #${job.id} failed: ${err.message}${C.reset}`);
     if (job._worktreePath) {
       try {
-        if (await gitHasChangesAsync(job._worktreePath)) {
-          const siblingLocks = activeSiblingWriteLocks(job);
-          if (siblingLocks.length > 0) {
-            logEvent({
-              work_item_id: job.work_item_id,
-              job_id: job.id,
-              attempt_id: attempt.attempt.id,
-              event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
-              actor_type: EVENT_ACTORS.WORKER,
-              message: `Deferred promote failure dirty cleanup; ${siblingLocks.length} same-WI job lock(s) still active`,
-              event_json: JSON.stringify({ locks: siblingLocks.slice(0, 20) }),
-            });
-          } else {
-            try {
-              await snapshotAndResetDirtyWorktreeAsync(job._worktreePath, worker.projectDir, {
-                reason: `promote-failed-job-${job.id}`,
-                branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-                wiId: job.work_item_id,
-              });
-            } catch (resetErr) {
-              // Snapshot refused or failed — leave the dirt for setup
-              // recovery rather than wiping the only copy.
-              logEvent({
-                work_item_id: job.work_item_id,
-                job_id: job.id,
-                attempt_id: attempt.attempt.id,
-                event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
-                actor_type: EVENT_ACTORS.WORKER,
-                message: `Left promote-failure dirty state in place; snapshot/reset failed: ${resetErr?.message || String(resetErr)}`,
-                event_json: JSON.stringify({ reason: `promote-failed-job-${job.id}` }),
-              });
-            }
-          }
+        try {
+          await snapshotAndResetSharedWorktreeAsync(job, job._worktreePath, worker.projectDir, {
+            reason: `promote-failed-job-${job.id}`,
+            label: "promote failure",
+            attemptId: attempt.attempt.id,
+          });
+        } catch (resetErr) {
+          // Snapshot refused or failed — leave the dirt for setup
+          // recovery rather than wiping the only copy.
+          logEvent({
+            work_item_id: job.work_item_id,
+            job_id: job.id,
+            attempt_id: attempt.attempt.id,
+            event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+            actor_type: EVENT_ACTORS.WORKER,
+            message: `Left promote-failure dirty state in place; snapshot/reset failed: ${resetErr?.message || String(resetErr)}`,
+            event_json: JSON.stringify({ reason: `promote-failed-job-${job.id}` }),
+          });
         }
       } catch {
         // best effort cleanup

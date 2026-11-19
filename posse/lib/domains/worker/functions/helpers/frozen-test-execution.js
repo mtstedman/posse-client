@@ -11,6 +11,7 @@ import { classifyPackageManagerTestPlanFailure, classifyNestedRunnerInfrastructu
 import { isUnrunnableTestResult } from "./verification-outcome.js";
 import { testCommandCapability, testFileRemovedSinceBaseline } from "../../../verification/functions/test-capability.js";
 import { TEST_RUNNER_REMOVED_REASON, TEST_REQUIRED_FILE_MISSING_REASON } from "../../../../catalog/verification.js";
+import { withTestWorktreeSlot } from "./test-worktree-slot.js";
 
 function requiredTestFailureReason(results) {
   return [TEST_REQUIRED_FILE_MISSING_REASON, TEST_RUNNER_REMOVED_REASON]
@@ -81,20 +82,27 @@ export function effectiveVerificationPolicy({ cwd, policy = null, timeoutMs = nu
   return { ...effective, fingerprint: verificationPolicyFingerprint(effective) };
 }
 
-async function runVerificationCheck(check, { cwd, policy, phase = null, signal = null, baselineCommit = "HEAD", filesToCreate = [] } = {}) {
+// Test files run like commands: in the checkout's verification slot, with the
+// wall starting once the turn is taken.
+export function runUnitTestFilesInSlot({ slotKey = null, onSlotWait = null, ...options }) {
+  return withTestWorktreeSlot(options.projectDir, { key: slotKey, signal: options.signal || null, onWait: onSlotWait },
+    () => runUnitTestFiles(options));
+}
+
+async function runVerificationCheck(check, { cwd, policy, phase = null, signal = null, baselineCommit = "HEAD", filesToCreate = [], slotKey = null, onSlotWait = null } = {}) {
   const executionCommand = check.execution_command || check.command;
   const raw = Array.isArray(check.unit_test_paths)
-    ? await runUnitTestFiles({
+    ? await runUnitTestFilesInSlot({
         projectDir: cwd,
         paths: check.unit_test_paths,
         capability: discoverUnitTestCapability({ projectDir: cwd }),
         timeoutMs: policy.wall_timeout_ms,
-        signal,
+        signal, slotKey, onSlotWait,
       }).then((aggregate) => unitTestCommandResult(aggregate, { cwd, baselineCommit, filesToCreate: phase === "baseline" ? [] : filesToCreate }))
     : await runCommand(executionCommand, {
         cwd: check.cwd_relative ? path.resolve(cwd, check.cwd_relative) : cwd,
         timeoutMs: policy.wall_timeout_ms,
-        signal,
+        signal, slotKey, onSlotWait,
         idleTimeoutMs: policy.idle_timeout_ms,
         trustedShell: check.source === "task_ab_acceptance",
         baselineCommit, filesToCreate: (phase === "baseline" ? [] : filesToCreate).map((file) => path.relative(check.cwd_relative ? path.resolve(cwd, check.cwd_relative) : cwd, path.resolve(cwd, file))),
@@ -154,7 +162,7 @@ export function aggregateCheckCoverageStatus(checkRuns = []) {
   return "unknown";
 }
 
-export async function runVerificationChecks(plan, { cwd, policy, phase = null, signal = null, baselineCommit = plan.capability_base_commit || "HEAD" } = {}) {
+export async function runVerificationChecks(plan, { cwd, policy, phase = null, signal = null, baselineCommit = plan.capability_base_commit || "HEAD", slotKey = null, onSlotWait = null } = {}) {
   const checks = Array.isArray(plan.execution_checks) && plan.execution_checks.length > 0
     ? plan.execution_checks : [{ ...plan, id: plan.check_id }];
   // Each check gets the policy's full wall. The plan as a whole is bounded by
@@ -164,7 +172,18 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
   const wall = policy.wall_timeout_ms;
   const runnable = checks.filter((check) => !check.unavailable_reason).length;
   const ceiling = Number(policy.wall_timeout_max_ms) > 0 ? Number(policy.wall_timeout_max_ms) : Infinity;
-  const deadline = Date.now() + Math.max(wall, Math.min(wall * Math.max(1, runnable), ceiling));
+  let deadline = Date.now() + Math.max(wall, Math.min(wall * Math.max(1, runnable), ceiling));
+  // Time queued behind another job's verification is not the plan's to
+  // spend: the deadline moves out by each wait for the slot.
+  let waitingSince = null;
+  const onCheckSlotWait = (waiting) => {
+    if (waiting) waitingSince = Date.now();
+    else if (waitingSince != null) {
+      deadline += Date.now() - waitingSince;
+      waitingSince = null;
+    }
+    onSlotWait?.(waiting);
+  };
   const budgetExhausted = (check, extra = {}) => ({ check_id: check.id || null, command: check.command,
     intent: check.intent || "test", required: check.required !== false, status: "unavailable", ok: null, reason: "verification_plan_wall_budget_exhausted",
     coverage_status: check.intent && check.intent !== "test" ? "not_applicable" : "unknown",
@@ -187,7 +206,7 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
     const checkWall = Math.min(wall, remaining);
     const run = await runVerificationCheck(check, { cwd,
       baselineCommit, filesToCreate: plan.files_to_create || [], policy: { ...policy, wall_timeout_ms: checkWall, idle_timeout_ms: policy.idle_timeout_ms == null
-        ? null : Math.min(policy.idle_timeout_ms, checkWall) }, phase, signal });
+        ? null : Math.min(policy.idle_timeout_ms, checkWall) }, phase, signal, slotKey, onSlotWait: onCheckSlotWait });
     runs.push(run.status === "timed_out" && run.timeout_kind !== "idle" && checkWall < wall
       ? budgetExhausted(check, { timeout_kind: "plan_budget", duration_ms: run.duration_ms || 0,
         stdout: run.stdout || "", stderr: run.stderr || "", test_counts: run.test_counts || null })
@@ -235,7 +254,7 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
  * a receipt is keyed to a commit, and this workspace is not one yet. Returns
  * the classified run, or a not-run result when the plan cannot execute.
  */
-export async function runFrozenTestPlanOnce(plan, { cwd, timeoutMs = null, signal = null } = {}) {
+export async function runFrozenTestPlanOnce(plan, { cwd, timeoutMs = null, signal = null, slotKey = null, onSlotWait = null } = {}) {
   signal?.throwIfAborted();
   if (!plan) return { status: "skipped", ok: null, reason: "no_declared_tests" };
   if (plan.validation_error || plan.verification_eligible === false) {
@@ -244,19 +263,19 @@ export async function runFrozenTestPlanOnce(plan, { cwd, timeoutMs = null, signa
   const policy = effectiveVerificationPolicy({ cwd, timeoutMs });
   const hasExecutionChecks = Array.isArray(plan.execution_checks) && plan.execution_checks.length > 0;
   const raw = hasExecutionChecks
-    ? await runVerificationChecks(plan, { cwd, policy, signal })
+    ? await runVerificationChecks(plan, { cwd, policy, signal, slotKey, onSlotWait })
     : Array.isArray(plan.unit_test_paths)
-    ? await runUnitTestFiles({
+    ? await runUnitTestFilesInSlot({
         projectDir: cwd,
         paths: plan.unit_test_paths,
         capability: discoverUnitTestCapability({ projectDir: cwd }),
         timeoutMs: policy.wall_timeout_ms,
-        signal,
+        signal, slotKey, onSlotWait,
       }).then((aggregate) => unitTestCommandResult(aggregate, { finalReview: true, filesToCreate: plan.files_to_create || [], cwd, baselineCommit: plan.capability_base_commit || "HEAD" }))
     : await runCommand(plan.execution_command || plan.command, {
         cwd: plan.cwd_relative ? path.resolve(cwd, plan.cwd_relative) : cwd,
         timeoutMs: policy.wall_timeout_ms,
-        signal,
+        signal, slotKey, onSlotWait,
         idleTimeoutMs: policy.idle_timeout_ms,
         baselineCommit: plan.capability_base_commit || "HEAD",
         filesToCreate: (plan.files_to_create || []).map((file) => path.relative(plan.cwd_relative ? path.resolve(cwd, plan.cwd_relative) : cwd, path.resolve(cwd, file))),

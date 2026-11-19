@@ -1,11 +1,27 @@
 // @ts-check
 
 import { MUTATING_JOB_TYPES } from "../../../catalog/job.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
 import { parseJobPayload } from "./payload.js";
 import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
 import { requiresRepositoryExecution } from "../../intake/functions/objective-contract.js";
 
 export const PIPELINE_BOOTSTRAP_JOB_TYPES = new Set(["preflight", "research", "plan"]);
+
+/**
+ * Whether one of these jobs was delegated to a session peer whose merge has
+ * reached this clone's trunk (session-job-router.js
+ * reconcileSessionDelegationCommits): the executor's work item carried out
+ * the execution, so a delegated plan or research job left nothing to run here.
+ * Only the originator's rows record `merged` and carry no local work item.
+ */
+function hasMergedDelegatedExecution(wi, jobs) {
+  const jobIds = new Set(getDb().prepare(`
+    SELECT origin_job_id FROM work_item_delegations
+    WHERE origin_work_item_id = ? AND state = 'merged' AND local_work_item_id IS NULL
+  `).all(wi.id).map((row) => Number(row.origin_job_id)));
+  return jobs.some((job) => jobIds.has(Number(job.id)));
+}
 
 export function parseWorkItemMetadataRecord(wi) {
   try {
@@ -34,7 +50,7 @@ export function isExplicitResearchOnlyWorkItem(wi) {
 export function missingRequiredBuildExecution(wi, jobs) {
   if (!wi || wi.mode !== "build" || isExplicitResearchOnlyWorkItem(wi)) return false;
   if (!jobs.some((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type))) return false;
-  return !jobs.some((job) => MUTATING_JOB_TYPES.has(job.job_type));
+  return !jobs.some((job) => MUTATING_JOB_TYPES.has(job.job_type)) && !hasMergedDelegatedExecution(wi, jobs);
 }
 
 export function jobProducesRepositoryOutput(job) {
@@ -51,7 +67,7 @@ export function missingRequiredRepoExecution(wi, jobs) {
   if (!jobs.some((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type))) return false;
   const intakeHints = getWorkItemIntakeHints(wi, wi.mode || "build");
   if (!requiresRepositoryExecution(wi, intakeHints)) return false;
-  return !jobs.some(jobProducesRepositoryOutput);
+  return !jobs.some(jobProducesRepositoryOutput) && !hasMergedDelegatedExecution(wi, jobs);
 }
 
 export function missingExecutionReason(wi, jobs) {

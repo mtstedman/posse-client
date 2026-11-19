@@ -7,7 +7,7 @@ import { linkFailedAttemptSnapshot } from "./failed-attempt-recovery.js";
 // Execute-attempt error taxonomy extracted from worker.js:
 // deterministic interruptions, retryable interruptions, and catastrophic errors.
 
-import { abandonJobScopeExpansionRequest, completeAttempt, decrementAttemptCount, flagStallResume, getAttempts, getJob, getWorkItem, incrementAndCreateAttempt, incrementAttemptCount, logEvent, listJobsByWorkItem, setJobError, settleJobScopeExpansionAttempt, storeArtifact, updateJobPayload, updateJobProvider } from "../../../queue/functions/index.js";
+import { abandonJobScopeExpansionRequest, completeAttempt, decrementAttemptCount, flagStallResume, getAttempts, getJob, incrementAndCreateAttempt, incrementAttemptCount, logEvent, listJobsByWorkItem, setJobError, settleJobScopeExpansionAttempt, storeArtifact, updateJobPayload, updateJobProvider } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { getProviderBackoff, getProviderName, getProviderRateLimitState, pauseProvider } from "../../../providers/functions/provider.js";
@@ -19,15 +19,17 @@ import { isAbortError } from "../../../runtime/functions/yield.js";
 import { buildFailureDiagnosticsArtifact, currentExecutionProvider, getErrorDetails, isPermanentProviderConfigError, providerFailureDiagnosticText, retryingAttemptWording } from "./diagnostics.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { gitHasChangesAsync } from "../../../git/functions/utils.js";
-import { snapshotAndResetDirtyWorktreeAsync, stashDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
+import { stashDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
 import { activeSiblingWriteLocks, siblingLockSummary } from "../../../queue/functions/sibling-locks.js";
 import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
+import { unfinishedSiblingDirtOwners } from "./worktree-dirty-classification.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../../catalog/tools/planner-clarification.js";
 import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../../catalog/tools/environment-setup.js";
 import { planCompileIncompleteInAttempt } from "../../../planning/functions/plan-compiler.js";
 import { processVerdict } from "./process-verdict.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
+import { snapshotAndResetSharedWorktreeAsync } from "./shared-worktree-reset.js";
 import { harnessSetupFaultCode, settleHarnessSetupFault } from "./harness-setup-fault.js";
 import { isLongProviderPause, isProviderQuotaBackoff, MAX_PROVIDER_ERROR_REQUEUES, MAX_PROVIDER_PAUSED_BOUNCES, MAX_PROVIDER_QUOTA_PAUSES, planProviderPausedRequeue, planProviderQuotaPause, PROVIDER_ERROR_PREFIX, PROVIDER_PAUSED_PREFIX, PROVIDER_QUOTA_PAUSE_PREFIX, providerInterruptionStreak } from "./provider-quota-pause.js";
 
@@ -62,7 +64,13 @@ function deferInterruptedCleanupIfSiblingLocks(job, label) {
 // cannot collide with them (WI 154 job 2028, 2026-10-01: a shutdown stash
 // took a sibling's staged placeholders). null stashes everything.
 function ownInterruptedStashPaths(job, dirtyPaths = []) {
+  // The shared-reset rule (sweep 5 W1) decides ownership here too: an
+  // unfinished sibling that has run owns the dirt in its scope, and one that
+  // has run with unknown scope may own any of it, so nothing is stashed.
+  const { siblingLocks, unknownScopeIds } = unfinishedSiblingDirtOwners(job, dirtyPaths);
+  if (unknownScopeIds.length > 0) return [];
   const siblingPaths = siblingJobScopePaths(job.id, dirtyPaths);
+  for (const lock of siblingLocks) siblingPaths.add(lock.path);
   if (siblingPaths.size === 0) return null;
   return dirtyPaths.filter((file) => !siblingPaths.has(file));
 }
@@ -103,28 +111,14 @@ async function stashInterruptedWork(job, wtPath, label, projectDir = null) {
 async function stashWorktreeForFailure(job, wtPath, projectDir) {
   if (!wtPath) return;
   try {
-    if (!(await gitHasChangesAsync(wtPath))) return;
-    const siblingLocks = activeSiblingWriteLocks(job);
-    if (siblingLocks.length > 0) {
-      logEvent({
-        work_item_id: job.work_item_id,
-        job_id: job.id,
-        event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
-        actor_type: EVENT_ACTORS.WORKER,
-        message: `Deferred failed-attempt dirty cleanup; ${siblingLocks.length} same-WI job lock(s) still active`,
-        event_json: JSON.stringify({ locks: siblingLocks.slice(0, 20) }),
-      });
-      log.info("worker", `Deferred failed-attempt cleanup for job #${job.id}; active sibling locks: ${siblingLockSummary(siblingLocks)}`);
-      return;
-    }
     // Preserve the failed attempt's dirty state to .recovery/ for forensics
     // and reset the worktree clean. Using snapshot-and-reset instead of
     // git stash avoids accumulating orphan stashes across failed jobs.
+    // Sibling-owned dirt stays; see snapshotAndResetSharedWorktreeAsync.
     try {
-      const snapshotDir = await snapshotAndResetDirtyWorktreeAsync(wtPath, projectDir || wtPath, {
+      const { snapshotDir } = await snapshotAndResetSharedWorktreeAsync(job, wtPath, projectDir || wtPath, {
         reason: `failed-job-${job.id}`,
-        branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-        wiId: job.work_item_id,
+        label: "failed-attempt",
         onMsg: (msg) => {
           logEvent({
             work_item_id: job.work_item_id,

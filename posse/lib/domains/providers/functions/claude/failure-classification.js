@@ -1,21 +1,27 @@
+import { isPosseRaisedError, nativeProviderNoticeText } from "../shared/api-resilience.js";
+
+// Partial output is read only as a provider notice: the generic CLI failure's
+// short result text (where the CLI's own auth error arrives), never a failed
+// run's model prose, which can name invalid_client or a lock in passing.
 function _failureText(value) {
   if (!value) return "";
   if (typeof value === "string") return value;
   if (value instanceof Error) {
     return [
-      value.message,
+      // Posse's own error text can quote agent-chosen paths and evidence.
+      isPosseRaisedError(value) ? null : value.message,
       value.stderr,
       value.stdout,
-      value.partialOutput,
+      nativeProviderNoticeText(value),
     ].filter(Boolean).join("\n");
   }
   if (typeof value === "object") {
     return [
       value.error,
-      value.message,
+      isPosseRaisedError(value) ? null : value.message,
       value.stderr,
       value.stdout,
-      value.partialOutput,
+      nativeProviderNoticeText(value),
     ].filter(Boolean).join("\n");
   }
   return String(value);

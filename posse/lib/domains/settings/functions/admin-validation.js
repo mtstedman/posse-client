@@ -19,6 +19,7 @@ import {
   MULTI_SETTING_KEYS,
   MULTI_SETTING_VALUES,
   NUMERIC_SETTING_RULES,
+  PROJECT_DB_SETTING_DEFS,
   PROJECT_DB_SETTING_KEYS,
   PROVIDER_SETTING_KEYS,
   SKILL_SETTING_PREFIX,
@@ -27,6 +28,7 @@ import {
 import { isCatalogKey } from "./catalog.js";
 
 const MODEL_SETTING_KEYS = new Set(MODEL_SETTING_DEFS.map((def) => def.key));
+const PROJECT_DB_PORT_RULE = PROJECT_DB_SETTING_DEFS.find((def) => def.key === "project_db_port").numeric;
 const ADMIN_SETTING_VALUE_MAX_CHARS = 16_384;
 
 export const PROTECTED_REMOTE_AUTH_SETTING_KEYS = new Set([
@@ -160,7 +162,9 @@ export function validateAdminSettingValue(settingKey, value) {
       if (trimmed === "") return { ok: true, storageKey, value: "" };
       if (!/^\d+$/.test(trimmed)) return { ok: false, error: "project_db_port must be a number." };
       const parsed = Number(trimmed);
-      if (!Number.isSafeInteger(parsed)) return { ok: false, error: "project_db_port is too large to store safely." };
+      if (parsed < PROJECT_DB_PORT_RULE.min || parsed > PROJECT_DB_PORT_RULE.max) {
+        return { ok: false, error: `project_db_port must be between ${PROJECT_DB_PORT_RULE.min} and ${PROJECT_DB_PORT_RULE.max}.` };
+      }
       return { ok: true, storageKey, value: trimmed };
     }
     // host / database / username / password: free text (password kept verbatim).

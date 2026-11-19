@@ -6,7 +6,7 @@ import {
 import { finalReviewIdentity } from "../../../assessment/functions/final-review-authority.js";
 import { loadAssessmentSource } from "../execution/assessment-source.js";
 import { Scope } from "../../../../shared/scope/classes/Scope.js";
-import { parseJobPayload } from "../../../queue/functions/payload.js";
+import { parseJobPayload, resetJobPayloadForReexecution } from "../../../queue/functions/payload.js";
 import { activeLiveSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
 import { gitCommitAllAsync } from "../../../git/functions/commit-scope.js";
 import { gitCurrentHashAsync, gitExecAsync } from "../../../git/functions/utils.js";
@@ -76,8 +76,10 @@ export async function applyDirtyWorktreeRecovery({ worker, job, payload, action,
   if (action === "revert") {
     await discardDirtyWorktreeRecoveryPaths({ worker, original, gate: job, cwd, paths, ignored: new Set(ignoredRequested) });
     // Nothing joins the task scope: the job reruns as planned on a tree
-    // without the rejected files.
-    beginJobRetryGeneration(original.id, { payload: next });
+    // without the rejected files, in the phase it was parked in. A job parked
+    // while setting up its assessment resumes that assessment; any other
+    // resumes as a fresh implementation.
+    beginJobRetryGeneration(original.id, { payload: next._assess_only ? next : resetJobPayloadForReexecution(next) });
     const resumed = requestParkedJobResumeAfterGate({ gateJobId: job.id, originalJobId: original.id,
       operationKey, reason: "dirty_worktree_revert" });
     if (!resumed.ok) throw new Error(`Could not resume the recovered job: ${resumed.reason}`);
@@ -155,7 +157,7 @@ export async function applyDirtyWorktreeRecovery({ worker, job, payload, action,
     }
   }
   if (next._assess_only) updateJobPayload(original.id, JSON.stringify(next));
-  else beginJobRetryGeneration(original.id, { payload: next });
+  else beginJobRetryGeneration(original.id, { payload: resetJobPayloadForReexecution(next) });
   const resumed = requestParkedJobResumeAfterGate({ gateJobId: job.id, originalJobId: original.id,
     operationKey, reason: `dirty_worktree_${action}` });
   if (!resumed.ok) throw new Error(`Could not resume the recovered job: ${resumed.reason}`);

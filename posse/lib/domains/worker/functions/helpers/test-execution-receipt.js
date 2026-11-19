@@ -17,11 +17,12 @@ import { resolveFrozenTestPlan, frozenTestPlanFromReceipt, prunedTestPlan } from
 export { resolveFrozenTestPlan } from "./frozen-test-plan.js";
 import { currentCommit, currentHeadRef, repositoryFingerprint, repositoryRoot, worktreeFingerprint, dirtyPathDigests, dirtyFingerprintFromDigests, environmentFilesFingerprint, isAncestorCommit, porcelain, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
 export { dirtyWorktreeFingerprint, environmentFilesFingerprint, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
-import { unitTestCommandResult, effectiveVerificationPolicy, runVerificationChecks, runFrozenTestPlanOnce, didInvokeTestFile, testCoverageStatus, aggregateCheckCoverageStatus } from "./frozen-test-execution.js";
+import { unitTestCommandResult, effectiveVerificationPolicy, runVerificationChecks, runFrozenTestPlanOnce, runUnitTestFilesInSlot, didInvokeTestFile, testCoverageStatus, aggregateCheckCoverageStatus } from "./frozen-test-execution.js";
 export { runFrozenTestPlanOnce, testCoverageStatus, aggregateCheckCoverageStatus } from "./frozen-test-execution.js";
 import { testExecutionDelta, scopedTypecheckAttribution } from "./test-receipt-evidence.js";
 export { testExecutionDelta, scopedTypecheckAttribution, renderTestExecutionEvidence, postChangeTestLogSummary, testReceiptObservationDetail } from "./test-receipt-evidence.js";
 import { runCommand, MAX_STREAM_CHARS } from "./test-command-process.js";
+import { testWorktreeSlotKey } from "./test-worktree-slot.js";
 import { withBaselineCheckout } from "../../../verification/functions/baseline-checkout.js";
 import fs from "fs";
 import path from "path";
@@ -41,7 +42,7 @@ import { verificationOutcome } from "./verification-outcome.js";
 import { withLineagePathsRestored } from "../../../verification/functions/lineage-tree.js";
 import { TEST_EXECUTION_RECEIPT_KIND, TEST_EXECUTION_RECEIPT_MIME_TYPE, TEST_EXECUTION_REUSE_KIND, REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID, UNESTABLISHED_COVERAGE_STATUSES, VERIFICATION_DEPENDENCY_LOCK_INVALID } from "../../../../catalog/verification.js";
 import { checkRunsFailureFingerprint, comparableTestFailureFingerprint, testFailureFingerprint, testFailureInventory } from "./test-failure-evidence.js";
-import { discoverUnitTestCapability, runUnitTestFiles } from "../../../../shared/tools/functions/toolkit/unit-test-runner.js";
+import { discoverUnitTestCapability } from "../../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { testExecutionCounts } from "../../../../shared/tools/functions/toolkit/test-output-counts.js";
 export { normalizeFailureFingerprintText } from "./test-failure-evidence.js";
 export { testExecutionCounts };
@@ -433,7 +434,7 @@ async function restoreAfterTest({
 // to this result and never to the plan's receipt. The result sits beside the
 // plan's and is never folded into it, so the baseline comparison stays like
 // for like.
-async function runChangedUnitTests(paths, policy, cleanupOptions, { base = null, scopePaths = [] } = {}) {
+async function runChangedUnitTests(paths, policy, cleanupOptions, { base = null, scopePaths = [], signal = null, slotKey = null } = {}) {
   const { cwd } = cleanupOptions;
   const [before, actualCommit, originalHeadRef] = await Promise.all([
     porcelain(cwd),
@@ -444,9 +445,11 @@ async function runChangedUnitTests(paths, policy, cleanupOptions, { base = null,
   try {
     run = await runFrozenTestPlanOnce(
       { command: paths.join(", "), unit_test_paths: paths },
-      { cwd, timeoutMs: policy.wall_timeout_ms },
+      { cwd, timeoutMs: policy.wall_timeout_ms, signal, slotKey },
     );
   } catch (error) {
+    // A canceled job's run is not an infrastructure result.
+    if (signal?.aborted) throw error;
     run = { status: "infrastructure_error", ok: null, reason: String(error?.message || error).slice(0, 300) };
   }
   const { cleanupStatus, cleanupError } = await restoreAfterTest({
@@ -458,7 +461,7 @@ async function runChangedUnitTests(paths, policy, cleanupOptions, { base = null,
   const cleanupFailed = cleanupStatus === "failed" || cleanupStatus === "unavailable";
   const attribution = cleanupFailed
     ? null
-    : await attributeChangedTestFailures(run.file_results, { base, scopePaths, policy, cleanupOptions });
+    : await attributeChangedTestFailures(run.file_results, { base, scopePaths, policy, cleanupOptions, signal, slotKey });
   return {
     paths,
     status: cleanupFailed ? "infrastructure_error" : String(run.status || "unknown"),
@@ -503,7 +506,7 @@ function changedTestsCoveredByPlanResult(cwd) {
 // plan's own baseline makes. A file the change created, or one that passed or
 // failed differently at the base, is the change's failure. Without a usable
 // base run every failure counts.
-async function attributeChangedTestFailures(fileResults, { base = null, scopePaths = [], policy, cleanupOptions }) {
+async function attributeChangedTestFailures(fileResults, { base = null, scopePaths = [], policy, cleanupOptions, signal = null, slotKey = null }) {
   const failing = (Array.isArray(fileResults) ? fileResults : [])
     .filter((result) => ["failed", "timed_out"].includes(result?.status) && result.path);
   if (failing.length === 0 || !base) return null;
@@ -531,15 +534,17 @@ async function attributeChangedTestFailures(fileResults, { base = null, scopePat
         cwd,
         baseCommit: base,
         paths: [...scopePaths, ...edited],
-        run: () => runUnitTestFiles({
+        run: () => runUnitTestFilesInSlot({
           projectDir: cwd,
           paths: edited,
           capability: discoverUnitTestCapability({ projectDir: cwd }),
           timeoutMs: policy.wall_timeout_ms,
+          signal, slotKey,
         }),
       });
       for (const result of run?.results || []) baseResults.set(result.path, result);
     } catch (runError) {
+      if (signal?.aborted) throw runError;
       error = String(runError?.message || runError).slice(0, 300);
     }
     const { cleanupStatus, cleanupError } = await restoreAfterTest({
@@ -577,7 +582,7 @@ async function attributeChangedTestFailures(fileResults, { base = null, scopePat
 // Compare the declared suite on today's sibling tree with this job's scoped
 // changes removed. An old frozen baseline cannot attribute a later sibling
 // failure; unchanged tests can also regress because production code changed.
-async function attributeDeclaredTestFailure(result, plan, { base, scopePaths, policy, cleanupOptions }) {
+async function attributeDeclaredTestFailure(result, plan, { base, scopePaths, policy, cleanupOptions, signal = null, slotKey = null }) {
   if (result.status !== "failed" || !base || !scopePaths?.length
     || plan.verification_eligible === false || plan.source === "operator_approved_operation") return null;
   const { cwd } = cleanupOptions;
@@ -586,9 +591,12 @@ async function attributeDeclaredTestFailure(result, plan, { base, scopePaths, po
   let baseline = null;
   try {
     baseline = await withLineagePathsRestored({ cwd, baseCommit: base, paths: scopePaths,
-      run: () => runFrozenTestPlanOnce(plan, { cwd, timeoutMs: policy.wall_timeout_ms }),
+      run: () => runFrozenTestPlanOnce(plan, { cwd, timeoutMs: policy.wall_timeout_ms, signal, slotKey }),
     });
-  } catch { /* Without a trustworthy comparison, retain the original failure. */ }
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    /* Without a trustworthy comparison, retain the original failure. */
+  }
   const cleanup = await restoreAfterTest({ ...cleanupOptions, before, actualCommit, originalHeadRef });
   if (!["not_needed", "completed"].includes(cleanup.cleanupStatus)) {
     return { commit: base, debt_only: false, cleanup_status: cleanup.cleanupStatus,
@@ -624,7 +632,13 @@ async function executeReceipt({
   baselineReceipt = null,
   dependencyRepair = null,
   allowProjectedBaseline = false,
+  signal = null,
+  slotKey = null,
 } = {}) {
+  signal?.throwIfAborted();
+  // Every run below takes the work item's verification slot and stops when
+  // the job is aborted.
+  const execution = { signal, slotKey };
   const effectivePolicy = policy || effectiveVerificationPolicy({ cwd });
   const toolchain = describeToolchain({ projectDir: cwd });
   const executionCommand = plan.execution_command || plan.command;
@@ -688,7 +702,7 @@ async function executeReceipt({
     const changedTests = changedTestPaths.length > 0
       && !initialPorcelain
       && (!commitHash || !actualCommit || commitHash === actualCommit || testedIntegratedDescendant)
-      ? await runChangedUnitTests(changedTestPaths, effectivePolicy, { cwd, siblingOwnedPaths, cleanupWorktree, cleanupPaths }, changedTestsBase)
+      ? await runChangedUnitTests(changedTestPaths, effectivePolicy, { cwd, siblingOwnedPaths, cleanupWorktree, cleanupPaths }, { ...changedTestsBase, ...execution })
       : null;
     return storeReceipt(job, attemptId, {
       kind: RECEIPT_KIND,
@@ -810,20 +824,22 @@ async function executeReceipt({
     : cwd;
   const hasExecutionChecks = Array.isArray(plan.execution_checks) && plan.execution_checks.length > 0;
   const rawResult = hasExecutionChecks
-    ? await runVerificationChecks(plan, { cwd, policy: effectivePolicy, phase,
+    ? await runVerificationChecks(plan, { cwd, policy: effectivePolicy, phase, ...execution,
         baselineCommit: plan.capability_base_commit || (baselineReceipt?.status === "passed" ? baselineReceipt.commit_hash : null) || "HEAD" })
     : Array.isArray(plan.unit_test_paths)
-    ? await runUnitTestFiles({
+    ? await runUnitTestFilesInSlot({
         projectDir: cwd,
         paths: plan.unit_test_paths,
         capability: discoverUnitTestCapability({ projectDir: cwd }),
         timeoutMs: effectivePolicy.wall_timeout_ms,
+        ...execution,
       }).then((aggregate) => unitTestCommandResult(aggregate, { cwd, filesToCreate: phase === "baseline" ? [] : plan.files_to_create || [],
         baselineCommit: plan.capability_base_commit || (baselineReceipt?.status === "passed" ? baselineReceipt.commit_hash : null) || "HEAD" }))
     : await runCommand(executionCommand, {
         cwd: executionCwd,
         timeoutMs: effectivePolicy.wall_timeout_ms,
         idleTimeoutMs: effectivePolicy.idle_timeout_ms,
+        ...execution,
         trustedShell: plan.source === "task_ab_acceptance",
         filesToCreate: (phase === "baseline" ? [] : plan.files_to_create || []).map((file) => path.relative(executionCwd, path.resolve(cwd, file))),
         baselineCommit: plan.capability_base_commit || (baselineReceipt?.status === "passed" ? baselineReceipt.commit_hash : null) || "HEAD",
@@ -849,8 +865,8 @@ async function executeReceipt({
   // no baseline: their failures are compared with the base tree here.
   const planAttribution = phase === "post_change" && cleanedUp
     ? (plan.source === "changed_unit_tests"
-      ? await attributeChangedTestFailures(result.file_results, { ...changedTestsBase, policy: effectivePolicy, cleanupOptions })
-      : await attributeDeclaredTestFailure(result, plan, { ...changedTestsBase, policy: effectivePolicy, cleanupOptions }))
+      ? await attributeChangedTestFailures(result.file_results, { ...changedTestsBase, ...execution, policy: effectivePolicy, cleanupOptions })
+      : await attributeDeclaredTestFailure(result, plan, { ...changedTestsBase, ...execution, policy: effectivePolicy, cleanupOptions }))
     : null;
   // Only once the plan's drift check and cleanup are done do the changed test
   // files run, in a window of their own.
@@ -874,7 +890,7 @@ async function executeReceipt({
   let changedTests = null;
   if (changedTestPaths.length > 0 && ["not_needed", "completed"].includes(cleanupStatus)) {
     changedTests = changedTestsToRun.length > 0
-      ? await runChangedUnitTests(changedTestsToRun, effectivePolicy, cleanupOptions, changedTestsBase)
+      ? await runChangedUnitTests(changedTestsToRun, effectivePolicy, cleanupOptions, { ...changedTestsBase, ...execution })
       : changedTestsCoveredByPlanResult(cwd);
     if (coveredByPlan.length > 0) {
       changedTests = { ...changedTests, paths: changedTestPaths, executed_paths: changedTestsToRun, covered_by_plan: coveredByPlan };
@@ -1049,6 +1065,7 @@ export async function ensurePreDevelopmentTestBaseline({
   cleanupWorktree = null,
   siblingOwnedPaths = null,
   repairDependencies = null,
+  signal = null,
 } = {}) {
   if (!cwd) {
     const legacy = findFrozenTestBaseline(job?.id);
@@ -1116,6 +1133,9 @@ export async function ensurePreDevelopmentTestBaseline({
     ...(Array.isArray(payload?.files_to_delete) ? payload.files_to_delete : []),
   ])];
   const useLineageProjection = !!(rootBaseCommit && lineagePaths.length > 0);
+  // The detached checkout below is private, but the slot is the work item's
+  // worktree's: the baseline queues with its other jobs' verification.
+  const slotKey = testWorktreeSlotKey(cwd);
   const runAt = async (executionCwd, cleanup) => {
     const executeBaseline = (dependencyRepair = null) => executeReceipt({
       job, plan, phase: "baseline", cwd: executionCwd,
@@ -1124,6 +1144,7 @@ export async function ensurePreDevelopmentTestBaseline({
       siblingOwnedPaths: executionCwd === cwd ? siblingOwnedPaths : null,
       dependencyRepair,
       allowProjectedBaseline: useLineageProjection,
+      signal, slotKey,
     });
     const runBaseline = (dependencyRepair = null) => useLineageProjection
       ? withLineagePathsRestored({ cwd: executionCwd, baseCommit: rootBaseCommit, paths: lineagePaths,
@@ -1280,6 +1301,7 @@ export async function ensurePostChangeTestReceipt({
   cleanupWorktree = null,
   siblingOwnedPaths = null,
   repairDependencies = null,
+  signal = null,
 } = {}) {
   if (!cwd) return null;
   payload = pruneJobTests(job, payload, cwd);
@@ -1394,12 +1416,15 @@ export async function ensurePostChangeTestReceipt({
       ...debt,
     };
   }
+  // As for the baseline: a private checkout, the work item's worktree's slot.
+  const slotKey = testWorktreeSlotKey(cwd);
   const runAt = async (executionCwd, cleanup) => {
     const execute = (dependencyRepair = null) => executeReceipt({
       job, plan, phase: "post_change", cwd: executionCwd, commitHash: assessedCommit,
       attemptId, policy: effectivePolicy, cleanupWorktree: cleanup,
       siblingOwnedPaths: executionCwd === cwd ? siblingOwnedPaths : null,
       baselineReceipt: baseline, dependencyRepair,
+      signal, slotKey,
     });
     return retryAfterDependencyRepair(await execute(),
       typeof repairDependencies === "function" ? (receipt) => repairDependencies(receipt, executionCwd) : null,

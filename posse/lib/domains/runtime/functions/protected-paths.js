@@ -33,6 +33,11 @@ function pathParts(normalized) {
 }
 
 const SENSITIVE_ENV_BASENAME_RE = /^\.env(?:\.|$)/i;
+// The path-segment names SENSITIVE_ENV_BASENAME_RE matches, as shell globs
+// compared without regard to case, for tools that can only filter by name
+// (the recursive grep/rg excludes in MutationPolicy). A final `.env.example`
+// is the one exception isSensitiveEnvRepoPath makes; name filters keep it out.
+export const SENSITIVE_ENV_BASENAME_GLOBS = Object.freeze([".env", ".env.*"]);
 
 export function isSensitiveEnvRepoPath(value) {
   const normalized = normalizeRepoRelativePath(value);

@@ -6,7 +6,7 @@
 // PUSH_OFFER_SUBTYPE exclusions keep them out of work-item status math.
 //
 // Lifecycle: created/refreshed at run wrap-up when unpushed commits exist
-// (singleton — a changed HEAD supersedes the previous one); closed by
+// (singleton — a changed HEAD updates the open offer in place); closed by
 // `git.push` from the bridge, a TTY push at the terminal, or an explicit
 // decline. An unchanged open offer is reused across runs, and a decline is
 // remembered until the exact publication HEAD changes, avoiding repeat phone
@@ -313,8 +313,6 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
       }
     }
 
-    cancelOpenPushOfferGatesInTransaction("superseded_by_new_offer");
-
     const payload = {
       subtype: PUSH_OFFER_SUBTYPE,
       question_kind: "push_offer",
@@ -339,10 +337,25 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
       created_by: createdBy,
     };
 
+    // One standing offer per target (Mason, 2026-11-19): when more work
+    // merges, the open offer is brought up to date in place rather than
+    // closed and asked again, so each merge is not a new prompt on the phone.
+    // The generation moves, so an answer to the earlier contents is refused.
+    const title = `Push ${countText} to ${remote}/${branch}`;
+    if (latest && OPEN_GATE_STATUSES.includes(latest.status) && humanGateStateAllowsAnswer(latest.gate_state)) {
+      const previous = parsedObject(latest.payload_json);
+      db.prepare("UPDATE jobs SET payload_json = ?, title = ?, updated_at = ? WHERE id = ?")
+        .run(JSON.stringify({ ...previous, ...payload, created_by: previous.created_by || createdBy }), title, now(), latest.id);
+      reviseOpenHumanGateGeneration(latest.id);
+      return { ok: true, jobId: Number(latest.id), workItemId: Number(latest.work_item_id), reused: false, refreshed: true };
+    }
+
+    cancelOpenPushOfferGatesInTransaction("superseded_by_new_offer");
+
     const job = createJob({
       work_item_id: workItemId,
       job_type: "human_input",
-      title: `Push ${countText} to ${remote}/${branch}`,
+      title,
       payload_json: JSON.stringify(payload),
     });
     const jobId = Number(job?.id ?? job?.lastInsertRowid ?? job);

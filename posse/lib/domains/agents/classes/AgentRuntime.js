@@ -7,7 +7,7 @@ import { validateToolArguments } from "../../../shared/tools/functions/schema-va
 import { agentProviderSuppliesToolProtocol, agentProviderUsesNativeTools, callAgentProvider, resolveAgentProvider } from "../functions/provider-route.js";
 import { compileAgentPolicy } from "../functions/remote-policy.js";
 import { resolveAgentWorkingDirectory } from "../functions/scope.js";
-import { parseAgentToolTurn } from "../functions/tool-turn.js";
+import { parseAgentToolTurn, toolCallFingerprint } from "../functions/tool-turn.js";
 import { dispatchTranscript, renderConversation, toolCallId, toolOutputFailed, toolResultContent } from "../functions/transcript.js";
 
 // Provider thinking counts against these caps, so they leave room for a plan
@@ -230,6 +230,7 @@ export class AgentRuntime {
       if (signal?.aborted) { cancelTurn(); signal.throwIfAborted(); }
       const messages = pending.messages;
       const toolCalls = pending.tool_calls || [];
+      const executedCalls = new Set(pending.executed_calls || []);
       const native = agentProviderUsesNativeTools(pending.route.provider);
       // A proposal saved before transcripts existed ends in a raw-JSON
       // assistant request with no call id; its result stays a user message.
@@ -246,6 +247,7 @@ export class AgentRuntime {
             budget: { spend_usd: Math.max(0, pending.definition.limits.spend_usd - (pending.usage?.cost_usd || 0)),
               wall_seconds: pending.definition.limits.wall_seconds } });
           this.recordDelegatedUsage(pending.usage, result.delegated_usage);
+          executedCalls.add(toolCallFingerprint(pending.tool, pending.input));
           toolCalls.push({ tool: pending.tool, status: "ok", duration_ms: result.duration_ms, effect: "write" });
           answer(result.output, toolOutputFailed(result.output));
         } catch (toolError) {
@@ -256,7 +258,7 @@ export class AgentRuntime {
       return await this.continueTurn({
         client, definition: resumed.session.definition || pending.definition, session: resumed.session, token: resumed.token,
         turnID: pending.turn_id, messages, tools: pending.tools, systemPrompt: pending.system_prompt,
-        route: pending.route, cwd, usage: usageTotals(pending.usage), toolCalls, toolSummary: null, startedAt: pending.started_at_ms,
+        route: pending.route, cwd, usage: usageTotals(pending.usage), toolCalls, executedCalls, toolSummary: null, startedAt: pending.started_at_ms,
         prompt: pending.message, unbudgeted: pending.unbudgeted === true, signal,
       });
     } catch (error) {
@@ -289,6 +291,8 @@ export class AgentRuntime {
     // API providers take the conversation as native messages; prompt-only
     // providers take its role-preserving JSON form.
     const native = agentProviderUsesNativeTools(state.route.provider);
+    // Calls this logical turn has executed, by name and canonical arguments.
+    state.executedCalls ||= new Set();
     while (state.unbudgeted || state.usage.turns < state.definition.limits.turns) {
       state.leaseSignal?.throwIfAborted(); state.execution?.check();
       if (!state.unbudgeted && state.usage.cost_usd >= state.definition.limits.spend_usd) throw Object.assign(new Error("Agent turn exceeded its spend limit"), { code: "agent_budget_exceeded" });
@@ -307,12 +311,17 @@ export class AgentRuntime {
       state.progress?.({ type: "turn.started", turn: state.usage.turns + 1 });
       let generated;
       try {
-        const providerCall = this.callProvider(state.route.provider, renderConversation(state.messages), {
-          modelName: state.route.modelName, systemPrompt: `${state.systemPrompt}\n\n${executionContext(state.toolCalls)}`, promptCache: true, cwd: state.cwd,
+        // The execution record changes on every continuation, so it rides at
+        // the end of the request (after the conversation, in its last user
+        // turn) and the pinned system prompt stays byte-stable for caching.
+        const record = executionContext(state.toolCalls);
+        const transcript = native ? dispatchTranscript(state.messages) : null;
+        const providerCall = this.callProvider(state.route.provider, `${renderConversation(state.messages)}\n\n${record}`, {
+          modelName: state.route.modelName, systemPrompt: state.systemPrompt, promptCache: true, cwd: state.cwd,
           reasoningEffort: state.definition.reasoning_effort, idleSeconds: state.definition.limits.wall_seconds, onActivity, onInactivityWatchdog,
           signal: controller.signal, tools: state.tools, allowToolBatching: canBatchToolCalls(state.tools, state.definition),
           maxOutputTokens: state.maxOutputTokens || (state.tools?.length ? TOOL_TURN_MAX_OUTPUT_TOKENS : undefined),
-          ...(native ? { transcript: dispatchTranscript(state.messages) } : {}),
+          ...(native ? { transcript: transcript.length ? [...transcript, { role: "user", text: record }] : transcript } : {}),
         });
         generated = await abortable(providerCall, controller.signal);
       } catch (error) {
@@ -339,7 +348,7 @@ export class AgentRuntime {
       state.progress?.({ type: "turn.finished", turn: state.usage.turns, ...usageProgress(before, state.usage) });
       const content = String(generated?.output || "").trim();
       const nativeCalls = generated?.toolCalls || (generated?.toolCall ? [generated.toolCall] : null);
-      let calls, malformed;
+      let calls, malformed, afterCommentary = false;
       if (nativeCalls?.length) {
         calls = nativeCalls.map(call => ({ name: call.name, arguments: call.arguments, id: call.id,
           raw: JSON.stringify({ name: call.name, arguments: call.arguments }) }));
@@ -350,17 +359,30 @@ export class AgentRuntime {
         const parsed = parseAgentToolTurn(content);
         calls = [];
         malformed = parsed.malformed || parsed.calls.length > 0;
-      } else ({ calls, malformed } = parseAgentToolTurn(content));
+      } else ({ calls, malformed, afterCommentary = false } = parseAgentToolTurn(content));
       calls = calls.map((call, index) => ({ ...call, id: toolCallId(call, state.usage.turns, index) }));
-      if (!calls.length) {
-        if (malformed) {
+      // Commentary-then-call is a live request, but a reply that ends by
+      // quoting a call this turn already executed ("Saved. The request I
+      // issued was: {...}") is ambiguous: run nothing and ask for a restatement.
+      // Only writes are held back (Mason, 2026-11-19): repeating a read, such
+      // as a status poll or a re-read after an edit, is ordinary and harmless.
+      const repeated = afterCommentary
+        ? calls.find(call => state.tools?.find(tool => tool.name === call.name)?.effect === "write"
+          && state.executedCalls.has(toolCallFingerprint(call.name, call.arguments))) : null;
+      if (!calls.length || repeated) {
+        if (malformed || repeated) {
+          // The limit counts consecutive malformed replies; an executed call resets it.
           if ((state.protocolRepairs || 0) >= 1) {
-            throw Object.assign(new Error("Agent repeatedly simulated tool results without executing a tool"), { code: "agent_protocol_error" });
+            throw Object.assign(new Error(repeated
+              ? "Agent repeatedly ended its reply with a tool request that already ran"
+              : "Agent repeatedly simulated tool results without executing a tool"), { code: "agent_protocol_error" });
           }
           state.protocolRepairs = (state.protocolRepairs || 0) + 1;
           state.messages.push(
             { role: "assistant", content: "[Unexecuted tool-call attempt omitted]" },
-            { role: "user", content: native
+            { role: "user", content: repeated
+              ? `Your previous response ended with a ${repeated.name} request identical to one that already ran in this turn. It was not run again. To run it again, return only that JSON request with no surrounding text; otherwise give your final answer without the request.`
+              : native
               ? "Your previous response wrote a tool call or tool result as text. No tool ran. Use the provided tools to act, or answer normally without claiming a tool ran. Never invent tool results."
               : "Your previous response was not a valid tool call. No tool ran. Return valid JSON tool-call object(s) with no surrounding text, or answer normally without claiming a tool ran. Never invent tool results." },
           );
@@ -409,7 +431,7 @@ export class AgentRuntime {
             expires_at: isoAfter(state.definition.limits.wall_seconds), idempotency_key: idempotencyKey,
             messages: [...state.messages, { ...request, tool_calls: request.tool_calls.filter(item => item.id === call.id), raw: call.raw }], tools: state.tools,
             system_prompt: state.systemPrompt, route: state.route, usage: state.usage, tool_calls: state.toolCalls,
-            definition: state.definition,
+            executed_calls: [...state.executedCalls], definition: state.definition,
           };
           const paused = await state.client.request("agent.turn.pause", { session_id: state.session.id, token: state.token, proposal });
           return this.envelope(paused.session, state.turnID, "needs_confirmation", "", state.toolCalls, [paused.pending], state.usage, null, state.toolSummary);
@@ -421,6 +443,8 @@ export class AgentRuntime {
           const result = await state.client.request("agent.turn.invoke", { session_id: state.session.id, token: state.token, tool: call.name, input: call.arguments, idempotency_key: idempotencyKey,
             budget: { spend_usd: Math.max(0, state.definition.limits.spend_usd - state.usage.cost_usd), wall_seconds: state.definition.limits.wall_seconds } });
           this.recordDelegatedUsage(state.usage, result.delegated_usage);
+          state.executedCalls.add(toolCallFingerprint(call.name, call.arguments));
+          state.protocolRepairs = 0;
           const status = tool.kind === "script" && result.output?.ok === false ? "failed" : "ok";
           state.toolCalls.push({ tool: call.name, status, duration_ms: result.duration_ms, effect: tool.effect });
           state.toolSummary?.push({ tool: call.name, status, duration_ms: result.duration_ms, effect: tool.effect,

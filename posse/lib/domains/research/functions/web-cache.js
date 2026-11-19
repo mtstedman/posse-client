@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { normalizedToolOutcome } from "../../observability/functions/tool-observation-summary.js";
 import { getArtifactsByWorkItem, storeArtifact } from "../../queue/functions/index.js";
 import { getArtifactPageByWorkItem } from "../../queue/functions/artifacts.js";
 
@@ -34,19 +35,40 @@ function safeJson(value, fallback = null) {
   }
 }
 
-function excerptForUrl(output, url) {
-  const normalized = normalizeWebCacheUrl(url);
-  const host = (() => {
-    try { return new URL(normalized).hostname; } catch { return ""; }
-  })();
+const URL_TOKEN = /https?:\/\/[^\s<>"'`]+/gi;
+
+function count(text, char) {
+  return text.split(char).length - 1;
+}
+
+// A URL as cited in prose: drop trailing sentence punctuation or emphasis,
+// and a closing bracket the URL itself did not open.
+function citedUrl(token) {
+  let url = token;
+  for (;;) {
+    const last = url.at(-1);
+    if (last && ".,;:!?*_".includes(last)) url = url.slice(0, -1);
+    else if (last === ")" && count(url, ")") > count(url, "(")) url = url.slice(0, -1);
+    else if (last === "]" && count(url, "]") > count(url, "[")) url = url.slice(0, -1);
+    else return url;
+  }
+}
+
+// Lines that cite this exact URL (same cache identity), not its host or a
+// longer URL it prefixes. Empty when no line names it.
+function excerptForUrl(output, normalizedUrl) {
   const lines = String(output || "")
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line && (line.includes(url) || (host && line.includes(host))))
+    .filter((line) => [...line.matchAll(URL_TOKEN)]
+      .some((match) => normalizeWebCacheUrl(citedUrl(match[0])) === normalizedUrl))
     .slice(0, 6);
   return lines.join("\n").slice(0, 2000);
 }
 
+// URLs this job fetched without a recorded failure. A row with no outcome
+// (a provider replay that carried no status) stays eligible; its excerpt
+// must still cite the exact URL.
 function observedFetchUrls(jobId) {
   if (!jobId) return [];
   const rows = getDb().prepare(`
@@ -56,6 +78,13 @@ function observedFetchUrls(jobId) {
   `).all(jobId);
   return rows
     .map((row) => safeJson(row.detail_json, {}))
+    .filter((detail) => {
+      const outcome = normalizedToolOutcome(detail?.outcome, {
+        ok: typeof detail?.ok === "boolean" ? detail.ok : null,
+        error: detail?.error || "",
+      });
+      return outcome == null || outcome === "succeeded";
+    })
     .map((detail) => String(detail?.url || "").trim())
     .filter(Boolean);
 }
@@ -128,8 +157,11 @@ export function cacheResearchWebFetches({ workItemId, jobId, attemptId = null, o
   for (const { rawUrl, normalizedUrl } of urls) {
     const urlHash = webCacheKey(normalizedUrl);
     if (!urlHash || existing.has(urlHash)) continue;
+    // Without a line citing the URL there is no evidence to prefer over a
+    // re-fetch, so nothing is cached for it.
+    const excerpt = excerptForUrl(output, normalizedUrl);
+    if (!excerpt) continue;
     existing.add(urlHash);
-    const excerpt = excerptForUrl(output, rawUrl) || (rawUrl !== normalizedUrl ? excerptForUrl(output, normalizedUrl) : "");
     stored.push(storeArtifact({
       work_item_id: workItemId,
       job_id: jobId,

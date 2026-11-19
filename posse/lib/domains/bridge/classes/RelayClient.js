@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 
 import {
   BRIDGE_FRAME_TYPES,
+  BRIDGE_TRANSPORTS,
   BRIDGE_PROTOCOL_VERSION,
 } from "../../../catalog/bridge.js";
 import {
@@ -262,6 +263,7 @@ export class RelayClient extends EventEmitter {
       const ack = await this.dispatch(frame, {
         projectDir: this.projectDir,
         actor: "bridge-relay",
+        transport: BRIDGE_TRANSPORTS.RELAY,
         instanceId: this.instanceId,
         bridgeInstanceId: this.instanceId,
         tailBridgeEvents: this.tailBridgeEvents,
@@ -338,6 +340,9 @@ export class RelayClient extends EventEmitter {
       authenticated_at: new Date().toISOString(),
       last_error: null,
     });
+    // Once per connection: the flag is cleared whenever the socket is retired,
+    // so every reconnect raises this again.
+    this.emit("authenticated");
   }
 
   status() {

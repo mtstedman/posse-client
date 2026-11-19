@@ -283,6 +283,8 @@ export class Display {
     this.onNudge = null;        // (jobId: number, correction: string) => void
     this.onImage = null;        // (prompt: string) => void
     this.onReviewPending = null; // () => void
+    this.onDeployPending = null; // () => void
+    this.deployAvailable = null; // () => boolean: merged work is waiting to be pushed
     this.onApprovalAction = null; // (wiId: number, action: string) => void
     this.onWrapUpEarlyExit = null; // () => void
     this.getPipelineData = null;  // () => [{ wi, jobs, artifacts }] — for pipeline view
@@ -317,6 +319,8 @@ export class Display {
     this._monitorAgentsCacheAt = 0;
     this._monitorToolRatchetJob = null; // tools-box height ratchet, per selected job
     this._monitorToolRatchetH = 0;
+    this._monitorToolsExpanded = false;  // [e]: list every call of the selected agent's tool groups
+    this._monitorConversationCache = null; // selected agent's conversation, ~750ms TTL
     this._providerUsageRefreshTimer = null;
     this._lastProviderUsageRefreshErrorAt = 0;
     this._providerUsageRefreshError = null;
@@ -1324,7 +1328,9 @@ export class Display {
     // Free text answers every remaining question, as it does for a parked
     // gate (answerHumanInput gives each question the same answer).
     do {
-      q.answers.push({ question: q.questions[q.currentIdx], answer: freeText || answerChoice, metadata });
+      // A note sent with the choice takes ask's "<choice>: note" form.
+      const note = !freeText && typeof delivery.feedback === "string" ? delivery.feedback.trim() : "";
+      q.answers.push({ question: q.questions[q.currentIdx], answer: freeText || (note ? `${answerChoice}: ${note}` : answerChoice), metadata });
       q.currentIdx += 1;
     } while (freeText && q.currentIdx < q.questions.length);
     if (q.currentIdx < q.questions.length) {
@@ -1704,6 +1710,10 @@ export class Display {
     return this._inputController._jumpToWaitingMonitorAgent.call(this, ...args);
   }
 
+  _startMonitorAnswer(...args) {
+    return this._inputController._startMonitorAnswer.call(this, ...args);
+  }
+
   _submitAnswer(...args) {
     return this._inputController._submitAnswer.call(this, ...args);
   }
@@ -1928,6 +1938,18 @@ export class Display {
   }
   _buildMonitorFleetLines(...args) {
     return this._monitorRenderer._buildMonitorFleetLines.call(this, ...args);
+  }
+  _monitorConversationForAgent(...args) {
+    return this._monitorRenderer._monitorConversationForAgent.call(this, ...args);
+  }
+  _monitorIsInteractive(...args) {
+    return this._monitorRenderer._monitorIsInteractive.call(this, ...args);
+  }
+  _monitorConversationAnswerGateJobId(...args) {
+    return this._monitorRenderer._monitorConversationAnswerGateJobId.call(this, ...args);
+  }
+  _buildMonitorConversationLanes(...args) {
+    return this._monitorRenderer._buildMonitorConversationLanes.call(this, ...args);
   }
   _monitorToolActivityForJob(...args) {
     return this._monitorRenderer._monitorToolActivityForJob.call(this, ...args);

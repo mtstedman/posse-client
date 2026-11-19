@@ -1,52 +1,41 @@
 import path from "path";
 import { isArtifactMode } from "../../artifacts/functions/index.js";
 import { isUnderRoot, normPath, normalizeRoots } from "../../../shared/scope/functions/path.js";
-import { assessmentScopePathResolver } from "../classes/AssessmentScopePathResolver.js";
 
 export function mergeUniquePaths(...groups) {
   return [...new Set(groups.flat().filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))];
 }
 
-function _scopePathCandidates(filePath, nestedRepoPrefix = null) {
-  const normalized = normPath(filePath);
-  if (!normalized) return [];
-  const candidates = [normalized];
-  if (nestedRepoPrefix) {
-    const prefix = `${nestedRepoPrefix}/`;
-    if (normalized.startsWith(prefix)) {
-      const stripped = normalized.slice(prefix.length);
-      if (stripped) candidates.push(stripped);
-    }
-  }
-  return [...new Set(candidates)];
-}
-
+// Committed files, job scopes, requests and manifests all name paths relative
+// to the project directory the job ran in (`git diff --relative` for commits
+// and branch net diffs), so they are compared as they are. A project nested
+// in its repository makes "strip the prefix if present" ambiguous: with
+// project `backend`, `backend/settings.py` is the package's file, not
+// ./settings.py.
 export function findOutOfScopeCommittedFiles(filesCommitted, {
   allowedFiles = [],
   allowedCreateFiles = [],
   allowedDeleteFiles = [],
   allowedCreateRoots = [],
   cwd = process.cwd(),
-  nestedRepoPrefix = null,
 } = {}) {
-  const effectiveNestedRepoPrefix = nestedRepoPrefix || assessmentScopePathResolver.deriveNestedRepoPrefix(cwd);
   const allAllowed = new Set([
     ...allowedFiles,
     ...allowedCreateFiles,
     ...allowedDeleteFiles,
-  ].flatMap((value) => _scopePathCandidates(value, effectiveNestedRepoPrefix)));
+  ].map(normPath).filter(Boolean));
   const normalizedRoots = normalizeRoots(allowedCreateRoots, cwd);
   return (Array.isArray(filesCommitted) ? filesCommitted : []).filter((filePath) => {
-    const candidates = _scopePathCandidates(filePath, effectiveNestedRepoPrefix);
-    if (candidates.length === 0) return true;
-    return !candidates.some((candidate) => allAllowed.has(candidate) || isUnderRoot(candidate, normalizedRoots));
+    const candidate = normPath(filePath);
+    if (!candidate) return true;
+    return !(allAllowed.has(candidate) || isUnderRoot(candidate, normalizedRoots));
   });
 }
 
-function _requestedScopePathSet(filesRequested = [], cwd = null) {
+function _requestedScopePathSet(filesRequested = []) {
   const out = new Set();
   for (const request of Array.isArray(filesRequested) ? filesRequested : []) {
-    const value = normalizeAssessmentScopePath(request?.path, cwd);
+    const value = normalizeAssessmentScopePath(request?.path);
     if (value) out.add(value);
   }
   return out;
@@ -91,9 +80,9 @@ export function buildCommittedScopeViolationVerdict(assessmentContext = null, cw
   });
   if (outOfScope.length === 0) return null;
 
-  const requestedPaths = _requestedScopePathSet(assessmentContext.files_requested, cwd);
+  const requestedPaths = _requestedScopePathSet(assessmentContext.files_requested);
   const requestedCommitted = outOfScope.filter((filePath) =>
-    requestedPaths.has(normalizeAssessmentScopePath(filePath, cwd))
+    requestedPaths.has(normalizeAssessmentScopePath(filePath))
   );
   const requestedNote = requestedCommitted.length > 0
     ? ` Requested-file entries are follow-up scope, not permission for this commit: ${JSON.stringify(requestedCommitted)}.`
@@ -111,25 +100,18 @@ export function buildCommittedScopeViolationVerdict(assessmentContext = null, cw
   };
 }
 
-export function normalizeAssessmentScopePath(value, cwd = null, nestedRepoPrefix = null) {
+export function normalizeAssessmentScopePath(value) {
   if (!value) return null;
   const raw = String(value).trim();
   if (!raw) return null;
   if (path.isAbsolute(raw)) return raw;
-  const normalized = raw.replace(/\\/g, "/");
-  const prefix = nestedRepoPrefix || (cwd ? assessmentScopePathResolver.deriveNestedRepoPrefix(cwd) : null);
-  if (prefix && normalized.startsWith(`${prefix}/`)) {
-    return normalized.slice(prefix.length + 1);
-  }
-  return normalized;
+  return raw.replace(/\\/g, "/");
 }
 
 export function buildAssessmentProviderScope({ cwd = null, assessmentContext = null } = {}) {
   if (!assessmentContext || typeof assessmentContext !== "object") {
     return { scopedFiles: [], createFiles: [], deleteFiles: [], createRoots: [] };
   }
-  const nestedRepoPrefix = assessmentScopePathResolver.deriveNestedRepoPrefix(cwd);
-
   const scopedFiles = mergeUniquePaths(
     ...(Array.isArray(assessmentContext.allowed_files) ? [assessmentContext.allowed_files] : []),
     ...(Array.isArray(assessmentContext.files_committed) ? [assessmentContext.files_committed] : []),
@@ -137,22 +119,22 @@ export function buildAssessmentProviderScope({ cwd = null, assessmentContext = n
     ...(Array.isArray(assessmentContext.manifest?.files)
       ? [assessmentContext.manifest.files.map((f) => f?.path).filter(Boolean)]
       : []),
-  ).map((value) => normalizeAssessmentScopePath(value, cwd, nestedRepoPrefix)).filter(Boolean);
+  ).map((value) => normalizeAssessmentScopePath(value)).filter(Boolean);
 
   const createFiles = mergeUniquePaths(
     ...(Array.isArray(assessmentContext.allowed_create_files) ? [assessmentContext.allowed_create_files] : []),
     ...(Array.isArray(assessmentContext.manifest?.files)
       ? [assessmentContext.manifest.files.map((f) => f?.path).filter(Boolean)]
       : []),
-  ).map((value) => normalizeAssessmentScopePath(value, cwd, nestedRepoPrefix)).filter(Boolean);
+  ).map((value) => normalizeAssessmentScopePath(value)).filter(Boolean);
 
   const deleteFiles = mergeUniquePaths(
     ...(Array.isArray(assessmentContext.allowed_delete_files) ? [assessmentContext.allowed_delete_files] : []),
-  ).map((value) => normalizeAssessmentScopePath(value, cwd, nestedRepoPrefix)).filter(Boolean);
+  ).map((value) => normalizeAssessmentScopePath(value)).filter(Boolean);
 
   const createRoots = mergeUniquePaths(
     ...(Array.isArray(assessmentContext.allowed_create_roots) ? [assessmentContext.allowed_create_roots] : []),
-    ...(assessmentContext.output_root ? [normalizeAssessmentScopePath(assessmentContext.output_root, cwd, nestedRepoPrefix)] : []),
+    ...(assessmentContext.output_root ? [normalizeAssessmentScopePath(assessmentContext.output_root)] : []),
   ).filter(Boolean);
 
   return { scopedFiles, createFiles, deleteFiles, createRoots };

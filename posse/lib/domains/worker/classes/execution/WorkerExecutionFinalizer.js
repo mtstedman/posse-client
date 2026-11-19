@@ -5,6 +5,7 @@ import {
   mergeJobResultFields,
 } from "../../../queue/functions/index.js";
 import { summarizeJobToolMix } from "../../../observability/functions/observations.js";
+import { persistJobToolGroups } from "../../../conversation/functions/tool-group-store.js";
 import { PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 import {
   cleanupAgentLoaderAsync,
@@ -100,6 +101,16 @@ export class WorkerExecutionFinalizer {
         }
       } catch (err) {
         worker._logFinalizerFailure(job, "tool_mix", err);
+      }
+      try {
+        // Snapshot the job's closed conversation tool groups for the same
+        // reason as tool_mix: the tail prune would otherwise leave finished
+        // jobs without their tool calls. Parked jobs re-persist on resume.
+        if (freshJob && [...TERMINAL_JOB_STATUSES, ...PARKED_JOB_STATUSES].includes(String(freshJob.status || ""))) {
+          persistJobToolGroups(job.id);
+        }
+      } catch (err) {
+        worker._logFinalizerFailure(job, "tool_groups", err);
       }
       try {
         // Unacked operator guidance on a terminal job is undeliverable —

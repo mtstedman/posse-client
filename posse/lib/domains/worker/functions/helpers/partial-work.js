@@ -12,11 +12,12 @@ import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { gitCommitAll, gitCommitAllAsync } from "../../../git/functions/commit-scope.js";
 import { listAttemptCommittedFilesAsync } from "../../../git/functions/attempt-committed-files.js";
 import { gitCurrentHash, gitCurrentHashAsync, gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
-import { snapshotAndResetDirtyWorktreeAsync, withWorktreeLock, withWorktreeLockAsync } from "../../../git/functions/worktree.js";
+import { withWorktreeLock, withWorktreeLockAsync } from "../../../git/functions/worktree.js";
 import { acquireWorktreeLock, acquireWorktreeLockAsync, gitStashLockPath, gitStashLockPathAsync } from "../../../git/functions/worktree-locks.js";
 import { MutationPolicy, scopedDeleteTargets } from "../../../../shared/scope/classes/MutationPolicy.js";
 import { findActiveSiblingLockForPath } from "../../../queue/functions/sibling-locks.js";
 import { isTurnBudgetExhaustedDetails } from "./diagnostics.js";
+import { snapshotAndResetSharedWorktreeAsync } from "./shared-worktree-reset.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
@@ -568,18 +569,25 @@ export async function revertPartialWork(worker, job, wtPath, {
   reason = "partial-work-revert",
 } = {}) {
   if (!wtPath || !(await gitHasChangesAsync(wtPath))) return { reverted: false };
-  const snapshotDir = await snapshotAndResetDirtyWorktreeAsync(wtPath, worker?.projectDir || wtPath, {
+  // A sibling's dirty files are kept: the partial-work state names only
+  // siblings that hold active locks, not one parked with work in place.
+  const { snapshotDir, deferred } = await snapshotAndResetSharedWorktreeAsync(job, wtPath, worker?.projectDir || wtPath, {
     reason,
-    branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-    wiId: job.work_item_id,
+    label: "partial-work revert",
+    attemptId,
   });
+  if (deferred) return { reverted: false };
+  // A SnapshotRef names a git ref, or a fallback directory shown relative.
+  const snapshotLabel = !snapshotDir ? ""
+    : snapshotDir.isDirectory?.() ? path.relative(worker?.projectDir || wtPath, String(snapshotDir)).replace(/\\/g, "/")
+      : String(snapshotDir);
   logEvent({
     work_item_id: job.work_item_id,
     job_id: job.id,
     attempt_id: attemptId,
     event_type: EVENT_TYPES.JOB_PARTIAL_WORK_REVERTED,
     actor_type: EVENT_ACTORS.WORKER,
-    message: `Reverted partial work after snapshot${snapshotDir ? ` ${path.relative(worker?.projectDir || wtPath, snapshotDir).replace(/\\/g, "/")}` : ""}`,
+    message: `Reverted partial work after snapshot${snapshotLabel ? ` ${snapshotLabel}` : ""}`,
     event_json: JSON.stringify({
       snapshot_dir: snapshotDir || null,
       reason,

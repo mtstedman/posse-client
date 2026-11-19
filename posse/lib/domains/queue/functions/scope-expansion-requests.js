@@ -190,15 +190,50 @@ export function createScopeExpansionOperations({
         return { ok: false, code: "scope_request_context_mismatch", paused: false, message: "The scope request does not belong to the active work item." };
       }
       const payload = parseJobPayloadObject(current);
-      const pending = payload._pending_scope_request && typeof payload._pending_scope_request === "object"
+      let pending = payload._pending_scope_request && typeof payload._pending_scope_request === "object"
         ? payload._pending_scope_request
         : null;
+      // A decision that arrived after the live hold expired has no waiter
+      // left to consume it, and a retained decided request would bounce every
+      // later request with scope_request_decided until the attempt ends.
+      // Consume it here as the waiter would (ownership for an approval, the
+      // record dropped either way), then handle this request afresh. Before
+      // the hold expires the waiter owns it; a parked job's settle path owns
+      // it once the job is no longer running.
+      if (pending?.decision && pending.hold_expired === true && current.status === "running") {
+        if (pending.decision === "approved") {
+          const ownership = acquireAdditionalJobWritePaths(current.id, scopeRequestBatchEntries(pending).map((entry) => entry.path));
+          if (!ownership.ok) return ownership;
+        }
+        delete payload._pending_scope_request;
+        updateJobPayload(current.id, JSON.stringify(payload));
+        pending = null;
+      }
       // The durable job payload is the authority. A reconnected MCP process or
       // an overlapping embedded runtime can retain stale local predicates after
       // a prior approval and ask again for the same exact path. Return a grant
       // receipt so the caller refreshes its local predicate instead of creating
       // a duplicate human gate for authority the job already owns.
       if (jobPayloadAlreadyAuthorizesScopePath(payload, normalizedPath, normalizedAccess)) {
+        // A same-path retry consumes an approval that arrived after its live
+        // hold expired: no waiter is left to consume it, and a retained
+        // decided request bounces every other path with scope_request_decided
+        // until the attempt ends. Consume it as the waiter would. Before the
+        // hold expires the waiter still owns it; a parked job's settle path
+        // owns it once the job is no longer running.
+        const pendingEntries = pending ? scopeRequestBatchEntries(pending) : [];
+        if (
+          pending?.decision === "approved"
+          && pending.hold_expired === true
+          && current.status === "running"
+          && pendingEntries.some((entry) => entry.path === normalizedPath)
+        ) {
+          const ownership = acquireAdditionalJobWritePaths(current.id, pendingEntries.map((entry) => entry.path));
+          if (!ownership.ok) return ownership;
+          const consumedPayload = { ...payload };
+          delete consumedPayload._pending_scope_request;
+          updateJobPayload(current.id, JSON.stringify(consumedPayload));
+        }
         return {
           ok: true,
           code: "scope_already_authorized",

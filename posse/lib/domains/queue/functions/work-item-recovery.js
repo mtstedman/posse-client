@@ -36,7 +36,7 @@ import { rewireDependency } from "./dependencies.js";
 import { flushEventsNow, logEvent } from "./events.js";
 import { reopenSupersededHumanGate } from "./human-gates.js";
 import { jobHasLiveLeaseAt } from "./lease-state.js";
-import { parseJobPayload } from "./payload.js";
+import { parseJobPayload, resetJobPayloadForReexecution } from "./payload.js";
 import {
   POST_MERGE_DB_HOLD_KEY,
   postMergeDbHoldRecord,
@@ -184,9 +184,9 @@ function requeueForRecovery(job, { ts, gateJobId, note, key }) {
   const retryAssessment = payload._assess_only === true
     && verificationFailure?.type === "verification_blocked"
     && !sourceMissing;
-  if (!retryAssessment) delete payload._assess_only;
+  if (retryAssessment) delete payload._verification_blocked;
+  else resetJobPayloadForReexecution(payload);
   if (sourceMissing) delete payload._assessment_source_recovery_count;
-  delete payload._verification_blocked;
   if (note && !retryAssessment) {
     const instructionKey = fresh.job_type === "fix" && String(payload.fix_instructions || "").trim()
       ? "fix_instructions"

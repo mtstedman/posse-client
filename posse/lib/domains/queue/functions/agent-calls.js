@@ -19,6 +19,7 @@ import { discardHashRefTraversalsForAgentCall } from "./hash-refs.js";
 import { AGENT_CALL_CHILD_KINDS, isAgentCallChildKind } from "../../../catalog/agent-call.js";
 import { providerTurnLimitMode } from "../../../catalog/provider.js";
 import { pricingBasis } from "../../billing/functions/pricing.js";
+import { persistToolGroupsForJobs } from "../../conversation/functions/tool-group-store.js";
 
 // Provider-native web tool uses are replayed after the agent process returns,
 // so they can land a beat after finished_at while still belonging to the call.
@@ -28,6 +29,38 @@ const WEB_TOOL_LOG_FINISH_GRACE_SECONDS = 10;
 // dropping the first/last tool observation because of clock precision.
 const TOOL_LOG_BOUNDARY_GRACE_SECONDS = 2;
 const TOOL_LOG_FINISH_BOUNDARY_GRACE_SECONDS = 0.25;
+// Tool observations attributed to agent call `ac`: same job, inside the call's
+// window (with a grace for replayed provider-native web tools), and not owned
+// by another call. job_observations are tail-pruned once the job is terminal,
+// so completeAgentCall stores this count on the row (tool_call_count).
+const AGENT_CALL_TOOL_OBSERVATION_COUNT_SQL = `(
+  SELECT COUNT(*) FROM job_observations o
+  WHERE o.job_id = ac.job_id
+    AND o.observation_type LIKE 'tool.%'
+    AND o.observation_type != 'tool.chain_read'
+    AND o.observation_type != 'tool.response_transform'
+    AND o.observation_type != 'tool.surface.issued'
+    AND o.observation_type NOT LIKE '%.started'
+    AND (
+      COALESCE(
+        json_extract(o.detail_json, '$.agent_call_id'),
+        json_extract(o.detail_json, '$.parent_agent_call_id')
+      ) IS NULL
+      OR CAST(COALESCE(
+        json_extract(o.detail_json, '$.agent_call_id'),
+        json_extract(o.detail_json, '$.parent_agent_call_id')
+      ) AS INTEGER) = ac.id
+    )
+    AND o.created_at >= ac.started_at
+    AND (
+      ac.finished_at IS NULL
+      OR o.created_at <= ac.finished_at
+      OR (
+        o.observation_type IN ('tool.web_fetch', 'tool.web_search')
+        AND julianday(o.created_at) <= julianday(ac.finished_at) + (${WEB_TOOL_LOG_FINISH_GRACE_SECONDS} / 86400.0)
+      )
+    )
+)`;
 const RESEARCH_GUARDRAIL_OBSERVATION_TYPES = new Set([
   "research.evidence",
   "research.synthesis_required",
@@ -288,6 +321,10 @@ export function completeAgentCall(id, {
     usage_segment_count,
     id,
   );
+  // Display-only: a failure to record the count must not fail the call.
+  try {
+    db.prepare(`UPDATE agent_calls AS ac SET tool_call_count = ${AGENT_CALL_TOOL_OBSERVATION_COUNT_SQL} WHERE ac.id = ?`).run(id);
+  } catch { /* the admin view falls back to the retained observations */ }
   const row = db.prepare(`SELECT * FROM agent_calls WHERE id = ?`).get(id);
   if (row) {
     // Traversal capabilities are call-scoped missing-content cursors. Any
@@ -737,6 +774,7 @@ export function cleanupRunningAgentCalls() {
 export function reconcileOrphanedAgentCalls() {
   const db = getDb();
   const ts = new Date(leaseNowMs()).toISOString();
+  const reconciledJobIds = new Set();
   const execute = () => {
     const stuck = db.prepare(`
       SELECT ac.id, ac.work_item_id, ac.job_id, ac.attempt_id, ac.role,
@@ -768,6 +806,7 @@ export function reconcileOrphanedAgentCalls() {
       const result = fix.run(ts, call.id);
       if (result.changes === 0) continue;
       reconciled += 1;
+      if (call.job_id != null) reconciledJobIds.add(call.job_id);
       logEvent({
         work_item_id: call.work_item_id,
         job_id: call.job_id,
@@ -793,8 +832,10 @@ export function reconcileOrphanedAgentCalls() {
     return reconciled;
   };
 
-  if (db.inTransaction) return execute();
-  return runImmediateTransaction(db, execute);
+  const reconciled = db.inTransaction ? execute() : runImmediateTransaction(db, execute);
+  // Timed-out calls now have an end; snapshot their closed tool groups.
+  persistToolGroupsForJobs(reconciledJobIds, { db });
+  return reconciled;
 }
 
 /**
@@ -835,7 +876,7 @@ export function listWorkItemsWithCallRollups({ limit = 200 } = {}) {
       COALESCE(ac.total_duration_ms, 0) AS total_duration_ms,
       COALESCE(ac.cost_usd, 0)         AS cost_usd,
       COALESCE(jc.job_count, 0)        AS job_count,
-      COALESCE(obs.tool_calls, 0)      AS tool_calls
+      MAX(COALESCE(ac.stored_tool_calls, 0), COALESCE(obs.tool_calls, 0)) AS tool_calls
     FROM work_items wi
     LEFT JOIN (
       SELECT
@@ -864,7 +905,8 @@ export function listWorkItemsWithCallRollups({ limit = 200 } = {}) {
         SUM(CASE WHEN billing_precision IN ('exact', 'recovered_exact') THEN 1 ELSE 0 END) AS exact_usage_calls,
         SUM(CASE WHEN billing_precision IN ('aggregate_only', 'incomplete') THEN 1 ELSE 0 END) AS inexact_usage_calls,
         SUM(COALESCE(duration_ms, 0))                     AS total_duration_ms,
-        SUM(COALESCE(cost_estimate_usd, 0))               AS cost_usd
+        SUM(COALESCE(cost_estimate_usd, 0))               AS cost_usd,
+        SUM(COALESCE(tool_call_count, 0))                 AS stored_tool_calls
       FROM agent_calls
       WHERE work_item_id IS NOT NULL
       GROUP BY work_item_id
@@ -901,34 +943,9 @@ export function getAgentCallsWithToolCountsByWorkItem(workItemId) {
     SELECT
       ac.*,
       j.job_type, j.status AS job_status,
-      (
-        SELECT COUNT(*) FROM job_observations o
-        WHERE o.job_id = ac.job_id
-          AND o.observation_type LIKE 'tool.%'
-          AND o.observation_type != 'tool.chain_read'
-          AND o.observation_type != 'tool.response_transform'
-          AND o.observation_type != 'tool.surface.issued'
-          AND o.observation_type NOT LIKE '%.started'
-          AND (
-            COALESCE(
-              json_extract(o.detail_json, '$.agent_call_id'),
-              json_extract(o.detail_json, '$.parent_agent_call_id')
-            ) IS NULL
-            OR CAST(COALESCE(
-              json_extract(o.detail_json, '$.agent_call_id'),
-              json_extract(o.detail_json, '$.parent_agent_call_id')
-            ) AS INTEGER) = ac.id
-          )
-          AND o.created_at >= ac.started_at
-          AND (
-            ac.finished_at IS NULL
-            OR o.created_at <= ac.finished_at
-            OR (
-              o.observation_type IN ('tool.web_fetch', 'tool.web_search')
-              AND julianday(o.created_at) <= julianday(ac.finished_at) + (${WEB_TOOL_LOG_FINISH_GRACE_SECONDS} / 86400.0)
-            )
-          )
-      ) AS tool_calls
+      -- The count stored at completion survives the telemetry prune; the
+      -- retained rows also cover running calls and late web-tool replays.
+      MAX(COALESCE(ac.tool_call_count, 0), ${AGENT_CALL_TOOL_OBSERVATION_COUNT_SQL}) AS tool_calls
     FROM agent_calls ac
     LEFT JOIN jobs j ON j.id = ac.job_id
     WHERE ac.work_item_id = ?

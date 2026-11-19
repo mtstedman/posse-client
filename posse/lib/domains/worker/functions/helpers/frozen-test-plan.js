@@ -326,7 +326,9 @@ function resolveTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
   }
   if (!command) return null;
   const taskAbAcceptance = payload?._task_ab_test_command === true;
-  const approvalRequest = taskAbAcceptance ? null : operationalCommandApprovalRequest(command);
+  const approvalRequest = taskAbAcceptance ? null : operationalCommandApprovalRequest(command, {
+    cwd, compiledApproval: payload?._operational_command_approval_required,
+  });
   const approval = payload?._operator_approved_command;
   const operatorApproved = !!(
     approvalRequest

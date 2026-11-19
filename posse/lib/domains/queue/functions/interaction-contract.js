@@ -1,4 +1,4 @@
-import { gateQuestionChoiceEntries, validQuestionChoiceEntries } from "../../../catalog/question-choices.js";
+import { gateQuestionChoiceEntries, questionChoiceDanger, validQuestionChoiceEntries } from "../../../catalog/question-choices.js";
 import { CHOICE_COPY } from "../../../catalog/work-item-interaction-copy.js";
 import { ACTION_BEARING_INTERACTION_KINDS_SQL, ACTION_ID_LOOKUP_EXPRESSION_SQL, ACTION_METADATA_KEY, QUESTION_CAPABILITY, MAX_QUESTIONS, MAX_NUDGES, MAX_FEEDBACK, MAX_PROMPT_CHARS, MAX_CONTEXT_CHARS, MAX_FEEDBACK_SUMMARY_CHARS, MAX_FEEDBACK_DETAIL_CHARS, MAX_NUDGE_BODY_CHARS, MAX_ACTION_ID_BYTES, DIRECT_ACTION_RESERVATION_STALE_MS, LIVE_OWNER_DELIVERY_HANDLERS, LIVE_OWNER_DELIVERY_HANDLERS_SQL, FEEDBACK_PHASES, FEEDBACK_STATUSES, HANDLER_BY_KIND } from "../../../catalog/work-item-interactions.js";
 import { JOB_TYPE_ROLE_REGISTRY } from "../../../catalog/provider.js";
@@ -12,6 +12,8 @@ import {
   TERMINAL_JOB_STATUSES_SQL,
 } from "../../../catalog/job.js";
 import {
+  humanGateActionAcceptsFeedback,
+  HUMAN_GATE_FEEDBACK_MAX_CHARS,
   HUMAN_INPUT_FREE_TEXT_CHOICE_ID,
   HUMAN_INPUT_FREE_TEXT_MAX_CHARS,
   humanInputChoicesForPayload,
@@ -19,6 +21,7 @@ import {
 } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { isProcessRunAlive, processStartToken } from "../../../shared/platform/functions/process-liveness.js";
 import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
 import { now, runImmediateTransaction } from "./common.js";
 import { jobHasLiveLeaseAt } from "./lease-state.js";
@@ -182,6 +185,9 @@ function insertActionReservation(db, {
       descriptor,
       state: "reserved",
       reserved_at: observedAt,
+      // A direct answer is executed by the process that reserved it; this
+      // identifies that process run for abandoned-reservation recovery.
+      reserver: { pid: process.pid, start_token: processStartToken() },
       result: null,
     },
   };
@@ -286,15 +292,9 @@ function nudgeActionResult(baseArgs, {
   };
 }
 
-function choiceDanger(choiceId) {
-  if (["fail", "revert", "abandon", "waive_tests"].includes(choiceId)) return "destructive";
-  if (["reject", "skip", "replan", "cancel", "decline", "rebuild"].includes(choiceId)) return "caution";
-  return "normal";
-}
-
 function choiceRecord(choiceId, overrides = {}) {
   const [defaultLabel, defaultConsequence] = CHOICE_COPY[choiceId] || [choiceId, "Run the exact owner transition."];
-  const danger = overrides.danger || choiceDanger(choiceId);
+  const danger = overrides.danger || questionChoiceDanger(choiceId);
   return {
     choice_id: choiceId,
     label: boundedText(overrides.label || defaultLabel, 160),
@@ -587,7 +587,7 @@ function projectDurableQuestions(db, workItemId, observedAt, limit = MAX_QUESTIO
   });
 }
 
-function nudgeState(row, observedAt) {
+export function nudgeState(row, observedAt) {
   if (row.status === "superseded") return "superseded";
   if (row.status === "expired") return "expired";
   if (row.ack_state === "acknowledged" && row.ack_decision) return row.ack_decision;
@@ -875,6 +875,23 @@ function storedHumanGateCompletion(db, action) {
   };
 }
 
+// A direct answer (no owner_action) is executed by the process that reserved
+// it, without an owner lease while it validates and claims the gate, so the
+// gate's lease cannot tell whether it is still running. It is abandoned once
+// its reserving process run is gone, or once it is older than the direct
+// reservation bound without proof that that process still runs (written
+// before reservers were recorded, or no start token to rule out pid reuse).
+function directReservationAbandoned(action, row) {
+  if (action?.state !== "reserved" || action.descriptor?.owner_action != null) return false;
+  const reserverPid = Number(action.reserver?.pid);
+  const running = Number.isInteger(reserverPid) && reserverPid > 0
+    ? isProcessRunAlive(reserverPid, action.reserver?.start_token || null)
+    : null;
+  if (running !== null) return running === false;
+  const reservedAtMs = Date.parse(action.reserved_at || row?.created_at || "");
+  return Number.isFinite(reservedAtMs) && reservedAtMs <= Date.now() - DIRECT_ACTION_RESERVATION_STALE_MS;
+}
+
 function reconcileReservedQuestionAction(db, existing, target, { actionId } = {}) {
   const replay = actionReplayOrConflict(existing, target, { actionId, actionKind: "question.answer" });
   if (!existing?.action || replay?.outcome !== "pending") return { replay };
@@ -901,11 +918,13 @@ function reconcileReservedQuestionAction(db, existing, target, { actionId } = {}
   if (liveOwnerDeliveryHandler(existing.action.handler)) {
     // Only owner-delivery reservations have owner_action. A direct bridge
     // transition uses the same handler and can still be running without a
-    // lease, so missing ownership alone must not retire that reservation.
+    // lease, so missing ownership alone must not retire that reservation;
+    // its reserving process (directReservationAbandoned) decides instead.
     const undeliveredOwnerReservation = existing.action.state === "reserved"
       && existing.action.descriptor?.owner_action != null;
-    if ((existing.action.state === "delivered" || undeliveredOwnerReservation)
-      && completion.safeReasonCode === "owner_unavailable") {
+    const ownerLost = (existing.action.state === "delivered" || undeliveredOwnerReservation)
+      && completion.safeReasonCode === "owner_unavailable";
+    if (ownerLost || directReservationAbandoned(existing.action, existing.row)) {
       const observedAt = now();
       const result = {
         ...baseActionResult({
@@ -914,7 +933,7 @@ function reconcileReservedQuestionAction(db, existing, target, { actionId } = {}
           target,
           outcome: "rejected",
           observedAt,
-          safeReasonCode: undeliveredOwnerReservation ? "reservation_owner_lost" : "owner_lost_after_delivery",
+          safeReasonCode: existing.action.state === "delivered" ? "owner_lost_after_delivery" : "reservation_owner_lost",
         }),
         question_state: completion.state,
         result_event_id: null,
@@ -945,7 +964,15 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
   const questionId = String(args.question_id ?? "").trim();
   const choiceId = String(args.choice_id ?? "").trim();
   const generation = String(args.question_generation ?? "").trim();
+  const feedback = String(args.feedback ?? "").trim();
   const target = actionTarget({ workItemId: workItemId || args.work_item_id, jobId: jobId || args.job_id, questionId, choiceId });
+  if (Array.from(feedback).length > HUMAN_GATE_FEEDBACK_MAX_CHARS) {
+    return {
+      ...baseActionResult({ actionId, actionKind: "question.answer", target, outcome: "rejected", safeReasonCode: "feedback_too_long" }),
+      question_state: "open",
+      result_event_id: null,
+    };
+  }
   if (!validActionId(actionId)) {
     return {
       ...baseActionResult({ actionId, actionKind: "question.answer", target, outcome: "rejected", safeReasonCode: "invalid_action_id" }),
@@ -1011,6 +1038,13 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
         result_event_id: null,
       } };
     }
+    if (feedback && !humanGateActionAcceptsFeedback(question.kind, choiceId)) {
+      return { result: {
+        ...baseActionResult({ actionId, actionKind: "question.answer", target, outcome: "rejected", safeReasonCode: "feedback_not_accepted" }),
+        question_state: question.state,
+        result_event_id: null,
+      } };
+    }
     const competing = pendingQuestionAction(db, questionId, generation);
     if (competing) {
       return { result: {
@@ -1037,6 +1071,8 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
       // validator rejects a decline key on any other choice).
       ...(question.handler === "git_push" && choiceId === "decline" ? { decline: true } : {}),
       ...(question.owner_delivery ? { owner_action: choiceId } : {}),
+      // The note travels as ask's "<choice>: note" does (humanInputChoiceFeedback).
+      ...(feedback ? { feedback } : {}),
     };
     const reservationId = insertActionReservation(db, {
       actionId,
@@ -1250,6 +1286,7 @@ function ownerDeliveryDescriptor(row) {
     ...(choiceId === HUMAN_INPUT_FREE_TEXT_CHOICE_ID && typeof descriptor.answer_text === "string"
       ? { answer_text: descriptor.answer_text }
       : {}),
+    ...(typeof descriptor.feedback === "string" && descriptor.feedback ? { feedback: descriptor.feedback } : {}),
   };
 }
 
@@ -1330,6 +1367,12 @@ export function reconcileAbandonedHumanAnswerDeliveries() {
               OR julianday(j.lease_expires_at) IS NULL
               OR julianday(j.lease_expires_at) <= julianday(?)
             )
+          )
+          OR (
+            json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'reserved'
+            AND json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.handler')
+              IN (${LIVE_OWNER_DELIVERY_HANDLERS_SQL})
+            AND json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.descriptor.owner_action') IS NULL
           )
           OR (
             json_extract(ai.metadata_json, '$.${ACTION_METADATA_KEY}.state') = 'reserved'

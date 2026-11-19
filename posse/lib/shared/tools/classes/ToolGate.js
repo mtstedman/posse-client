@@ -5,6 +5,7 @@ import {
   isEmptySourceFileForGate,
   sourceFileVersionForGate,
 } from "../../../domains/integrations/functions/deterministic-mcp/source-file-gate.js";
+import { atlasNestedAction } from "../functions/atlas-nested-action.js";
 
 export { ATLAS_CHAIN_READ_MAX_LINES } from "../../../domains/integrations/functions/deterministic-mcp/source-file-gate.js";
 
@@ -22,14 +23,8 @@ const ATLAS_SOURCE_CONTENT_ACTIONS = new Set(["code.window", "code.lens"]);
 function effectiveAtlasAction(action, args = {}) {
   const normalized = stripAtlasPrefix(action);
   if (!ATLAS_GATEWAY_TOOL_NAMES.has(normalized)) return normalized;
-  const nested = String(
-    args?.gatewayAction
-    || args?.targetAction
-    || args?.actionName
-    || args?.action
-    || "",
-  ).trim();
-  return nested ? stripAtlasPrefix(nested) : normalized;
+  // Credit the action dispatch runs, read the way the session policy reads it.
+  return atlasNestedAction(args) || normalized;
 }
 
 function normalizeIssuedAtlasAction(name) {

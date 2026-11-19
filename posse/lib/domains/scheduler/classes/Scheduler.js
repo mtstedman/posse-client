@@ -17,7 +17,7 @@ import { releaseUnusedCompletedWorkItemLocks } from "../functions/unused-planned
 import crypto from "crypto";
 import { spawn } from "child_process";
 import { isBudgetPaused } from "../../queue/functions/admission-budget.js";
-import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, environmentSetupParking, grantEnvironmentSetupResume, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgeGateResolverAvailable, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
+import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, FORCE_ACQUIRE_LIVENESS_SEC, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, environmentSetupParking, grantEnvironmentSetupResume, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgeGateResolverAvailable, isPostCompletionGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
 import { WORK_ITEM_ORDER_WAIT_REASON } from "../../queue/functions/work-item-order.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getAttempts } from "../../queue/functions/attempts.js";
@@ -43,6 +43,7 @@ import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atl
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import { ENVIRONMENT_SETUP_RUNTIME_CREDIT_CAP_MS } from "../../../catalog/tools/environment-setup.js";
 import { SHARED_RUN_END_REASONS } from "../../../catalog/shared-run.js";
+import { SESSION_JOB_HOLD_REASONS } from "../../../catalog/session-sync.js";
 import { createSessionLiveProbe, sharedRunEndFromSessionPoll, sharedRunStaysOpen } from "../../pairing/functions/shared-run.js";
 import { DEFAULT_LEASE_SEC, DEFAULT_CONCURRENCY, DEFAULT_POLL_MS, DEFAULT_REPAIR_POLL_MS, LOCK_RENEW_SEC, MAX_RUNNABLE_SCAN_PER_TICK, PROGRESS_TIMEOUT_SEC, QUEUE_LOCK_INDEX_UNCONDITIONAL_REFRESH_MS, maxJobRuntimeSecFor, readActiveWorktreeCap, readAtlasDriftCheckIntervalMs, readHeadlessHumanTimeoutSec, readHumanGateResnoozeSec, readImplementationReservedSlots, readPositiveIntSetting, readRuntimeWriteCeilingMultiplier, readRuntimeWriteGraceSec } from "../functions/config.js";
 import { findFileConflict } from "../functions/file-scope.js";
@@ -63,7 +64,7 @@ import { readWaitingLanePreparationConcurrency, reconcileWaitingLaneJobCompletio
 import { SchedulerLockLease } from "./SchedulerLockLease.js";
 import { RunnableCandidateScan } from "./RunnableCandidateScan.js";
 import { reconcileReviewedHandoffsOnBoot } from "../../worker/functions/helpers/reviewed-handoff-recovery.js";
-import { reviewedAdmissionForJob, getJobWriteScope } from "../../queue/functions/file-locks.js";
+import { reviewedAdmissionForJob, getJobWriteScope, queuedYoungerJobIdsForJob } from "../../queue/functions/file-locks.js";
 import { reviewedAdmissionRequested, usesReviewedAdmission } from "../../queue/functions/reviewed-handoff-admission.js";
 import { SchedulerDispatchPlanner } from "./SchedulerDispatchPlanner.js";
 import { SchedulerLockController } from "./SchedulerLockController.js";
@@ -709,7 +710,11 @@ export class Scheduler {
     // their due times never advance; honouring a past-due poll that will not
     // run would turn the drain wait into a 1 ms spin.
     const draining = this._pairingDrainRequested === true;
-    const sharedTrunkDelayMs = draining ? null : this._sharedTrunkPoller?.delayUntilDueMs?.();
+    // The same holds while a trunk poll that overran its lap budget is still
+    // running: laps neither wait on it nor start another, so its past-due
+    // cadence (it can run to its 90 s deadline) would spin the loop too.
+    const trunkPollPending = this._trunkPollBudgetState?.pending != null;
+    const sharedTrunkDelayMs = draining || trunkPollPending ? null : this._sharedTrunkPoller?.delayUntilDueMs?.();
     const sessionDelayMs = this._sessionMonitor?.delayUntilDueMs?.();
     const sessionJobDelayMs = this._sessionRoutingUnavailable || draining ? null : this._sessionJobRouter?.delayUntilDueMs?.();
     const delays = [repairMs, readyDelayMs, sharedTrunkDelayMs, sessionDelayMs, sessionJobDelayMs]
@@ -1018,6 +1023,8 @@ export class Scheduler {
                 heartbeat_age_ms: newAge,
               });
               gotLock = this.schedulerLock.forceAcquire();
+              if (!gotLock) gotLock = await this._retryForceStealAfterLivenessCutoff(updated);
+              if (!gotLock && this._stopRequested) return false;
               if (!gotLock) {
                 this._log("Boot: decision=EXIT (lock heartbeat refreshed before force-steal — holder revived)", "red");
                 recordSchedulerLockDiagnostic({
@@ -1071,6 +1078,40 @@ export class Scheduler {
     this._running = true;
     if (!this._startLockRenewal()) return false;
     return true;
+  }
+
+  /**
+   * The verify wait showed the holder's heartbeat did not advance, but a holder
+   * that crashed within ~10 s of its last renewal is still inside
+   * forceAcquire's FORCE_ACQUIRE_LIVENESS_SEC cutoff when that 35 s wait ends.
+   * Wait out the rest of the cutoff (or to lock expiry, if sooner) and try once
+   * more. The cutoff still guards the steal itself: a holder that renews in the
+   * meantime is refused.
+   *
+   * @param {any} observed the lock row whose heartbeat did not advance
+   * @returns {Promise<boolean>} true if the lock is now held
+   */
+  async _retryForceStealAfterLivenessCutoff(observed) {
+    const current = this.schedulerLock.info();
+    if (!current) return this.schedulerLock.acquire();
+    // A changed heartbeat means the holder did revive; leave it alone.
+    if (current.owner_id !== observed?.owner_id || current.acquired_at !== observed?.acquired_at) return false;
+    const { heartbeatAge, expiresIn } = schedulerLockTiming(current, LOCK_RENEW_SEC * 2 * 1000);
+    const untilCutoffMs = FORCE_ACQUIRE_LIVENESS_SEC * 1000 - heartbeatAge;
+    const waitMs = Math.max(0, Math.min(untilCutoffMs, expiresIn)) + 1000; // 1s buffer
+    this._log(`Boot: decision=WAIT_FOR_FORCE_STEAL_CUTOFF (heartbeat_age=${formatSchedulerLockDuration(heartbeatAge)} is inside the ${FORCE_ACQUIRE_LIVENESS_SEC}s force-steal cutoff, waiting ${formatSchedulerLockDuration(waitMs)})`, "yellow");
+    recordSchedulerLockDiagnostic({
+      owner_id: this.ownerId,
+      phase: "contention",
+      decision: "wait_for_force_steal_liveness_cutoff",
+      lockInfo: current,
+      wait_ms: waitMs,
+      heartbeat_age_ms: heartbeatAge,
+      expires_in_ms: expiresIn,
+    });
+    await this._interruptibleSleep(waitMs);
+    if (this._stopRequested) return false;
+    return this.schedulerLock.acquire() || this.schedulerLock.forceAcquire();
   }
 
   /**
@@ -1831,10 +1872,7 @@ export class Scheduler {
             queue: {
               hasJobs,
               listJobs,
-              isPushOfferJob,
               isPostMergeDbTaskJob,
-              isMergeVerificationReviewJob,
-              isWorkItemDispositionGateJob,
               parseJobPayload,
               getJob,
               getHumanGate,
@@ -1922,16 +1960,16 @@ export class Scheduler {
           // Publication offers survive run closeout for later Bridge/manual
           // action, but they are not executable work and must not keep the
           // scheduler in an idle/waiting loop. Neither may a database task
-          // held for its work item's merge, its post-merge gate, or a merge
-          // verification review: the merge happens at closeout or a later
-          // review, never inside this loop. Headless runs also leave work-item
-          // disposition gates parked for the phone or CLI. Interactive runs
-          // retain active gates so the TUI can present and resolve them.
+          // held for its work item's merge or any other post-completion gate
+          // (POST_COMPLETION_GATE_KINDS: a post-merge gate, a merge
+          // verification or merge-failure recovery review): the merge happens
+          // at closeout or a later review, never inside this loop. Headless
+          // runs also leave work-item disposition gates parked for the phone
+          // or CLI. Interactive runs retain active gates so the TUI can
+          // present and resolve them.
           .filter((job) => !isPushOfferJob(job))
           .filter((job) => interactiveGateIds.has(job.id) || (
-            !isMergeVerificationReviewJob(job)
-            && !isPostMergeHeldDbJob(job) && !isPostMergeDbGateJob(job)
-            && !isWorkItemDispositionGateJob(job)
+            !isPostMergeHeldDbJob(job) && !isPostCompletionGateJob(job)
           ));
         const activeBackgroundJobs = [...activeWorkers.values()]
           .map((entry) => entry.job)
@@ -2345,7 +2383,14 @@ export class Scheduler {
             // A host-leased member never runs routable work itself, whether the
             // host declined it or session routing is unavailable right now.
             if (sessionMustWaitForHost(getLivePairingState(), job)) {
-              this._sessionJobRouter?.recordAwaitingHost?.(job);
+              // A host that is here but does not run the job's provider never
+              // takes it: a headless run, with no one to tell, fails the job
+              // with that reason so the run can end.
+              if (!this._hasDisplay && sessionRoute?.reason === SESSION_JOB_HOLD_REASONS.HOST_LACKS_PROVIDER) {
+                this._sessionJobRouter?.failForMissingHostProvider?.(job, sessionRoute);
+              } else {
+                this._sessionJobRouter?.recordAwaitingHost?.(job, sessionRoute);
+              }
               skipJobIds.add(job.id);
               continue;
             }
@@ -2475,6 +2520,8 @@ export class Scheduler {
                 ...queuedCohortJobIdsForJob(job),
                 // Queued jobs that wait on this one cannot hold it off a lane.
                 ...queuedDependentJobIdsForJob(job),
+                // Nor can younger queued jobs of its work item (K1).
+                ...queuedYoungerJobIdsForJob(job),
               ]);
               if (jobScope.files.length > 0 || jobScope.createRoots.length > 0) {
                 // findFileConflict returns only the FIRST conflicting lock, so a

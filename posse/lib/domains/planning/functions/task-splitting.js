@@ -60,20 +60,56 @@ export function normalizeExplicitImageGenerationTask(task) {
   };
 }
 
+/**
+ * A generated image declared by bare name ("logo.svg") reaches the repository
+ * only where the plan puts it: a promote mapping of that name, or the
+ * producer's declared output root. Add those whole paths to the renames so
+ * other tasks naming them follow the rename; an unrelated file that merely
+ * shares the basename does not.
+ */
+export function imageRenamesWithLinkedPaths(tasks = [], replacements = []) {
+  const pairs = new Map(replacements);
+  const join = (dir, name) => path.posix.join(String(dir).replace(/\\/g, "/"), name);
+  for (const [from, to] of replacements) {
+    if (from.includes("/")) continue;
+    for (const task of Array.isArray(tasks) ? tasks : []) {
+      for (const mapping of Array.isArray(task?.mappings) ? task.mappings : []) {
+        const dest = typeof mapping?.dest === "string" ? mapping.dest.replace(/\\/g, "/") : "";
+        if (mapping?.pattern !== from || !dest) continue;
+        if (path.posix.basename(dest) === from) pairs.set(dest, join(path.posix.dirname(dest), to));
+        else if (dest.endsWith("/") || !path.posix.extname(dest)) pairs.set(join(dest, from), join(dest, to));
+      }
+      const createsIt = Array.isArray(task?.files_to_create)
+        && (task.files_to_create.includes(from) || task.files_to_create.includes(to));
+      if (createsIt && typeof task.output_root === "string" && task.output_root) {
+        pairs.set(join(task.output_root, from), join(task.output_root, to));
+      }
+    }
+  }
+  return [...pairs.entries()];
+}
+
+const PATH_CHAR = String.raw`[\w@./\\-]`;
+
+function wholePathPattern(value) {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Not inside a longer path: no path character before it, and none after
+  // it except a sentence-ending period.
+  return new RegExp(`(?<!${PATH_CHAR})${escaped}(?!${PATH_CHAR}*[\\w@/\\\\-])`, "g");
+}
+
 export function rewriteTaskImageOutputPaths(task, replacements = []) {
   if (!task || !Array.isArray(replacements) || replacements.length === 0) return task;
-  const rewritePath = (value) => {
-    if (typeof value !== "string") return value;
-    for (const [from, to] of replacements) {
-      if (value === from) return to;
-      if (value.endsWith(`/${from}`)) return `${value.slice(0, -from.length)}${to}`;
-    }
-    return value;
-  };
+  const renames = new Map(replacements);
+  const rewritePath = (value) => (typeof value === "string" && renames.has(value) ? renames.get(value) : value);
+  // Longer paths first, so a directory-qualified rename is not preempted.
+  const textRenames = [...renames.entries()]
+    .sort(([left], [right]) => right.length - left.length)
+    .map(([from, to]) => [wholePathPattern(from), to]);
   const rewriteText = (value) => {
     if (typeof value !== "string") return value;
     let rewritten = value;
-    for (const [from, to] of replacements) rewritten = rewritten.split(from).join(to);
+    for (const [pattern, to] of textRenames) rewritten = rewritten.replace(pattern, () => to);
     return rewritten;
   };
   return {
@@ -554,6 +590,12 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
           ? imageFilesForSplit.map((file) => `- ${file}`)
           : ["- requested image deliverable(s) from the prerequisite image job"]),
       ].filter(Boolean).join("\n"),
+      // The images this task's prerequisites produce: a consumer that names
+      // one depends on this task, the split's last piece (plannerDependencyKind).
+      _split_image_files: [...new Set([
+        ...imageFilesForSplit,
+        ...(promoteTask?.mappings || []).map((mapping) => mapping?.dest).filter(Boolean),
+      ])],
       _file_kind_split_done: true,
     };
     splitTasks.push(devTask);

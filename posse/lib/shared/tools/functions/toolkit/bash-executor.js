@@ -14,7 +14,9 @@ import { environmentForNewRun } from "../../../telemetry/functions/run-env.js";
 
 const SHELL_OPERATOR_RE = /[;&|<>]/;
 const SENSITIVE_SUBPROCESS_ENV_KEY_RE = /api[_-]?key|token|secret|credential|password|passwd|pwd|auth|oauth|bearer|^posse_key$/i;
-const COMMAND_INFLUENCING_ENV_KEY_RE = /^(?:bash_env$|bash_func_|cdpath$|dyld_|env$|git_|globignore$|ifs$|ld_|magic$|pager$|less$|lessopen$|ripgrep_config_path$|grep_options$|node_options$|pythonpath$|pythonhome$|shellopts$|tmp$|temp$|tmpdir$)/i;
+// POSIXLY_CORRECT makes GNU grep stop reading options at its first operand,
+// which would turn the protected search excludes after it into file names.
+const COMMAND_INFLUENCING_ENV_KEY_RE = /^(?:bash_env$|bash_func_|cdpath$|dyld_|env$|git_|globignore$|ifs$|ld_|magic$|pager$|less$|lessopen$|ripgrep_config_path$|grep_options$|node_options$|posixly_correct$|pythonpath$|pythonhome$|shellopts$|tmp$|temp$|tmpdir$)/i;
 // Search utilities whose exit status 1 means "nothing matched"; their real
 // errors exit 2 or write to stderr.
 const NO_MATCH_EXIT_COMMANDS = new Set(["rg", "grep", "egrep", "fgrep", "findstr"]);

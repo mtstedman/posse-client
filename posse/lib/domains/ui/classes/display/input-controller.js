@@ -8,6 +8,7 @@
 // Uses the alternate screen buffer so the TUI never pollutes scrollback.
 // Supports raw stdin keypress input for questions, inject, kill commands.
 
+import { RUN_DISPLAY_GLOBAL_KEYS } from "../../../../catalog/shared-run.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import "../../../providers/functions/provider.js";
 import "../../../queue/functions/index.js";
@@ -70,6 +71,7 @@ function applyMonitorSelection(display, agent) {
   display._monitorSelectedJobId = agent.jobId;
   display._monitorSelectedAgentCallId = agent.agentCallId || null;
   display._monitorFeedbackScroll = 0;
+  display._monitorToolsExpanded = false;
   display._monitorChangesMode = false;
   display._monitorDiffOpen = false;
   display._monitorDiffFileIndex = 0;
@@ -218,6 +220,19 @@ export class DisplayInputController {
     const base = current >= 0 ? current : 0;
     const next = (base + delta + agents.length) % agents.length;
     return applyMonitorSelection(this, agents[next]);
+  }
+
+  // [a] in Agent View: the selected row's own prompt, else the gate its
+  // conversation asks. Either way the existing prompt flow answers it, and
+  // the digits then pick a choice.
+  _startMonitorAnswer() {
+    if (this._startAnsweringForJob(this._monitorSelectedJobId)) return true;
+    const selected = this._getMonitorAgents().find((agent) => agent.jobId === this._monitorSelectedJobId
+      && (agent.agentCallId || null) === (this._monitorSelectedAgentCallId || null));
+    const gateJobId = selected && typeof this._monitorConversationAnswerGateJobId === "function"
+      ? this._monitorConversationAnswerGateJobId(selected)
+      : null;
+    return gateJobId != null && gateJobId !== Number(this._monitorSelectedJobId) && this._startAnsweringForJob(gateJobId);
   }
 
   // [w]: hop between the agents that are blocked on the operator, in roster
@@ -534,7 +549,7 @@ export class DisplayInputController {
       // Honor Agent View's advertised answer hotkey before closed-choice
       // handling consumes the key as unsupported free-form input.
       if (fixedChoices.length > 0 && this._rightMode === "monitor" && matchesHotkey(str, key, "a")) {
-        this._startAnsweringForJob(this._monitorSelectedJobId);
+        this._startMonitorAnswer();
         this.requestRender({ force: true });
         return;
       }
@@ -705,7 +720,7 @@ export class DisplayInputController {
         this._nudgeJobIds = null;
         this._inputBuf = "";
         this.requestRender({ force: true });
-      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "a") && this._startAnsweringForJob(this._monitorSelectedJobId)) {
+      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "a") && this._startMonitorAnswer()) {
         this.requestRender({ force: true });
       } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "w") && this._jumpToWaitingMonitorAgent()) {
         this.requestRender({ force: true });
@@ -715,6 +730,10 @@ export class DisplayInputController {
         // (single entry) so one stray keypress can't drop a worker.
         this._inputMode = "kill";
         this._killJobIds = [this._monitorSelectedJobId];
+        this.requestRender({ force: true });
+      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "e") && this._monitorSelectedJobId) {
+        // Expand or fold every tool group in the selected agent's conversation.
+        this._monitorToolsExpanded = !this._monitorToolsExpanded;
         this.requestRender({ force: true });
       } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "d") && this._monitorSelectedJobId) {
         // Toggle the CHANGES (git-diff) view for the selected agent.
@@ -810,6 +829,10 @@ export class DisplayInputController {
       } else if (matchesHotkey(str, key, "r") && this.onReviewPending) {
         try { this.onReviewPending(); }
         catch (err) { this.addEvent(`${C.red}Review failed: ${err.message}${C.reset}`); }
+        this.requestRender({ force: true });
+      } else if (matchesHotkey(str, key, RUN_DISPLAY_GLOBAL_KEYS.DEPLOY) && this.onDeployPending && this.deployAvailable?.() === true) {
+        try { this.onDeployPending(); }
+        catch (err) { this.addEvent(`${C.red}Deploy failed: ${err.message}${C.reset}`); }
         this.requestRender({ force: true });
       } else if (matchesHotkey(str, key, "t") && this.getToolData) {
         if (this._rightMode !== "tools") this._toolsTab = 0;

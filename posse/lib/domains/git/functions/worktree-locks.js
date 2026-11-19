@@ -32,6 +32,32 @@ const WORKTREE_LOCK_POLL_MS = 50;
 const WORKTREE_LOCK_LIVE_PID_STALE_MULTIPLIER = 10;
 const ACTIVE_WORKTREE_LOCK_TOKENS = new Set();
 
+// Identity of this process across all of its threads: the kernel boot id and
+// the process start time in clock ticks (/proc/self/stat field 22). A later
+// process that inherits this pid (a container restart, pid wrap) reads a
+// different value, so a lock naming our pid with another start token belongs
+// to a dead owner. Per-thread values (a module-level random id, the lifetime
+// registry id) cannot serve: workers that load before the registry is shared
+// would read a sibling thread's live lock as foreign. Null without procfs;
+// those locks, like ones written before the token existed, keep the
+// conservative same-pid handling.
+const PROCESS_START_TOKEN = readProcessStartToken();
+
+function readProcessStartToken() {
+  if (process.platform !== "linux") return null;
+  try {
+    const stat = fs.readFileSync("/proc/self/stat", "utf8");
+    // Fields after the parenthesized command name start at field 3 (state).
+    const startTicks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+    if (!/^\d+$/.test(startTicks || "")) return null;
+    let bootId = "";
+    try { bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(); } catch { /* start time alone */ }
+    return `linux:${bootId}:${startTicks}`;
+  } catch {
+    return null;
+  }
+}
+
 // All local lock pathname transitions use one SQLite writer lock per directory.
 // A stale-file check followed by unlink cannot be made atomic with filesystem
 // stat alone: another reclaimer can replace the pathname between those calls.
@@ -138,6 +164,7 @@ function shouldReclaimParsedWorktreeLock({
   ownerState,
   ownerThreadId,
   ownerLifetime,
+  ownerProcessStart,
   ownerToken,
   releasedAtMs,
   staleMs,
@@ -147,6 +174,10 @@ function shouldReclaimParsedWorktreeLock({
   if (ownerState === false) return { reclaim: true, ownerToken, stat };
   if (hasOwnerPid && ownerState === true) {
     if (Number(ownerPid) === process.pid) {
+      // Our pid, but an earlier process's start token: that owner is dead.
+      if (ownerProcessStart && PROCESS_START_TOKEN && ownerProcessStart !== PROCESS_START_TOKEN) {
+        return { reclaim: true, ownerToken, stat };
+      }
       if (threadLifetimeRegistry.hasExited(ownerLifetime)) return { reclaim: true, ownerToken, stat };
       if (
         !ownerToken
@@ -183,6 +214,7 @@ function lockMetadata(ownerToken) {
     pid: process.pid,
     threadId,
     lifetime: threadLifetimeRegistry.current(),
+    ...(PROCESS_START_TOKEN ? { processStart: PROCESS_START_TOKEN } : {}),
     ownerToken,
     createdAt: now,
   };
@@ -332,6 +364,7 @@ function shouldReclaimWorktreeLock(lockPath, {
   let ownerPid = null;
   let ownerThreadId = null;
   let ownerLifetime = null;
+  let ownerProcessStart = null;
   let ownerCreatedAtMs = null;
   let releasedAtMs = null;
   let ownerToken = null;
@@ -339,6 +372,7 @@ function shouldReclaimWorktreeLock(lockPath, {
     const parsed = readLockMetadata(lockPath);
     ownerToken = parsed?.ownerToken || null;
     ownerLifetime = parsed?.lifetime || null;
+    ownerProcessStart = typeof parsed?.processStart === "string" ? parsed.processStart : null;
     const parsedReleasedAt = Date.parse(parsed?.releasedAt || "");
     if (Number.isFinite(parsedReleasedAt)) releasedAtMs = parsedReleasedAt;
     if (parsed?.pid != null) {
@@ -360,6 +394,7 @@ function shouldReclaimWorktreeLock(lockPath, {
     ownerState,
     ownerThreadId,
     ownerLifetime,
+    ownerProcessStart,
     ownerToken,
     releasedAtMs,
     staleMs,
@@ -377,6 +412,7 @@ async function shouldReclaimWorktreeLockAsync(lockPath, {
   let ownerPid = null;
   let ownerThreadId = null;
   let ownerLifetime = null;
+  let ownerProcessStart = null;
   let ownerCreatedAtMs = null;
   let releasedAtMs = null;
   let ownerToken = null;
@@ -384,6 +420,7 @@ async function shouldReclaimWorktreeLockAsync(lockPath, {
     const parsed = await readLockMetadataAsync(lockPath);
     ownerToken = parsed?.ownerToken || null;
     ownerLifetime = parsed?.lifetime || null;
+    ownerProcessStart = typeof parsed?.processStart === "string" ? parsed.processStart : null;
     const parsedReleasedAt = Date.parse(parsed?.releasedAt || "");
     if (Number.isFinite(parsedReleasedAt)) releasedAtMs = parsedReleasedAt;
     if (parsed?.pid != null) {
@@ -405,6 +442,7 @@ async function shouldReclaimWorktreeLockAsync(lockPath, {
     ownerState,
     ownerThreadId,
     ownerLifetime,
+    ownerProcessStart,
     ownerToken,
     releasedAtMs,
     staleMs,

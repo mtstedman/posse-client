@@ -2,8 +2,8 @@ import { needsRunInsightsPromotionSchemaRepair, needsWorkItemsGovernanceTierRepa
 import { JOB_STATUS_LIST_SQL } from "../../../catalog/job.js";
 import { PROJECT_DB_CONFIG_TABLE, PROJECT_DB_TYPE_LIST_SQL } from "../../../catalog/project-db.js";
 import { WORK_ITEM_PLAN_APPROVAL_STATE_LIST_SQL } from "../../../catalog/work-item.js";
-import { withForeignKeysDisabled, quoteIdent, createRunInsightsIndexes } from "./table-definitions.js";
-import { copyCompatibleColumns } from "./table-copy.js";
+import { withForeignKeysDisabled, quoteIdent, createRunInsightsIndexes, getTableColumnNames } from "./table-definitions.js";
+import { addMissingColumns, copyCompatibleColumns } from "./table-copy.js";
 
 export function installLegacyFeatureTables(_db) {
   // ── Migration: governance_tier column on work_items ─────────────────────
@@ -140,8 +140,11 @@ export function installLegacyFeatureTables(_db) {
               FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
               FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE SET NULL
             );
-            INSERT INTO run_insights_new (id, work_item_id, job_id, insight_type, summary, detail, file_paths, created_at)
-              SELECT id, work_item_id, job_id, insight_type, summary, detail, file_paths, created_at FROM run_insights;
+          `);
+          addMissingColumns(_db, "run_insights", "run_insights_new");
+          const columns = getTableColumnNames(_db, "run_insights").map(quoteIdent).join(", ");
+          _db.exec(`
+            INSERT INTO run_insights_new (${columns}) SELECT ${columns} FROM run_insights;
             DROP TABLE run_insights;
             ALTER TABLE run_insights_new RENAME TO run_insights;
           `);
@@ -281,6 +284,7 @@ export function installLegacyFeatureTables(_db) {
         const tmpName = `_${name}_preflightmig`;
         const tmpCreate = createSql.replace(new RegExp(`\\b${name}\\b`), tmpName);
         _db.exec(tmpCreate);
+        addMissingColumns(_db, name, tmpName);
         copyCompatibleColumns(_db, name, tmpName);
         _db.exec(`DROP TABLE ${quoteIdent(name)}`);
         _db.exec(`ALTER TABLE ${quoteIdent(tmpName)} RENAME TO ${quoteIdent(name)}`);

@@ -391,9 +391,13 @@ function finalizePublished(operation, values) {
 function diffPaths(projectDir, oldSha, newSha) {
   if (!oldSha || !newSha || oldSha === newSha) return [];
   try {
-    return [...new Set(execGit(["diff", "--name-only", oldSha, newSha], projectDir, { trim: false })
-      .split(/\r?\n/)
-      .map((value) => value.trim().replace(/\\/g, "/"))
+    // Unquoted, NUL-separated names: the default quotePath output escapes
+    // non-ASCII bytes ("caf\303\251.txt"), which names no file in the hint.
+    // --relative: Atlas hints are relative to the project, which may be nested
+    // in its repository.
+    return [...new Set(execGit(["-c", "core.quotePath=false", "diff", "--relative", "--name-only", "-z", oldSha, newSha], projectDir, { trim: false })
+      .split("\0")
+      .map((value) => value.replace(/\\/g, "/"))
       .filter(Boolean))];
   } catch {
     return [];
@@ -856,17 +860,27 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
           ? operation.lastErrorCode
           : null;
         const localHead = refSha(projectDir, operation.targetBranch);
+        // A trunk merely behind the remote (its head an ancestor of the
+        // fetched remote, so it cannot hold this unlanded candidate) needs no
+        // reset; the sync fast-forwards it, as the intent arm above assumes.
+        // The native strict reset would refuse it as head_changed.
         const reset = localHead === observed.remoteSha
           ? { ok: true, recovered: "already_reset" }
-          : await strictResetRejected(projectDir, config, operation, observed.remoteSha, null, signal);
+          : localHead && isAncestor(projectDir, localHead, observed.remoteSha)
+            ? { ok: true, recovered: "behind_remote" }
+            : await strictResetRejected(projectDir, config, operation, observed.remoteSha, null, signal);
         throwIfAborted(signal);
         if (!reset.ok) {
           operation = transition(operation, {
             phase: "publish_unknown",
-            // Keep the pending-reset marker: it carries the retry
-            // classification, while the reset failure itself is usually a
-            // transient checkout condition retried next cycle.
-            lastErrorCode: pendingMarker || reset.reason || "pending_reset_failed",
+            // Keep the pending-reset or parked marker: it carries the retry
+            // classification (a parked candidate keeps its identity), while
+            // the reset failure itself is usually a transient checkout
+            // condition retried next cycle.
+            lastErrorCode: pendingMarker
+              || (isParkedCandidateReason(operation.lastErrorCode) ? operation.lastErrorCode : null)
+              || reset.reason
+              || "pending_reset_failed",
           });
           unresolved.push(operation);
           operations.push({ operation, recovered: "reset_failed" });

@@ -29,9 +29,10 @@ const DEFAULT_REQUEST_TIMEOUT_MS = MCP_REQUEST_TIMEOUT_MS;
 const MAX_OWNER_ATLAS_GATE_EVENTS = 64;
 // A child that produces NO response across this many consecutive request
 // timeouts is treated as wedged (event loop blocked, native deadlock) rather
-// than merely slow, and is force-killed so the next request respawns it. Any
-// response resets the counter, so a legitimately long single call does not
-// trip it. The gateway is stateless per request, so respawn loses nothing.
+// than merely slow, and is force-killed. Any response resets the counter, so a
+// legitimately long single call does not trip it. The gateway is stateless
+// per request: calls still queued behind the wedged one were never sent, so
+// they run on a respawned child (see _replayUnsentRequests).
 const MAX_CONSECUTIVE_REQUEST_TIMEOUTS = 2;
 // Minimum spacing between child (re)spawns. Without it, a server spec that
 // crashes on startup turns every forwarded request into a fresh, heavy Node
@@ -69,6 +70,7 @@ export class PersistentMcpSession {
     this._seq = 0;
     this._consecutiveTimeouts = 0;
     this._crashesSinceHealthy = 0;
+    this._wedgeKilledProc = null;
     this.startedAt = null;
     this.lastExit = null;
     this.prewarmedAt = null;
@@ -273,6 +275,29 @@ export class PersistentMcpSession {
     this._activeRequestId = null;
   }
 
+  // The watchdog killed a wedged child. Only the frames it was sent can have
+  // run there (the active call and calls parked on a human answer); those
+  // fail. Queued calls were never sent, so they move to a respawned child in
+  // their original order. Queue time does not count against them: each gets
+  // its normal deadline once it is sent.
+  _replayUnsentRequests(failure) {
+    this._activeRequestId = null;
+    for (const [id, entry] of this._pending) {
+      if (!entry.written) continue;
+      clearTimeout(entry.timer);
+      this._pending.delete(id);
+      entry.reject(failure);
+    }
+    if (this._pending.size === 0) return;
+    try {
+      this.ensureStarted();
+    } catch (err) {
+      this._rejectPending(err);
+      return;
+    }
+    this._startNextRequest();
+  }
+
   ensureStarted() {
     if (this._proc && this._proc.exitCode == null) return;
     if (!this.serverSpec?.command) {
@@ -321,7 +346,12 @@ export class PersistentMcpSession {
       this._prewarmPromise = null;
       this.prewarmedAt = null;
       const failure = error || new Error(`MCP session exited (${code ?? signal ?? "unknown"})`);
-      this._rejectPending(failure);
+      if (this._wedgeKilledProc === proc) {
+        this._wedgeKilledProc = null;
+        this._replayUnsentRequests(failure);
+      } else {
+        this._rejectPending(failure);
+      }
     };
     const failStream = (error) => {
       finish({ error });
@@ -368,6 +398,7 @@ export class PersistentMcpSession {
         reject,
         timer: null,
         outbound,
+        written: false,
       });
       onAbort = () => {
         // A disconnected queued caller must never execute later. An already
@@ -396,7 +427,9 @@ export class PersistentMcpSession {
 
   _startNextRequest() {
     if (this._activeRequestId) return;
-    const next = [...this._pending.entries()].find(([, queued]) => !queued.deferred);
+    // A sent call is never sent again, to this child or a replacement: it may
+    // already have run.
+    const next = [...this._pending.entries()].find(([, queued]) => !queued.deferred && !queued.written);
     if (!next) return;
     const [id, entry] = next;
     this._activeRequestId = id;
@@ -421,6 +454,7 @@ export class PersistentMcpSession {
       this._consecutiveTimeouts += 1;
       entry.reject(new Error(`MCP session request timed out after ${timeoutMs}ms`));
       if (this._consecutiveTimeouts >= MAX_CONSECUTIVE_REQUEST_TIMEOUTS) {
+        this._wedgeKilledProc = this._proc;
         this.stop({ force: true });
         return;
       }
@@ -429,6 +463,7 @@ export class PersistentMcpSession {
     };
     entry.timer = setTimeout(onTimeout, timeoutMs);
     entry.timer.unref?.();
+    entry.written = true;
     try {
       this._write(entry.outbound);
     } catch (err) {
@@ -590,6 +625,8 @@ export class PersistentMcpSession {
   }
 
   close({ force = false, timeoutMs = 10000 } = {}) {
+    // A deliberate close ends the session: an exit after it never respawns.
+    this._wedgeKilledProc = null;
     return Promise.all([
       this._closeProcess({ force, timeoutMs }),
       this._controlSession?.close({ force, timeoutMs }),

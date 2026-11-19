@@ -2,6 +2,7 @@ import { testCommandScriptPaths } from "./test-command-script-paths.js";
 import { NODE_PACKAGE_MANAGER_EXECUTABLES } from "../../../catalog/node-package-managers.js";
 import { MUTATING_TEST_FLAGS, INTERACTIVE_TEST_FLAGS } from "../../../catalog/test-command-policy.js";
 import { declaredNodeTestCommand } from "../../../shared/tools/functions/toolkit/repository-test-runner.js";
+import { readRepositoryVerificationConfig } from "./verification-plan.js";
 import { interpreterTestRunner, resolveInterpreterTestCommand } from "./interpreter-test-runner.js";
 import fs from "fs";
 import path from "path";
@@ -697,16 +698,37 @@ export function validatePlannerTestCommandForRepository(command, cwd, { filesToC
   };
 }
 
+const REPOSITORY_RUNNER_NOT_DECLARED = "repository_test_runner_not_declared";
+
+// No verification config, or a valid one without unit_test_runners. A config
+// that is uncommitted or invalid declares nothing reliable, so it is not.
+function repositoryDeclaresNoTestRunner(cwd) {
+  let config;
+  try { config = readRepositoryVerificationConfig(cwd); } catch { return false; }
+  if (!config) return true;
+  if (config.error) return false;
+  const runners = config.unit_test_runners;
+  return runners === undefined || runners === null || (Array.isArray(runners) && runners.length === 0);
+}
+
 /**
  * Return the frozen authorization contract for a planner-authored command that
  * is safe to direct-spawn but is not a test runner. Shell composition,
  * expansion, unsafe working directories, and malformed quoting are never
  * eligible for approval.
  */
-export function operationalCommandApprovalRequest(command) {
+export function operationalCommandApprovalRequest(command, { cwd = null, compiledApproval = null } = {}) {
   const value = String(command || "").trim();
   const validation = validatePlannerTestCommand(value);
-  if (validation.ok || !String(validation.reason || "").startsWith("unrecognized_test_runner:")) {
+  // A Node script with arguments is a test only through a declared runner
+  // (82f40f4c3). In a repository that declares none it is an operational
+  // command. The repository decides when its path is known; elsewhere the
+  // compile-time stamp written from that decision stands in for it.
+  const undeclaredRunner = validation.ok && validation.repository_runner_required === true && (cwd
+    ? repositoryDeclaresNoTestRunner(cwd)
+    : compiledApproval?.validation_reason === REPOSITORY_RUNNER_NOT_DECLARED
+      && compiledApproval.command_sha256 === sha256(value));
+  if (!undeclaredRunner && (validation.ok || !String(validation.reason || "").startsWith("unrecognized_test_runner:"))) {
     return null;
   }
   const invocation = splitPlannerTestInvocation(value);
@@ -721,7 +743,7 @@ export function operationalCommandApprovalRequest(command) {
     command_sha256: sha256(value),
     execution_command: invocation.command,
     cwd_relative: invocation.cwd_relative || null,
-    validation_reason: validation.reason,
+    validation_reason: undeclaredRunner ? REPOSITORY_RUNNER_NOT_DECLARED : validation.reason,
     execution_phase: "post_change_only",
     verification_eligible: false,
   };

@@ -601,7 +601,11 @@ export function writeLegacyFallbackSnapshot({ wtPath, projectDir, reason, branch
     }
     return null;
   }
-  const baseName = [wiId != null ? `wi-${wiId}` : null, safeFilename(reason), dedupHash].filter(Boolean).join("-");
+  // Only a dedup hash (a content fingerprint) may name a directory a later
+  // capture reuses. Without one, each capture gets a fresh directory, as the
+  // native twin does: reusing `wi-<id>-<reason>` would hand back an earlier
+  // capture's patches and copies for different dirt the caller then discards.
+  const baseName = [wiId != null ? `wi-${wiId}` : null, safeFilename(reason), dedupHash || randomToken()].filter(Boolean).join("-");
   const outDir = path.join(recoveryRootFn(projectDir), baseName);
   const partDir = `${outDir}.part-${process.pid}-${Date.now()}`;
   const untrackedRel = untracked.map((relPath) => String(relPath || "").replace(/\\/g, "/")).filter(Boolean);

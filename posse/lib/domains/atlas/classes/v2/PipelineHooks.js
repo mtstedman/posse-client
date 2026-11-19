@@ -923,6 +923,10 @@ export function isAtlasV2EmissionEnabled(config = null, { pairingState = undefin
 
 let hostLeaseCache = { at: 0, value: false };
 const HOST_LEASE_CACHE_MS = 2_000;
+// Sticky from the first live read that names the host until the catch-up watch
+// observes the release, so a lease that flips back between two watch ticks
+// still gets its catch-up.
+let hostLeaseSuppressedAtlas = false;
 
 /**
  * True while this clone's lease names the session host. Read through a short
@@ -939,5 +943,28 @@ export function localAtlasUnneeded(pairingState = undefined) {
     value = leasedToSessionHost(getLivePairingState());
   } catch { /* no readable pairing state means a normal clone */ }
   hostLeaseCache = { at: nowMs, value };
+  if (value) hostLeaseSuppressedAtlas = true;
   return value;
+}
+
+/**
+ * One step of the host-lease catch-up watch. While the lease names the host,
+ * ATLAS emission is off and the boot warm is skipped; `released` is true
+ * exactly once after such a lease stops naming the host, when the work it
+ * suppressed must be caught up.
+ *
+ * @param {{ pairingState?: any }} [opts] a state to judge instead of the live one (tests)
+ * @returns {{ leased: boolean, released: boolean }}
+ */
+export function observeAtlasHostLease({ pairingState = undefined } = {}) {
+  const leased = pairingState !== undefined
+    ? leasedToSessionHost(pairingState)
+    : localAtlasUnneeded();
+  if (leased) {
+    hostLeaseSuppressedAtlas = true;
+    return { leased: true, released: false };
+  }
+  const released = hostLeaseSuppressedAtlas;
+  hostLeaseSuppressedAtlas = false;
+  return { leased: false, released };
 }

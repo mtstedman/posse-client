@@ -12,6 +12,7 @@ import { APPROVAL_POLICY_FAIL_CLOSED_CODE, approvalResolutionAuthorized } from "
 import { failClosedUnattendedGate } from "../helpers/human-input.js";
 import { DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE } from "../../../../catalog/human-input.js";
 import { processVerdict } from "../helpers/process-verdict.js";
+import { serializeWidenedScopeOverlaps } from "../../../planning/functions/plan-scope-overlap.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { retainBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
@@ -54,6 +55,7 @@ import {
 } from "../../../queue/functions/index.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { completeDeliveredHumanAnswerReservation } from "../../../queue/functions/interaction-contract.js";
+import { resetJobPayloadForReexecution } from "../../../queue/functions/payload.js";
 import { withWorktreeLockAsync } from "../../../git/functions/worktree.js";
 import { acquireWorktreeLockAsync, gitStashLockPath } from "../../../git/functions/worktree-locks.js";
 import { dropStashByHashAsync, findStallStashEntryAsync } from "../../../git/functions/utils.js";
@@ -795,6 +797,8 @@ export async function runHumanInputJob(worker, job, {
               for (const dependent of dependents) {
                 rewireDependency(dependent.job_id, job.id, createdFixJob.id, dependent.dependency_kind);
               }
+              // The approved paths may belong to a live sibling (K1).
+              serializeWidenedScopeOverlaps(createdFixJob);
             },
           });
           worker.emit(job.id, `${C.cyan}[human] Approved scope expansion and ${reusedFixJob ? "reused" : "created"} fix job #${fixJob.id}${C.reset}`);
@@ -1145,8 +1149,11 @@ export async function runHumanInputJob(worker, job, {
           extendAssessmentMaxAttempts(origJob.id, Number(origJob.assessment_attempt_count || 0) + 1);
           updateJobPayload(origJob.id, JSON.stringify(origPayload));
         } else {
+          // An implementation-scope retry replays the implementation: an
+          // earlier phase's assess-only state must not turn it into a
+          // reassessment that is then judged as the failed retry.
           beginJobRetryGeneration(origJob.id, {
-            payload: origPayload,
+            payload: resetJobPayloadForReexecution(origPayload),
             attemptBudget: getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3),
           });
         }
@@ -1453,8 +1460,7 @@ export async function runHumanInputJob(worker, job, {
           }
         } else if (assessmentReview && exactAction === "send_back") {
           handledReviewDecision = true;
-          const next = worker.parsePayload(origJob);
-          delete next._assess_only;
+          const next = resetJobPayloadForReexecution(worker.parsePayload(origJob));
           next.instructions = [next.instructions || next.task_spec || origJob.title,
             `Review gate #${job.id} returned this job for fixes:`, payload.context,
             resolutionMetadata?.operator_feedback || resolutionMetadata?.feedback || humanInputChoiceFeedback(lastAnswer, actionChoices),
@@ -1580,7 +1586,7 @@ export async function runHumanInputJob(worker, job, {
             guidance.answer || "(no additional guidance)",
           ].join("\n\n");
         }
-        delete origPayload._assess_only;
+        resetJobPayloadForReexecution(origPayload);
         beginJobRetryGeneration(origJob.id, {
           payload: origPayload,
           attemptBudget: getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3),

@@ -10,6 +10,7 @@ import {
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 import { ASSESSMENT_FAILURE_CLASSES } from "../../../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
+import { FINAL_REVIEW_ESCALATION_CHOICE_IDS } from "../../../../../catalog/tools/interaction.js";
 import { canClarifyAssessmentReview } from "../assessment-review-correction.js";
 
 function isAssessmentDispositionQuestion(question) {
@@ -183,7 +184,9 @@ export function handle(job, verdict, ctx) {
         ? {
             review_type: "assessment_review",
             question_kind: "assessment_review",
-            choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
+            choices: verdict?._final_review_escalation === true
+              ? FINAL_REVIEW_ESCALATION_CHOICE_IDS
+              : WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
             ...(visualAcceptanceReview ? { visual_acceptance_review: true } : {}),
           }
         : { allow_best_judgment: true }),

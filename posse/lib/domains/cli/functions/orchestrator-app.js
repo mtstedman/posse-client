@@ -1984,6 +1984,24 @@ async function cmdMerge() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// COMMAND: deploy — Push merged work to the remote
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Merged work waits here until the operator asks for it: wrap-up names the
+// command instead of prompting after every work item.
+async function cmdDeploy() {
+  const rest = process.argv.slice(3);
+  const helpers = await getGitWorkflowHelpers();
+  const result = await helpers.runDeploy({
+    showDiff: rest.includes("--diff"),
+    assumeYes: rest.includes("--yes") || rest.includes("-y"),
+  });
+  if (!result.pushed && !["declined", "nothing_to_push", "confirmation_required", "shared_trunk_automatic_publication", "no_remote"].includes(result.reason)) {
+    process.exitCode = 1;
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // COMMAND: prune — Clean up orphaned worktrees
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -2611,6 +2629,7 @@ async function dispatchResolvedCommand(command) {
     "windows-events": cmdWindowsEvents,
     admin: cmdAdmin,
     merge: cmdMerge,
+    deploy: cmdDeploy,
     prune: cmdPrune,
     purge: cmdPurge,
     cleanup: cmdCleanup,

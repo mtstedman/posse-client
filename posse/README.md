@@ -491,6 +491,12 @@ a starter that fails until you edit it.
   values and fills them into the tool invocation; the model sees only `params`.
   The caller supplies the same inputs on each chat turn. Use `--inputs-file`
   when testing such a tool.
+- A script that exits non-zero or is killed by a signal fails: its test does
+  not publish, and its run is `failed` (`script_failed`) for run history,
+  schedules, skill recipes and skill tests, while a calling agent still gets
+  the exit code, output and stderr. A tool whose exit codes carry results (a
+  status probe, a diff) declares `"exit_codes_are_data": true` in `tool.json`;
+  then any exit code is a result, and only a signal or timeout fails it.
 - A tool may declare `output_schema` as a JSON object schema. Posse checks the
   script's parsed JSON output against it before a passing test publishes the
   tool and again on each run. Bossy can create this schema from typed output

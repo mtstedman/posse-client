@@ -19,7 +19,8 @@ import { ledgerSupportsViewMeta } from "../ledger/view-meta-support.js";
 
 import { View } from "../../../classes/v2/View.js";
 import { Ledger } from "../../../classes/v2/Ledger.js";
-import { dispatch, normalizeActionName } from "../retrieval/index.js";
+import { dispatch } from "../retrieval/index.js";
+import { atlasNestedAction, atlasNestedActionArgKeys } from "../../../../../shared/tools/functions/atlas-nested-action.js";
 import { openEmbeddingResources, retirePooledEmbeddingResources } from "../embeddings/resources.js";
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 import { fallbackQueryPlan, planQuery } from "../retrieval/orchestrator/query-planner.js";
@@ -516,18 +517,27 @@ function resolveToolAction(toolName = "") {
 
 function gatewayToolAction(action, args = {}) {
   if (!CONDUCTOR_TOOL_GATEWAY_ACTIONS.has(action)) return action;
-  const target = String(
-    args?.gatewayAction
-    || args?.targetAction
-    || args?.actionName
-    || args?.action
-    || "",
-  ).trim();
-  // Normalize alias spellings (agent_feedback, atlas.memory.store, case
-  // variants) so the mutation gate below classifies the SAME action dispatch
-  // will execute — a raw-string check lets a variant spelling route a
+  // Resolve key and value spellings (gateway_action, agent_feedback,
+  // atlas.memory.store, case variants) exactly as the session policy and
+  // dispatch do, so the mutation gate below classifies the SAME action
+  // dispatch will execute: a spelling read here but not there routes a
   // mutation onto the read-only reader lane.
-  return target ? normalizeActionName(target) : action;
+  return atlasNestedAction(args) || action;
+}
+
+// The call dispatch receives names only the action the mutation gate checked:
+// the resolved action goes last so an `action` key in the args cannot replace
+// it, and a wrapper routes its resolved nested action with every other
+// spelling of the nested key removed.
+function conductorToolCall(action, effectiveAction, args = {}) {
+  if (!CONDUCTOR_TOOL_GATEWAY_ACTIONS.has(action)) return { ...args, action };
+  const call = { ...args };
+  for (const key of atlasNestedActionArgKeys(args)) delete call[key];
+  return {
+    ...call,
+    action,
+    ...(effectiveAction !== action ? { gatewayAction: effectiveAction } : {}),
+  };
 }
 
 function conductorErrorPayload(message, error = null) {
@@ -834,11 +844,7 @@ export async function runConductorToolExecution(payload = {}) {
     const baselineBranch = baselineBranchForRepo(repoRoot);
     const readRoot = resolveReadRoot({ config, repoRoot, viewMeta: meta, viewPath });
     const versionId = meta ? `${meta.branch}@${meta.ledger_seq}` : `${baselineBranch}@0`;
-    const call = {
-      ...(CONDUCTOR_TOOL_GATEWAY_ACTIONS.has(action)
-        ? { ...args, action, gatewayAction: typeof args.action === "string" ? args.action : args.gatewayAction }
-        : { action, ...args }),
-    };
+    const call = conductorToolCall(action, effectiveAction, args);
     const wantsSemantic = (action === "symbol.search" && call.semantic)
       || (action === "slice.build" && call.taskText && call.semantic !== false)
       || ((action === "context" || action === "context.summary") && call.taskText);

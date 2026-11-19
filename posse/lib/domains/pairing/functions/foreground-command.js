@@ -17,10 +17,23 @@ export function spawnPosseInForeground(args, { cwd } = {}) {
   });
 }
 
+// The commands this process has handed the terminal to and is waiting on.
+const terminalHolders = new Set();
+
+/**
+ * Whether a foreground command has this process's terminal right now. Its
+ * Ctrl+C is that command's: a process-wide SIGINT handler (serve's shutdown)
+ * leaves it be, as the session console does.
+ */
+export function foregroundCommandRunning() {
+  return terminalHolders.size > 0;
+}
+
 /** Resolves (never rejects) with how the child ended. */
 export function waitForForegroundExit(child) {
+  terminalHolders.add(child);
   return new Promise((resolve) => {
     child.once("error", (error) => resolve({ error }));
     child.once("exit", (code, signal) => resolve({ code, signal }));
-  });
+  }).finally(() => terminalHolders.delete(child));
 }

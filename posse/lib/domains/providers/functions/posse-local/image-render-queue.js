@@ -8,7 +8,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { LOCAL_MODEL_PARAMETERS } from "../../../../catalog/local-model-parameters.js";
 import { LEASE_HOLDING_STATUSES } from "../../../../catalog/job.js";
-import { createJob, getJob, listJobsByWorkItem, updateJobPayload } from "../../../queue/functions/index.js";
+import { createJob, getJob, listJobsByWorkItem, updateJobPayload, updateJobStatus } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { getObservationContext } from "../../../observability/functions/observations.js";
 import { readModelSetting } from "../shared/setting-read.js";
@@ -91,21 +91,37 @@ export function queueLocalImageRender({ outputPath, filename, prompt, model, siz
     return spec && sibling.status === "queued" && !LEASE_HOLDING_STATUSES.includes(sibling.status)
       && spec.filename === filename && path.resolve(String(parseJobPayload(sibling)?.output_root || "")) === path.resolve(outputRoot);
   });
-  writeAtomically(outputPath, placeholder);
+  // Queue before writing: a placeholder is safe only while a render job will
+  // swap the image in (promote defers the file to it). Written first, a failed
+  // queue write left a placeholder over the file that nothing replaces.
+  let result;
+  let undoQueue;
   if (queued) {
+    const previousPayload = queued.payload_json;
     updateJobPayload(queued.id, JSON.stringify({ ...parseJobPayload(queued), ...payload }));
-    return { jobId: queued.id, width, height, updated: true };
+    result = { jobId: queued.id, width, height, updated: true };
+    undoQueue = () => updateJobPayload(queued.id, previousPayload);
+  } else {
+    const job = createJob({
+      work_item_id: sourceJob.work_item_id,
+      job_type: "artificer",
+      title: `Render ${filename} with the local image model`.slice(0, 200),
+      parent_job_id: sourceJob.id,
+      priority: sourceJob.priority,
+      // A failed local render is the operator's call (retry, or keep the
+      // placeholder), not something to spend another long run on unasked.
+      max_attempts: 1,
+      payload_json: JSON.stringify(payload),
+    });
+    result = { jobId: job.id, width, height, updated: false };
+    undoQueue = () => updateJobStatus(job.id, "canceled", { expectedStatuses: ["queued"] });
   }
-  const job = createJob({
-    work_item_id: sourceJob.work_item_id,
-    job_type: "artificer",
-    title: `Render ${filename} with the local image model`.slice(0, 200),
-    parent_job_id: sourceJob.id,
-    priority: sourceJob.priority,
-    // A failed local render is the operator's call (retry, or keep the
-    // placeholder), not something to spend another long run on unasked.
-    max_attempts: 1,
-    payload_json: JSON.stringify(payload),
-  });
-  return { jobId: job.id, width, height, updated: false };
+  try {
+    writeAtomically(outputPath, placeholder);
+  } catch (error) {
+    // The render must not run against a placeholder that was never written.
+    try { undoQueue(); } catch { /* the write error is the one to report */ }
+    throw error;
+  }
+  return result;
 }

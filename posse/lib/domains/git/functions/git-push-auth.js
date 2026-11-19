@@ -3,8 +3,9 @@
 // `gh` does not implement a push transport of its own. Its supported bridge is
 // `gh auth git-credential`, which speaks Git's credential-helper protocol. We
 // try the repository's normal Git configuration first and only install that
-// helper for one retry after a definite authentication failure. Nothing is
-// written to local or global Git config.
+// helper for one retry after a definite authentication failure, or after an
+// SSH connection that never opened (HTTPS often works where port 22 is
+// blocked). Nothing is written to local or global Git config.
 
 import { execFileSync } from "node:child_process";
 
@@ -22,9 +23,24 @@ const AUTH_FAILURE_PATTERNS = Object.freeze([
   /\b(?:401|403)\b[^\n]*(?:unauthori[sz]ed|forbidden)/iu,
   /permission to [^\s]+ denied to/iu,
   /repository not found/iu,
-  /could not read from remote repository/iu,
   /access denied/iu,
 ]);
+// git ends every failed SSH transport with this line, a refused key and a
+// connection that never opened alike. Alone it reads as an authentication
+// failure (a read-only deploy key prints only it plus a server message), but
+// never when the transport shows the connection itself failed.
+const REMOTE_UNREADABLE_PATTERN = /could not read from remote repository/iu;
+// A blocked, refused or unreachable port, or a connection dropped during the
+// handshake: not an authentication failure (no gh login fixes it), but HTTPS
+// on 443 often still reaches the host, so these earn the gh HTTPS retry.
+const SSH_CONNECTION_FAILURE_PATTERNS = Object.freeze([
+  /ssh: connect to host \S+ port \d+: (?:connection timed out|operation timed out|connection refused|no route to host|network is unreachable)/iu,
+  /connection timed out during banner exchange/iu,
+  /kex_exchange_identification/iu,
+  /connection (?:reset|closed) by \S+/iu,
+]);
+// No DNS answer for the SSH host: HTTPS needs the same lookup, so no retry.
+const SSH_HOST_UNRESOLVED_PATTERN = /ssh: could not resolve hostname/iu;
 const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
   "-C",
   "-c",
@@ -44,7 +60,22 @@ function errorDetail(error) {
 
 export function isGitPushAuthenticationFailure(error) {
   const detail = errorDetail(error);
-  return detail.length > 0 && AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(detail));
+  if (detail.length === 0) return false;
+  if (AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(detail))) return true;
+  if (SSH_HOST_UNRESOLVED_PATTERN.test(detail)) return false;
+  if (SSH_CONNECTION_FAILURE_PATTERNS.some((pattern) => pattern.test(detail))) return false;
+  return REMOTE_UNREADABLE_PATTERN.test(detail);
+}
+
+// Whether a failed push may retry over HTTPS with gh's credential helper: an
+// authentication failure, or an SSH connection that never opened.
+// Remediation keeps asking isGitPushAuthenticationFailure, so a blocked port
+// is never reported as a gh login problem.
+function gitPushMayRetryOverGitHubCli(error) {
+  if (isGitPushAuthenticationFailure(error)) return true;
+  const detail = errorDetail(error);
+  return !SSH_HOST_UNRESOLVED_PATTERN.test(detail)
+    && SSH_CONNECTION_FAILURE_PATTERNS.some((pattern) => pattern.test(detail));
 }
 
 function stripIpv6Brackets(value) {
@@ -213,7 +244,8 @@ function ghAuthIsConfigured(host, cwd, execGh, options) {
 /**
  * Run an exact `git push` argv with the repository's normal authentication,
  * then retry through an authenticated GitHub CLI credential helper when (and
- * only when) Git reported an authentication failure.
+ * only when) Git reported an authentication failure or an SSH connection that
+ * never opened.
  */
 export function gitPushWithGitHubCliFallback(args, cwd, {
   remote,
@@ -230,7 +262,7 @@ export function gitPushWithGitHubCliFallback(args, cwd, {
   if (!remoteName) throw new TypeError("gitPushWithGitHubCliFallback requires a remote name");
 
   const recover = (initialError) => {
-    if (!isGitPushAuthenticationFailure(initialError)) throw initialError;
+    if (!gitPushMayRetryOverGitHubCli(initialError)) throw initialError;
 
     const fallbackOptions = nonInteractiveOptions(gitOptions);
     let remoteUrl;
@@ -267,6 +299,13 @@ export function gitPushWithGitHubCliFallback(args, cwd, {
     retryArgs.push(...args);
 
     const fail = (fallbackError) => {
+      // A retry taken only because the SSH connection never opened was a
+      // chance, not the diagnosis: the caller still sees the connection
+      // failure (blocked-network advice reads it), with the HTTPS outcome kept.
+      if (!isGitPushAuthenticationFailure(initialError) && initialError && typeof initialError === "object") {
+        initialError.gitHubCliFallbackError = fallbackError;
+        throw initialError;
+      }
       if (fallbackError && typeof fallbackError === "object") {
         if (fallbackError.cause == null) fallbackError.cause = initialError;
         fallbackError.gitAuthFallback = "gh";

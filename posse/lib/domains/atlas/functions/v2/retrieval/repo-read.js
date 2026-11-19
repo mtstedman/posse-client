@@ -3,6 +3,7 @@ import { SAME_NAME_SKIP_DIRS } from "../../../../../catalog/atlas-path-discovery
 
 import fs from "node:fs";
 import path from "node:path";
+import { decodeIndexedSource } from "./source-freshness.js";
 
 /**
  * @typedef {{
@@ -119,7 +120,7 @@ export function readRepoFileResult(repoRoot, repoRelPath, { targetSource = "file
   }
 
   try {
-    return { ok: true, content: fs.readFileSync(realAbs, "utf8") };
+    return { ok: true, content: decodeIndexedSource(fs.readFileSync(realAbs)) };
   } catch (error) {
     return ioFailure(error, failure, relPath);
   }

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { resolveAgentWorkingDirectory } from "../../agents/functions/scope.js";
 import { demand, object } from "../functions/policy.js";
-import { nextOccurrence, previewOccurrences, validateTrigger } from "../functions/triggers.js";
+import { advanceStaleOccurrence, nextOccurrence, previewOccurrences, validateTrigger } from "../functions/triggers.js";
 
 const KIND = "agent_schedules";
 
@@ -50,13 +50,7 @@ export class AgentScheduleRegistry {
     // so a replacement owner can stop on an unknown previous outcome.
     if (schedule.state !== "running") schedule.state = schedule.enabled ? "active" : "paused";
     delete schedule.error_code;
-    // A stale past occurrence (paused or parked for a while) is not owed:
-    // resume at the next future one instead of firing the backlog.
-    if (schedule.enabled && (schedule.next_at == null || schedule.next_at <= this.now())) {
-      const next = nextOccurrence(schedule.trigger, this.now() - 1);
-      demand(next, "Schedule has no future occurrence", "invalid_trigger");
-      schedule.next_at = next.at; schedule.next_local_key = next.localKey;
-    }
+    if (schedule.enabled) advanceStaleOccurrence(schedule, this.now());
     return this.store.put(KIND, id, schedule);
   }
 

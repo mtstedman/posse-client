@@ -100,6 +100,40 @@ function deferred() {
   return { promise, resolve };
 }
 
+// The round's wall, as AbortSignal.timeout but pausable: time the round spends
+// queued for the work item's verification slot behind another job's run is
+// not charged to it.
+function pausableRoundWall(ms) {
+  const controller = new AbortController();
+  let remainingMs = ms;
+  let armedAt = 0;
+  let timer = null;
+  let disposed = false;
+  const arm = () => {
+    armedAt = Date.now();
+    timer = setTimeout(() => controller.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError")), remainingMs);
+    timer.unref?.();
+  };
+  arm();
+  return {
+    signal: controller.signal,
+    pause() {
+      if (!timer) return;
+      clearTimeout(timer);
+      timer = null;
+      remainingMs = Math.max(0, remainingMs - (Date.now() - armedAt));
+    },
+    resume() {
+      if (!timer && !disposed && !controller.signal.aborted) arm();
+    },
+    dispose() {
+      disposed = true;
+      clearTimeout(timer);
+      timer = null;
+    },
+  };
+}
+
 function finalReviewParentOf(agentCallId) {
   const row = getAgentCallById(agentCallId);
   return row?.child_kind === AGENT_CALL_CHILD_KINDS.FINAL_REVIEW ? row.parent_agent_call_id : null;
@@ -242,14 +276,15 @@ export class FinalReviewRuntime {
           throw error;
         } finally { if (!refreshVerification) parent.inFlight = false; }
       }
+      const roundWall = pausableRoundWall(this.reviewTimeoutMs);
       const reviewSignal = AbortSignal.any([parent.controller.signal,
-        AbortSignal.timeout(this.reviewTimeoutMs), ...(signal ? [signal] : [])]);
+        roundWall.signal, ...(signal ? [signal] : [])]);
       const cancel = () => this.#release(parent);
       reviewSignal.addEventListener("abort", cancel, { once: true });
       try {
         if (reviewSignal.aborted) cancel();
         reviewSignal.throwIfAborted();
-        const result = await this.#developerReview(parent, args, reviewSignal, { refreshVerification });
+        const result = await this.#developerReview(parent, args, reviewSignal, { refreshVerification, roundWall });
         if (refreshVerification) {
           const after = await this.verificationIdentity(parent.cwd);
           // An unavailable identity permits only this call's bounded retry;
@@ -258,6 +293,7 @@ export class FinalReviewRuntime {
         }
         return result;
       } finally {
+        roundWall.dispose();
         reviewSignal.removeEventListener("abort", cancel);
         parent.inFlight = false;
       }
@@ -287,7 +323,7 @@ export class FinalReviewRuntime {
     return { entry };
   }
 
-  async #developerReview(parent, args, signal, { refreshVerification = false } = {}) {
+  async #developerReview(parent, args, signal, { refreshVerification = false, roundWall = null } = {}) {
     const prior = finalReviewResultsForAttempt({ jobId: parent.jobId, attemptId: parent.attemptId });
     const semanticPrior = semanticFinalReviewResults(prior);
     if (Object.hasOwn(args, "completion_report")) parent.completionReport = completionReportFromArgs(args);
@@ -346,12 +382,27 @@ export class FinalReviewRuntime {
       };
     }
     const startedAt = this.now();
+    // Time queued for the work item's verification slot behind another job's
+    // run is not the round's: it pauses the round wall and is left out of the
+    // stage budgets below.
+    let slotWaitMs = 0;
+    let slotWaitStartedAt = null;
+    const onSlotWait = (waiting) => {
+      if (waiting && slotWaitStartedAt == null) {
+        slotWaitStartedAt = this.now();
+        roundWall?.pause();
+      } else if (!waiting && slotWaitStartedAt != null) {
+        slotWaitMs += this.now() - slotWaitStartedAt;
+        slotWaitStartedAt = null;
+        roundWall?.resume();
+      }
+    };
     // Each stage before the reviewer draws its timeout from what remains of
     // the round above the reviewer's floor, capped at the per-stage limit. A
     // stage the budget cannot fund ends the round as infrastructure rather
     // than running into the round wall with the reviewer unstarted.
     const stageTimeoutMs = (stage) => {
-      const remainingMs = this.reviewTimeoutMs - (this.now() - startedAt) - this.reviewerMinRoundMs;
+      const remainingMs = this.reviewTimeoutMs - (this.now() - startedAt - slotWaitMs) - this.reviewerMinRoundMs;
       if (remainingMs <= 0) {
         throw finalReviewError("FINAL_REVIEW_ROUND_BUDGET",
           `the round budget cannot fund ${stage} and still leave the reviewer ${Math.ceil(this.reviewerMinRoundMs / 1000)} s`);
@@ -407,6 +458,7 @@ export class FinalReviewRuntime {
         cwd: parent.cwd,
         timeoutMs: stageTimeoutMs("the declared tests"),
         signal,
+        onSlotWait,
       });
       signal.throwIfAborted();
       await assertCandidateUnchanged();
@@ -432,7 +484,7 @@ export class FinalReviewRuntime {
         && changedPlan.unit_test_paths.length === declaredPlan.unit_test_paths?.length
         && changedPlan.unit_test_paths.every((file) => declaredPlan.unit_test_paths.includes(file));
       changedTestRun = sharedSelection ? testRun : changedPlan
-        ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: stageTimeoutMs("the changed tests"), signal })
+        ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: stageTimeoutMs("the changed tests"), signal, onSlotWait })
         : null;
       signal.throwIfAborted();
       checks = await this.runChecks(parent.cwd, change, { signal, jobId: job.id, timeoutMs: stageTimeoutMs("the changed-file checks") });

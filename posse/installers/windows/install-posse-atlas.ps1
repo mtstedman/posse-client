@@ -1516,6 +1516,9 @@ function Test-DepsFresh {
   $pkg = Join-Path $Dir "package.json"
   if (-not ((Test-Path $nm) -and (Test-Path $lock) -and (Test-Path $pkg))) { return $false }
   if ((Get-Item $pkg).LastWriteTime -gt (Get-Item $lock).LastWriteTime) { return $false }
+  # An update can change the lockfile alone (transitive version bumps).
+  $checkoutLock = Join-Path $Dir "package-lock.json"
+  if ((Test-Path $checkoutLock) -and (Get-Item $checkoutLock).LastWriteTime -gt (Get-Item $lock).LastWriteTime) { return $false }
   Push-Location -LiteralPath $Dir
   try {
     & $script:NodeBin --input-type=commonjs -e 'const D = require("better-sqlite3"); const db = new D(":memory:"); db.close();' *> $null

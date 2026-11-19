@@ -277,6 +277,132 @@ description is operator-authored text, must be non-empty, and is capped at
 }
 ```
 
+### `work_item.conversation` — chat-style conversation page
+
+One Work Item's agents and operator as a conversation
+(`posse.agent_conversation.v1`): agent messages, the tool calls folded under
+each message, operator messages with delivery receipts, gates with the
+operator's answer, and attempt dividers. Read-only; not audited. The page is
+durable (finished jobs keep their tool calls), so after a reconnect or a
+`bridge_epoch` change clients re-fetch the newest page instead of replaying.
+
+```jsonc
+// args
+{
+  "work_item_id": 141,
+  "job_id": 9821,          // optional; one job's thread (concurrent jobs interleave otherwise)
+  "agent_call_id": 413,    // optional; one call, e.g. a sub-agent's own groups
+  "before": "<cursor>",    // optional; page.older_cursor of the previous page
+  "limit": 30              // optional; 1..50, default 30
+}
+
+// result (newest page first; entries oldest -> newest)
+{
+  "protocol": "posse.agent_conversation.v1",
+  "work_item_id": 141,
+  "observed_at": "2026-11-19T09:30:00.000Z",
+  "owner_generation": "812",
+  "tier": "remote",        // "local" only on the bridge's loopback HTTP path
+  "entries": [ /* ConversationEntry[] */ ],
+  "page": { "limit": 30, "has_older": true, "older_cursor": "<opaque>" }
+}
+```
+
+The cursor is opaque, signed, and bound to the filter; a cursor from another
+filter fails with `invalid_args`. Unknown targets fail with `not_found`. A
+page holds at most 50 entries and 256 KB; an entry serializes to at most
+16 KB.
+
+Every `ConversationEntry` has `entry_id` (stable: `msg:<id>`, `op:<id>`,
+`gate:<job>`, `tools:<job>:<call | a<attempt>>:<seq>`, `job:<job>:<attempt>`),
+`kind`, `rev` (never decreases; apply an upsert when `rev >= known`),
+`occurred_at`, `order_key` (`<occurred_at>|<entry_id>`, sort ascending),
+`work_item_id`, `job_id`, `attempt_id`, `agent_call_id`,
+`parent_agent_call_id`, `role` and `actor` (`agent | operator | system`).
+Kinds are a closed set; ignore an unknown kind, not the page.
+
+```jsonc
+// job_marker: one per attempt; never the call's activity text
+{ "kind": "job_marker", "job_type": "dev", "title": "...", "status": "running",
+  "provider": "codex", "model": "gpt-5.5", "attempt_number": 2,
+  "phase": "started" | "ended", "outcome": null }        // attempt status once ended
+
+// agent_message: a typed agent_feedback update
+{ "kind": "agent_message", "phase": "editing", "status": "running",
+  "summary": "...",                                      // <=180 chars
+  "detail": "...",                                       // nullable; <=360 chars
+  "tool_group_id": "tools:9821:413:0",                   // nullable; the group it closes
+  "origin": "agent_feedback" }
+
+// tool_group: the calls since the previous boundary of the same agent call
+{ "kind": "tool_group", "group_id": "tools:9821:413:0",
+  "state": "open" | "closed",
+  "closed_by": "agent_message" | "gate" | "call_end" | "job_end",   // null while open
+  "closing_entry_id": "msg:77",                          // nullable
+  "retained": true,                                      // false: calls no longer retained
+  "unattributed": false,                                 // rows without an agent call
+  "call_count": 7, "failed_count": 1, "rejected_count": 0, "running_count": 0,
+  "first_at": "...", "last_at": "...",
+  "by_tool": [{ "tool": "Read", "count": 4 }],          // <=12; tool <=40 chars
+  "items": [                                            // <=30: first 5 and last 25
+    { "type": "call", "seq": 812, "tool": "Read", "target": "src/feed.js",
+      "status": "running" | "succeeded" | "failed" | "rejected",
+      "benign": false, "duration_ms": 35, "at": "...",
+      "timing": "live" | "end_of_call", "error": null },
+    { "type": "note", "text": "...", "at": "..." },      // provider commentary, <=180 chars
+    { "type": "subagent", "child_agent_call_id": 414, "child_kind": "web_research",
+      "role": "researcher", "status": "succeeded", "call_count": 2, "at": "..." }
+  ],
+  "omitted_items": 0 }
+
+// operator_message: a nudge with its receipt
+{ "kind": "operator_message", "interaction_id": 5533, "body": "...",   // <=4000 chars
+  "origin": "terminal" | "bridge" | "bossy", "author": "...",
+  "delivery": { "state": "queued" | "signaled" | "retrieved" | "accepted" | "rejected"
+                         | "deferred" | "superseded" | "expired",
+                "retrieved_at": null, "delivered_with_tool": null,   // <=40 chars
+                "acknowledged_at": null, "reason": null,             // <=500 chars
+                "superseded_by": null },                             // interaction id
+  "capability": "agent.nudge" }    // while it can still be replaced; else null
+
+// gate: the agent (or system) asking, with the operator's answer
+{ "kind": "gate", "gate_job_id": 9830, "question_id": "gate:9830:0",
+  "gate_kind": "clarification", "title": "...",          // <=160 chars
+  "prompt_summary": "...",                               // <=500 chars
+  "state": "open" | "pending" | "answered" | "rejected" | "expired" | "superseded" | "closed",
+  "input_kind": "single_choice" | "informational",
+  "choices": [                                           // <=32; the feed's choice records
+    { "choice_id": "approve",                            // <=128 chars
+      "label": "Approve",                                // <=160 chars
+      "consequence": "Allow the exact requested transition.",   // <=400 chars
+      "danger": "normal" | "caution" | "destructive",
+      "requires_confirmation": false,
+      "accepts_feedback": true } ],                      // question.answer may carry a note with it
+  "generation": "1",                                     // the gate's current question generation
+  "capability": "question.answer",                       // only when answerable inline; else null
+  "unavailable_reason": null,                            // "unstructured_choices" for an open gate without choices
+  "answer": { "choice_id": null, "label": null, "operator_text": "...",  // <=2000 chars
+              "answered_at": "...", "origin": "bridge" },                // nullable
+  "cta": "question.answer" | "open_gate" | null,         // inline, gate screen while open, or none
+  "tool_group_id": null }
+```
+
+A gate entry carries the same question contract as the work-item feed's
+`gate:<job>:<n>` question; a choice gate asks one joined question,
+`gate:<job>:0`. When `capability` is `question.answer`, a client answers
+inline with `question.answer` (see that command), optionally with a note for
+a choice whose `accepts_feedback` is true. Confirm choices with
+`requires_confirmation` before sending.
+
+Detail tiers. The `remote` tier (relay, LAN WebSocket, every live frame)
+carries a call's tool label, repository-relative path or symbol, URL host,
+status and duration. It never carries commands or arguments, search
+patterns, queries, absolute paths, error text, or a tool's display summary.
+The `local` tier, served only to the bridge's loopback HTTP path holding the
+local token (Bossy) and to the in-process terminal, adds ranges and edit
+counts, patterns, the scrubbed command, the Atlas hint, the URL path, the web
+query, and `error`. Both tiers carry the same keys; remote leaves them null.
+
 ### `jobs.list`
 
 ```jsonc
@@ -474,6 +600,44 @@ launches the instance's detached run and reports the launch outcome in an
 additive `run` field on the result (`run.start`-shaped). This applies to
 `ask`, `plan.approve`, `plan.reject`, `review.approve`, and
 `review.reject`.
+
+### `question.answer` — answer a gate inline from its conversation entry
+
+The structured twin of `ask` for a `gate` entry whose `capability` is
+`question.answer`. The answer is idempotent on `action_id` and is refused as
+`stale_generation` once the gate's question generation moves, so a client
+never answers a question it did not see.
+
+```jsonc
+// args (all from the gate entry except action_id and feedback)
+{
+  "action_id": "chat-7f3a",            // client idempotency key, printable ASCII, <=128 bytes
+  "work_item_id": 141,
+  "job_id": 9830,                      // the entry's gate_job_id
+  "question_id": "gate:9830:0",
+  "question_generation": "1",         // the entry's generation
+  "choice_id": "send_back",            // one of the entry's choices
+  "feedback": "split the projection",  // optional, <=2000 chars; only when the choice's accepts_feedback
+  "repo_path": "/abs/path"             // required on loopback HTTP; optional over the relay and the LAN
+                                       // WebSocket, where the bridge binds its own project
+}
+
+// result
+{
+  "protocol": "posse.work_item_action.v1",
+  "action_id": "chat-7f3a",
+  "outcome": "accepted" | "pending" | "rejected" | "stale_generation" | "invalid_choice"
+           | "capability_lost" | "gate_closed" | "target_not_found" | "conflict",
+  "safe_reason": null,                 // e.g. "feedback_not_accepted", "owner_delivery_pending"
+  "question_state": "answered",
+  "run": { "started": true }           // when an accepted answer unblocked work and no run was live
+}
+```
+
+Over the relay and the LAN WebSocket the result never carries `repo_path`,
+and the relay omits it from its audit copy. A note rides with the choice as
+`ask`'s `"<choice>: note"` does and appears as the gate answer's
+`operator_text`.
 
 ### `plan.approve`
 
@@ -744,6 +908,34 @@ than inferring meaning from `events.message`. `phase` frames describe job
 lifecycle; `model` frames describe bounded provider-call lifecycle; `progress`
 is a semantic checkpoint; `result` and `error` are terminal summaries.
 
+Two bounded exceptions to the no-model-output rule. Provider commentary (the
+visible text an agent writes between tool calls) is a `progress` frame with
+`phase: "commentary"`, normalized, secret-scrubbed, and bounded to the summary
+and detail limits; the conversation projection shows it as `note` items of at
+most 180 characters. Provider-call lifecycle frames (`model`, and the call's
+terminal `error`/`result`) carry `phase: "model_call"` and a summary naming
+only the role and status (`"researcher model failed"`): a call's activity
+text can be a delegated prompt and is never sent.
+
+### `conversation_entry`
+
+A live hint that one `work_item.conversation` entry changed. Always the
+`remote` tier. Tool-group upserts are coalesced to at most one per second
+per group; frames are at most 16 KB. Cursors run over durable tables, so a
+missed frame is recovered by re-fetching the page; after a reconnect or a
+`bridge_epoch` change clients MUST re-fetch rather than replay. Never
+triggers a push notification.
+
+```jsonc
+// payload
+{
+  "protocol": "posse.agent_conversation.v1",
+  "work_item_id": 141,
+  "op": "upsert",
+  "entry": { /* ConversationEntry, see work_item.conversation */ }
+}
+```
+
 ### `provider_usage`
 
 Account quota telemetry from Posse's existing Claude/Codex collectors. This is
@@ -923,9 +1115,9 @@ MUST refuse any command outside this allowlist with
 defensively (defense in depth). The allowlist:
 
 ```
-queue.list, queue.add, work_item.get, jobs.list, command.status, events.tail, gates.list,
-state.snapshot, run.start, run.stop, atlas.warm, job.nudge, ask,
-plan.approve, plan.reject, review.approve, review.reject, git.push
+queue.list, queue.add, work_item.get, work_item.conversation, jobs.list, command.status,
+events.tail, gates.list, state.snapshot, run.start, run.stop, atlas.warm, job.nudge, ask,
+question.answer, plan.approve, plan.reject, review.approve, review.reject, git.push
 ```
 
 ## Routing

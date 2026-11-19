@@ -215,6 +215,7 @@ function citationEntryParts(entry) {
     return {
       rawRef: selector?.ref || entry.hash || entry.ref || entry.ref_hash,
       lines: selector?.lines || entry.lines || null,
+      path: typeof entry.path === "string" ? entry.path.trim().slice(0, 500) : "",
       why: normalizeCitationWhy(entry.why ?? entry.note ?? entry.reason),
     };
   }
@@ -262,12 +263,14 @@ export function normalizeResearcherCitationTriage(parsed, opts = {}) {
       const hash = normalizeHashRefAlias(parts.rawRef);
       const lines = normalizeCitationLines(parts.lines);
       const selector = formatHashRefSelector(hash, lines);
+      // Same-range citations of different files in one ref stay distinct.
+      const sourcePath = lines ? parts.path || "" : "";
       const why = normalizeCitationWhy(parts.why, maxWhyChars);
       if (!isHashRefAlias(hash)) {
         out.dropped.push({ lane, ref: String(parts.rawRef || "").trim(), reason: "invalid_ref" });
         continue;
       }
-      if (seen.has(selector)) {
+      if (seen.has(`${selector}\0${sourcePath}`)) {
         out.dropped.push({ lane, ref: selector, reason: "duplicate_ref" });
         continue;
       }
@@ -275,9 +278,10 @@ export function normalizeResearcherCitationTriage(parsed, opts = {}) {
         out.dropped.push({ lane, ref: hash, reason: "missing_decoy_why" });
         continue;
       }
-      seen.add(selector);
+      seen.add(`${selector}\0${sourcePath}`);
       const normalized = { hash };
       if (lines) normalized.lines = lines;
+      if (sourcePath) normalized.path = sourcePath;
       if (why) normalized.why = why;
       out[lane].push(normalized);
     }

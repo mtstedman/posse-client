@@ -25,6 +25,17 @@ const NATIVE_PULSE_MIN_REFRESH_DELAY_SECONDS = 5;
 
 /** @typedef {Error & { code: string, status?: number | null, remoteCode?: string }} PulseError */
 
+// Bumped whenever a broker's Session context changes. A persistent native
+// worker authenticates with the grants it was handed, and the native side
+// enforces only the Session scope those grants carry, so a handle whose worker
+// was seeded under an earlier epoch must replace it.
+let sessionContextEpoch = 0;
+
+/** @returns {number} */
+export function pulseSessionContextEpoch() {
+  return sessionContextEpoch;
+}
+
 /**
  * @typedef {Object} NativePulseEnvelope
  * @property {string} token        Compact Ed25519 JWT minted by the heartbeat.
@@ -100,6 +111,7 @@ export class PulseTokenManager {
   setSessionContext(value = null) {
     const next = normalizeSessionContext(value);
     if (JSON.stringify(next) === JSON.stringify(this._sessionContext)) return;
+    sessionContextEpoch += 1;
     this._sessionContext = next;
     this._sessionScopeEnforcement = next ? false : true;
     this._generation += 1;
@@ -274,7 +286,9 @@ export class PulseTokenManager {
     }
     const cacheKey = `${pulseCacheKey(rawKey, policy)}${sessionContextCacheKey(this._sessionContext)}:route=${route}${nativeIdentity ? `:native=${nativeIdentity.package}@${nativeIdentity.version}` : ""}${workItemContextCacheKey(wiContext)}`;
     const specKey = routeHeartbeatSpecKey(route, nativeIdentity, wiContext);
-    this._routeHeartbeatSpecs.set(specKey, {
+    // A spec is recorded only for a route that has been granted: a rejected
+    // first mint must not become a route the base heartbeat retries forever.
+    const recordSpec = () => this._routeHeartbeatSpecs.set(specKey, {
       cacheKey,
       requiredRoute: route,
       nativePackage: nativeIdentity?.package || null,
@@ -290,6 +304,7 @@ export class PulseTokenManager {
     const cached = this._cache.get(cacheKey);
     if (!refresh && cached?.envelope && now < cached.refreshAt && now < cached.expiresAt) {
       assertExactRoute(cached.routes, route);
+      recordSpec();
       this.#scheduleRouteHeartbeat(specKey, cached);
       return cached.envelope;
     }
@@ -297,6 +312,7 @@ export class PulseTokenManager {
     const refreshed = this._cache.get(cacheKey);
     if (refreshed) {
       assertExactRoute(refreshed.routes, route);
+      recordSpec();
       this.#scheduleRouteHeartbeat(specKey, refreshed);
     }
     return minted.envelope;
@@ -407,6 +423,8 @@ export class PulseTokenManager {
       await this.#restoreRouteHeartbeats();
     } catch {
       if (!this._heartbeatRunning) return;
+      // A successful base refresh above already armed the regular timer.
+      if (this._heartbeatTimer) clearTimeout(this._heartbeatTimer);
       this._heartbeatTimer = setTimeout(() => {
         this._heartbeatTimer = null;
         void this.#refreshHeartbeat();
@@ -448,6 +466,8 @@ export class PulseTokenManager {
         this._routeHeartbeatSpecs.delete(specKey);
         return;
       }
+      const existing = this._routeHeartbeatTimers.get(specKey);
+      if (existing) clearTimeout(existing);
       const timer = setTimeout(() => {
         this._routeHeartbeatTimers.delete(specKey);
         void this.#refreshRouteHeartbeat(specKey);
@@ -804,6 +824,9 @@ const NON_RETRYABLE_ROUTE_SPEC_CODES = new Set([
   "POSSE_PULSE_WORK_ITEM_ROUTE_INVALID",
   "POSSE_PULSE_WORK_ITEM_SESSION_REQUIRED",
   "POSSE_NATIVE_SCOPE_ENFORCEMENT_REQUIRED",
+  // The remote refuses this native artifact version; retrying it every base
+  // refresh only repeats a key-bearing request that cannot succeed.
+  "POSSE_PULSE_NATIVE_VERSION_UNSUPPORTED",
 ]);
 
 function routeHeartbeatSpecKey(route, nativeIdentity, workItemContext = null) {

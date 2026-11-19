@@ -468,8 +468,10 @@ export function approvePlan(wiId, {
       const jobId = Number(item?.job_id);
       const job = getJob(jobId);
       const jobPayload = parseJobPayload(job);
-      const request = operationalCommandApprovalRequest(jobPayload?.test_command);
       const required = jobPayload?._operational_command_approval_required;
+      // Approval has no repository path; the compile-time stamp carries the
+      // repository's runner decision for the exact command.
+      const request = operationalCommandApprovalRequest(jobPayload?.test_command, { compiledApproval: required });
       if (
         !job
         || job.work_item_id !== wiId

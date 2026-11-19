@@ -2,10 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { AUTOMATION_BUILTINS, CUSTOM_TOOLS_TERMINAL } from "../../../catalog/custom-tools.js";
+import { AUTOMATION_BUILTINS, AUTOMATION_RUN_RECONCILE_RESOLUTIONS, CUSTOM_TOOLS_TERMINAL } from "../../../catalog/custom-tools.js";
 import { authorize, demand, digest, matchesGrant, narrowLimits, object, publicEntry, schemaCheck, subject, validateGrant } from "../functions/policy.js";
 import { ResourceSandbox } from "./ResourceSandbox.js";
-import { nextOccurrence, previewOccurrences, validateTrigger } from "../functions/triggers.js";
+import { advanceStaleOccurrence, nextOccurrence, previewOccurrences, validateTrigger } from "../functions/triggers.js";
 
 const defaultLimits = { wall_time_seconds: 120, calls: 16, turns: 8, spend_cap_usd: 1 };
 export class AutomationService {
@@ -301,7 +301,10 @@ export class AutomationService {
       if (uncertain && execution) execution.state.uncertain = true;
       run.error_code = uncertain && execution ? "external_outcome_unknown" : error.code || "execution_failed";
       // Avoid reflecting arbitrary provider/connector errors or secrets into history.
-      run.error = ["forbidden", "grant_changed", "schema_mismatch", "capability_unavailable", "wall_time_limit", "call_limit", "budget_limit", "usage_unknown", "owner_fenced", "output_conflict", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable"].includes(run.error_code) ? error.message : "Execution failed; inspect the operator's local diagnostics";
+      run.error = ["forbidden", "grant_changed", "schema_mismatch", "capability_unavailable", "wall_time_limit", "call_limit", "budget_limit", "usage_unknown", "owner_fenced", "output_conflict", "script_changed", "script_timeout", "script_failed", "script_secret_missing", "script_unavailable"].includes(run.error_code) ? error.message : "Execution failed; inspect the operator's local diagnostics";
+      // A failed script's redacted result (exit code, output, stderr) is the
+      // run's output, as a passing one's would be.
+      if (run.error_code === "script_failed" && entry.kind === "script") run.output = error.result;
       if (!uncertain) this.store.transaction(() => { this.store.remove("commits", run.id); this.store.releaseOutputs(run.id); });
       if (!uncertain && retryEligible(error, run)) {
         run.status = "retry_wait";
@@ -345,13 +348,58 @@ export class AutomationService {
         });
         continue;
       }
-      run.status = "interrupted"; run.error_code = "owner_restarted"; run.error = "Prior execution outcome is unknown; reconcile before retrying";
+      run.status = "interrupted"; run.error_code = "owner_restarted";
+      run.error = `Prior execution outcome is unknown; settle it with \`posse automation run reconcile ${run.id} --discard|--accept\``;
       run.completed_at = new Date(this.now()).toISOString(); this.store.updateRun(run);
       if (run.schedule_id) {
         const schedule = this.store.get("schedules", run.schedule_id);
         if (schedule) { schedule.enabled = false; schedule.error_code = "reconciliation_required"; this.store.put("schedules", schedule.id, schedule); }
       }
     }
+  }
+  // Settles an interrupted run: an outcome the owner could not verify (it
+  // stopped or lost its lease between the commit journal and the files, or
+  // an external call's result is unknown). Until then the run holds its
+  // output reservations and its schedule cannot be removed. The commit
+  // journal lists each file the run meant to write with its content hash;
+  // staged content never survives the owner, so nothing can be finished.
+  //   discard: keep nothing. The journal is dropped without saving its
+  //     checkpoints and the run fails (reconciled_discard). Files that had
+  //     already landed stay as they are: the journal holds no prior content.
+  //   accept: keep what was committed. Journaled files in place with their
+  //     journaled content become the run's artifacts; its checkpoints are
+  //     saved only when every journaled file is in place (as recover()
+  //     does), so a later run redoes a partial commit instead of skipping
+  //     it. The run succeeds.
+  // Both release the reservations; retention then prunes the run normally.
+  reconcileRun(id, resolution) {
+    demand(AUTOMATION_RUN_RECONCILE_RESOLUTIONS.includes(resolution), `Reconcile needs a resolution: ${AUTOMATION_RUN_RECONCILE_RESOLUTIONS.join(" or ")}`, "invalid_request");
+    return this.store.transaction(() => {
+      this.assertOwner();
+      const run = this.store.run(id);
+      demand(run?.status === "interrupted" && !this.active.has(id), "Only an interrupted run can be reconciled", "invalid_request");
+      const journal = this.store.get("commits", id);
+      run.reconciliation = { resolution, reconciled_at: new Date(this.now()).toISOString(), prior_error_code: run.error_code || null };
+      if (resolution === "accept") {
+        if (journal) {
+          const sandbox = new ResourceSandbox(journal.resources, journal.grants);
+          const landed = journal.files.filter(item => sandbox.outputMatches(item.resource, item.name, item.hash));
+          run.artifacts = landed.map(item => `${item.resource}/${item.name}`);
+          run.reconciliation.missing_artifacts = journal.files.filter(item => !landed.includes(item)).map(item => `${item.resource}/${item.name}`);
+          if (landed.length === journal.files.length) for (const item of journal.checkpoints) this.store.saveCheckpoint(item.id, item.value);
+        }
+        run.status = "succeeded"; delete run.error; delete run.error_code;
+      } else {
+        run.status = "failed"; run.error_code = "reconciled_discard";
+        run.error = "An operator discarded this interrupted run's unverified outcome";
+      }
+      this.store.updateRun(run); this.store.remove("commits", id); this.store.releaseOutputs(id);
+      const schedule = run.schedule_id ? this.store.get("schedules", run.schedule_id) : null;
+      if (schedule?.trigger?.kind === "once" && schedule.last_run_id === run.id) {
+        schedule.state = run.status === "succeeded" ? "completed" : run.status; this.store.put("schedules", schedule.id, schedule);
+      }
+      return run;
+    });
   }
   saveSchedule(value) {
     object(value, ["id", "tool", "grant_id", "principal", "input", "trigger", "every_seconds", "anchor", "enabled", "overlap", "misfire", "retry"], ["id", "tool", "grant_id", "principal", "input"]);
@@ -378,19 +426,16 @@ export class AutomationService {
     schedule.enabled = enabled === true;
     schedule.state = schedule.enabled ? "active" : "paused";
     delete schedule.error_code;
-    // A schedule with no next occurrence has finished (a fired one-time
-    // trigger). Resuming it must find a future occurrence, never replay it.
-    if (schedule.enabled && schedule.next_at == null) {
-      const next = nextOccurrence(schedule.trigger, this.now() - 1);
-      demand(next, "Schedule has no future occurrence", "invalid_trigger");
-      schedule.next_at = next.at; schedule.next_local_key = next.localKey;
-    }
+    // A finished schedule (a fired one-time trigger) must find a future
+    // occurrence, never replay it; a stale one (paused, or parked after more
+    // missed occurrences than a tick replays) continues from the next one.
+    if (schedule.enabled) advanceStaleOccurrence(schedule, this.now());
     return this.store.put("schedules", id, schedule);
   }
   removeSchedule(id) {
     const schedule = this.store.get("schedules", id); demand(schedule, "Schedule not found");
     demand(this.store.scheduleRunCount(id, ["queued", "running", "committing", "retry_wait", "interrupted"]) === 0,
-      "Schedule has an unfinished or unreconciled run");
+      "Schedule has an unfinished or unreconciled run; settle an interrupted run with `posse automation run reconcile <run-id> --discard|--accept`");
     this.store.remove("schedules", id); return schedule;
   }
   runScheduleNow(id, idempotencyKey = randomUUID()) {

@@ -28,6 +28,7 @@ import { resolveWebToolsEnabled } from "../../providers/functions/shared/tool-po
 import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS, TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
 import { MCP_REQUEST_DEFERRED_NOTIFICATION, MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../catalog/artifact.js";
+import { JOB_TOOL_USAGE_COUNTERS } from "../../../catalog/job.js";
 import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { discoverUnitTestCapability, declaredUnitTestPaths } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { roleUsesCanonicalRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
@@ -47,6 +48,7 @@ import { appendHashRefIfMajor } from "../../../shared/tools/functions/hash-adder
 import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
 import { normalizeProjectDbCapability } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { generateImageWithAllowance } from "./deterministic-mcp/image-generation.js";
+import { adjustJobToolUsage, jobToolUsage } from "../../queue/functions/job-tool-usage.js";
 import { operatorFeedbackDeliveryForJob, operatorFeedbackDeliveryText } from "../../providers/functions/shared/operator-feedback-delivery.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, researchExplorationObservationStatus, runWithObservationContext } from "../../observability/functions/observations.js";
 import { scopedCheckToolResultObservation } from "../../observability/functions/scoped-check-tool-result.js";
@@ -81,6 +83,7 @@ import { parseEnvBool, parseBoolOverride, bootString, nonNegativeIntegerOrNull }
 import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
 import { projectAgentToolSchema, sortAgentToolDefinitions } from "../../../shared/tools/functions/agent-schema.js";
 import { resolveAgentFileAuthority } from "./deterministic-mcp/agent-file-authority.js";
+import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
 import { RESEARCH_CITATION_FETCH_GATE_ENABLED, RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS, NATIVE_DUPLICATE_READ_SUPPRESSED_PREFIX, RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS, RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS, RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS, buildResearchCitationFetchGateText, buildResearchCurtainCallText, buildResearchSynthesisRequiredText, isResearchAtlasCitationFetchAction, isResearchAtlasExplorationAction, researchSynthesisDecision, researchSynthesisExplorationCeiling } from "./deterministic-mcp/research-synthesis.js";
 import { jsonRpcSuccess, jsonRpcError, hiddenSessionFromParams, stripHiddenSessionParam, classifyNativeToolResult, isSuccessfulNativeToolResult } from "./deterministic-mcp/json-rpc.js";
 
@@ -1338,9 +1341,21 @@ function describeTasksShape(tasks) {
   return typeof tasks;
 }
 
+// The generate_image and download_file allowances are per job. With a job they
+// are spent on its durable counters, so a retried attempt or a respawned
+// gateway continues them; without one, on this gateway scope's memory.
+function jobImageAllowance(jobId) {
+  const counter = JOB_TOOL_USAGE_COUNTERS.IMAGE_GENERATION_CALLS;
+  return {
+    reserve: (maxCalls) => adjustJobToolUsage(jobId, counter, 1, { limit: maxCalls }),
+    release: () => { adjustJobToolUsage(jobId, counter, -1); },
+  };
+}
+
 async function generateImageWithinScope(args = {}) {
   return generateImageWithAllowance(args, {
     state: gatewayScopeState(gateScopeKey),
+    ...(mcpJobId ? { allowance: jobImageAllowance(mcpJobId) } : {}),
     maxCalls: imageGenerationMaxCalls,
     cwd: workspaceCwd,
     scopePredicates: effectiveScopePredicates,
@@ -1357,17 +1372,24 @@ async function downloadFilesForCurrentScope(args = {}) {
   if (!resolveWebToolsEnabled()) {
     return "Error: download_file is disabled by the operator web tools setting.";
   }
-  return await downloadFilesWithinScope(args, {
+  const jobId = mcpJobId;
+  const counter = JOB_TOOL_USAGE_COUNTERS.DOWNLOAD_BYTES;
+  const jobState = jobId ? { downloadBytes: jobToolUsage(jobId, counter) } : gatewayScopeState(gateScopeKey);
+  const usedBefore = jobState.downloadBytes || 0;
+  const result = await downloadFilesWithinScope(args, {
     cwd: workspaceCwd,
     scopePredicates: effectiveScopePredicates,
-    jobState: gatewayScopeState(gateScopeKey),
+    jobState,
     context: {
       work_item_id: mcpWorkItemId,
-      job_id: mcpJobId,
+      job_id: jobId,
       attempt_id: mcpAttemptId,
       agent_call_id: mcpAgentCallId,
     },
   });
+  const spent = (jobState.downloadBytes || 0) - usedBefore;
+  if (jobId && spent > 0) adjustJobToolUsage(jobId, counter, spent);
+  return result;
 }
 
 // The artificer packs scoped images into one sheet. Converter runs are async,
@@ -1384,6 +1406,27 @@ async function composeSpriteSheetForCurrentScope(args = {}) {
       agent_call_id: mcpAgentCallId,
     },
   });
+}
+
+// clean_image rewrites an image (in place by default); only its metadata mode
+// reads, so every other mode needs this session's write access.
+function cleanImageForCurrentScope(args = {}) {
+  if (!writeEnabled && String(args.mode || "clean").trim().toLowerCase() !== "metadata") {
+    return "Error: Write access is not granted for this role.";
+  }
+  return execCleanImage(args, workspaceCwd, effectiveScopePredicates);
+}
+
+// The boot's artifact output root bounds prune_artifact_output: the agent may
+// name a directory inside it, never one outside it (nor blank it to the cwd).
+function pruneArtifactOutputForCurrentScope(args = {}) {
+  const bootRoot = bootConfig.artifactOutputRoot;
+  if (!bootRoot) return execPruneArtifactOutput(args, workspaceCwd, effectiveScopePredicates);
+  const requested = String(args.output_root ?? "").trim();
+  if (requested && !isInsideRoot(path.resolve(workspaceCwd, requested), path.resolve(workspaceCwd, bootRoot))) {
+    return `Error: prune_artifact_output blocked - ${requested} is outside this job's artifact output root.`;
+  }
+  return execPruneArtifactOutput({ ...args, output_root: requested || bootRoot }, workspaceCwd, effectiveScopePredicates);
 }
 
 // The assessor looks at an in-scope image's pixels. Read-only and async: a
@@ -2382,7 +2425,7 @@ mcpToolRegistry.attach("ack_operator_feedback", (args) => ackOperatorFeedback(ar
 if (writeEnabled) {
   mcpToolRegistry.attach("write_file", (args) => writeFileWithinScope(args || {}));
   mcpToolRegistry.attach("edit_file", (args) => editFileWithinScope(args || {}));
-  mcpToolRegistry.attach("prune_artifact_output", (args) => execPruneArtifactOutput({ output_root: bootConfig.artifactOutputRoot, ...args }, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("prune_artifact_output", (args) => pruneArtifactOutputForCurrentScope(args || {}));
   mcpToolRegistry.attach("move_file", (args) => moveFileWithinScope(args || {}));
   mcpToolRegistry.attach("copy_file", (args) => copyFileWithinScope(args || {}));
   mcpToolRegistry.attach("make_dir", (args) => makeDirWithinScope(args || {}));
@@ -2409,7 +2452,7 @@ if (allowImageHelpers) {
 // call); scoped boots attach them only for the artificer role so a read-only
 // assessor cannot reach them in a no-token boot.
 if (ownerHotGateway || hasVerifiedToolContract() || roleName === "artificer") {
-  mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("clean_image", (args) => cleanImageForCurrentScope(args || {}));
   mcpToolRegistry.attach("compose_sprite_sheet", (args) => composeSpriteSheetForCurrentScope(args || {}));
   mcpToolRegistry.attach("download_file", (args) => downloadFilesForCurrentScope(args || {}));
 }
@@ -2620,7 +2663,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
   if (writeEnabled) {
     mcpToolRegistry.attach("write_file", (args) => writeFileWithinScope(args || {}));
     mcpToolRegistry.attach("edit_file", (args) => editFileWithinScope(args || {}));
-    mcpToolRegistry.attach("prune_artifact_output", (args) => execPruneArtifactOutput({ output_root: bootConfig.artifactOutputRoot, ...args }, workspaceCwd, effectiveScopePredicates));
+    mcpToolRegistry.attach("prune_artifact_output", (args) => pruneArtifactOutputForCurrentScope(args || {}));
     mcpToolRegistry.attach("move_file", (args) => moveFileWithinScope(args || {}));
     mcpToolRegistry.attach("copy_file", (args) => copyFileWithinScope(args || {}));
     mcpToolRegistry.attach("make_dir", (args) => makeDirWithinScope(args || {}));
@@ -2642,7 +2685,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
   }
   // Remote authorizes these handlers; each call retains its mutation scope.
   if (ownerHotGateway || hasVerifiedToolContract() || roleName === "artificer") {
-    mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
+    mcpToolRegistry.attach("clean_image", (args) => cleanImageForCurrentScope(args || {}));
     mcpToolRegistry.attach("compose_sprite_sheet", (args) => composeSpriteSheetForCurrentScope(args || {}));
     mcpToolRegistry.attach("download_file", (args) => downloadFilesForCurrentScope(args || {}));
   }

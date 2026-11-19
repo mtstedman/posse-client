@@ -391,6 +391,9 @@ export class SourceCoverageOwner {
     for (const row of this.#rows()) {
       const coverage = rowDetail(row);
       if (!coverage || !isReusableCoverageState(coverage.delivery_state)) continue;
+      // Evidence-only coverage stays citable but never stands in for a later
+      // read, as in #resolvedIntervalPlan.
+      if (coverage.suppressive === false) continue;
       if (coverage.repository_identity !== this.repositoryIdentity) continue;
       if (normalizePath(coverage.repo_rel_path) !== relative) continue;
       if (Number(coverage.start_line) > requestedStart || Number(coverage.end_line) < requestedEnd) continue;

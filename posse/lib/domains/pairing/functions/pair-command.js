@@ -79,7 +79,7 @@ import {
 } from "./session-hold.js";
 import { askRejoinTree, askToPublishPromotion, askTreeAction, printPromotionForApproval } from "./approval-prompt.js";
 import { keptTreeProblem, rejoinKeptBranch } from "./session-tree-rejoin.js";
-import { clearTreeIntent, purgeSessionTree, readKeptTrees, readTreeIntent, registerKeptTree, setTreeIntent } from "./session-trees.js";
+import { clearTreeIntent, listSessionTrees, purgeSessionTree, readKeptTrees, readTreeIntent, registerKeptTree, setTreeIntent } from "./session-trees.js";
 import {
   describeSessionPublishModes,
   recordUnattendedFailure,
@@ -958,16 +958,17 @@ function finishSessionRepository(root, { state = null, journal = null, C = {}, j
   const intent = readTreeIntent(root, ids);
   const repository = state?.temporary_repository || journal?.temporary_repository || null;
   const branch = state?.shared_branch || journal?.source_branch || null;
+  const keepTree = () => registerKeptTree(root, {
+    branch,
+    sessionId: state?.id || journal?.session_id || "",
+    remoteSessionId: state?.remote_session_id || null,
+    repository,
+    remoteUrl: state?.remote_url || journal?.source_url || null,
+    credentialDirectory: state?.credential_directory || null,
+    trunkOid: journal?.target_base_sha || null,
+  });
   if (intent === "keep" && branch) {
-    registerKeptTree(root, {
-      branch,
-      sessionId: state?.id || journal?.session_id || "",
-      remoteSessionId: state?.remote_session_id || null,
-      repository,
-      remoteUrl: state?.remote_url || journal?.source_url || null,
-      credentialDirectory: state?.credential_directory || null,
-      trunkOid: journal?.target_base_sha || null,
-    });
+    keepTree();
     clearTreeIntent(root, ids);
     if (!json) {
       console.log(`  ${C.green}Left the tree up:${C.reset} ${branch}${repository ? ` and its private repo ${repository}` : ""} are kept. `
@@ -975,12 +976,29 @@ function finishSessionRepository(root, { state = null, journal = null, C = {}, j
     }
     return { ok: true, deleted: false, kept: true, repository, branch };
   }
+  const trunkRef = intent === "purge" && branch ? resolveTrunkRef(root) : null;
+  if (trunkRef) {
+    // A purge removes only a tree whose work is in the trunk, and that is
+    // known before its repository is deleted: a refused purge leaves the
+    // whole tree up, registered so `posse session trees purge` can finish it.
+    const tree = listSessionTrees(root, { trunkRef, sessionIdsFor: () => ids }).find((candidate) => candidate.branch === branch);
+    if (tree?.status === "unmerged") {
+      if (repository) keepTree();
+      clearTreeIntent(root, ids);
+      const message = `${branch} holds ${tree.ahead} commit(s) the trunk does not`;
+      if (!json) {
+        console.log(`  ${C.yellow}The tree was not purged:${C.reset} ${message}; it is kept${repository ? ` with its private repo ${repository}` : ""}. `
+          + `Remove it with \`posse session trees purge ${branch} --force\` if that work is not needed.`);
+      }
+      return { ok: true, deleted: false, kept: Boolean(repository), repository, branch, purged: { ok: false, reason: "unmerged_work", message } };
+    }
+  }
   const cleanup = repository ? cleanupGitHubSessionRepository(repository, { cwd: root }) : null;
   if (intent === "purge" && branch) {
     clearTreeIntent(root, ids);
     if (cleanup && !cleanup.ok) return cleanup;
     const purged = purgeSessionTree(root, branch, {
-      trunkRef: resolveTrunkRef(root),
+      trunkRef,
       activeBranch: null,
       sessionIdsFor: () => ids,
       deleteRepository: () => ({ ok: true }),
@@ -1211,9 +1229,13 @@ function reopenKeptRepository(root, tree, { defaultBranch }) {
     repository: tree.repository,
     remoteUrl: tree.remoteUrl || `git@github.com:${tree.repository}.git`,
     defaultBranch,
-    identity: prepareSessionSshIdentity(root, tree.sessionId),
+    // The tree is re-registered under each rejoining session's id; its key is
+    // where its credential directory says, not where that id would put one.
+    identity: prepareSessionSshIdentity(root, tree.sessionId, { directory: tree.credentialDirectory }),
   };
 }
+
+export { reopenKeptRepository as __testReopenKeptRepository };
 
 async function runHost({
   projectDir,

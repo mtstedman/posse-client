@@ -1,10 +1,8 @@
 import { isReleasedPostMergeDbJob } from "./post-merge-db-tasks.js";
 import {
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
-  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
-  MERGE_VERIFICATION_REVIEW_TYPE,
-  POST_MERGE_DB_TASK_REVIEW_TYPE,
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
+  postCompletionGateKindForPayload,
 } from "../../../catalog/human-input.js";
 
 // Reconciliation transition table. A live resolver is excluded by the SQL
@@ -13,15 +11,14 @@ export function shouldRetireTerminalWorkItemGate(job, payload, originalJob = nul
   if (isReleasedPostMergeDbJob(originalJob, {
     id: job.work_item_id, status: job.work_item_status, merge_state: job.work_item_merge_state,
   })) return false;
-  if (payload.review_type === WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE
-    && job.work_item_status === "failed") return false;
-  if (payload.review_type === CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE
-    && job.work_item_status === "complete"
-    && job.work_item_merge_state !== "merged") return false;
-  return payload.subtype !== "push_offer"
-    && payload.review_type !== POST_MERGE_DB_TASK_REVIEW_TYPE
-    && payload.review_type !== MERGE_VERIFICATION_REVIEW_TYPE
-    && payload.review_type !== MERGE_FAILURE_RECOVERY_REVIEW_TYPE;
+  const kind = postCompletionGateKindForPayload(payload);
+  // A disposition gate decides one state of its work item and is moot once
+  // the work item leaves it.
+  if (kind === WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE) return job.work_item_status !== "failed";
+  if (kind === CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE) {
+    return !(job.work_item_status === "complete" && job.work_item_merge_state !== "merged");
+  }
+  return kind == null;
 }
 
 export function abandonedResolverDecision({ referencedId, originalStatus = null, allowedStates = [] }) {

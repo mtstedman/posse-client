@@ -1,4 +1,5 @@
-import { hasOwn, parseEditJsonPath, setJsonPathValue, splitReplacementLines, joinEditableLines, detectJsonIndent } from "./edit-json.js";
+import { hasOwn, parseEditJsonPath, setJsonPathValue, spliceJsonPathValue, splitReplacementLines, insertEditableLines, insertedTextEol, withLineEnding, detectJsonIndent } from "./edit-json.js";
+import { isUtf8 } from "buffer";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -14,12 +15,14 @@ import { createHashRefTool, fetchHashRefTool } from "../hash-adder.js";
 import { convertImageToPng, convertImageToJpeg, decodePngToRgba, detectImageFormat, encodeRgbaToPng, PNG_SIGNATURE, readJpegDimensions, resizeRgbaNearest, stripPngMetadataChunks } from "./image-codec.js";
 import { addAgentHiddenRipgrepGlobs, addRipgrepSkipGlobs, compactRipgrepStderr, formatRipgrepRequirementError, isWorkspaceRootIgnoredByGit, makeGitIgnoreChecker, parseRipgrepJsonMatches, regexPatternNeedsMultiline, resolveRipgrepCommand, ripgrepIncludeGlob } from "./ripgrep.js";
 import { sanitizeAbsolutePathsInText, toDisplayPath } from "../../../format/functions/display-paths.js";
-import { agentHiddenPathError, agentHiddenPathReasonForAbsolute, buildScopePredicates, DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES, isSensitiveEnvFileOrTargetPath, isSensitiveEnvFilePath, isUnreadablePath, resolveDeterministicReadableFile, safePath, safeReadPath, splitShellSubcommands } from "./path-policy.js";
+import { agentHiddenPathError, agentHiddenPathReasonForAbsolute, buildScopePredicates, DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES, isSensitiveEnvFileOrTargetPath, isSensitiveEnvFilePath, isUnreadablePath, realMutationTarget, resolveDeterministicReadableFile, safePath, safeReadPath, splitShellSubcommands } from "./path-policy.js";
+import { realpathExistingPrefix } from "../../../../domains/runtime/functions/fs-safety.js";
+import { protectedMutablePathReason, relativePathFromCwd } from "../../../../domains/runtime/functions/protected-paths.js";
 import { createTestExecutionExecutors } from "./test-execution.js";
 import { createObservationWrapper } from "./factory.js";
 import { boundedSearchRows, renderSearchContentRows } from "./search-results.js";
 import { createTextMutationHelpers } from "./edits-mutations.js";
-import { applyBatchEdits, ambiguousExactMatchMessage, EMPTY_FIND_ERROR } from "./edit-spans.js";
+import { applyBatchEdits, ambiguousExactMatchMessage, EMPTY_FIND_ERROR, resolveLineSpan } from "./edit-spans.js";
 import { buildStructuredReadResult as buildStructuredReadResultFromModule, formatNumberedLines as formatNumberedLinesFromModule, hasStructuredReadOptions as hasStructuredReadOptionsFromModule, looksReDosProne as looksReDosProneFromModule, splitEditableLines as splitEditableLinesFromModule } from "./structured-read.js";
 import "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
@@ -373,10 +376,12 @@ export function createDeterministicToolkit({
       return "Error: Writing .env files is blocked. Use documented config examples or code paths instead.";
     }
     const exists = fs.existsSync(filePath);
-    if (exists && scopePredicates?.hasScope && !scopePredicates.canEdit(filePath)) {
+    // Scope is judged where the write lands: through a link, that is its target.
+    const target = realMutationTarget(cwd, filePath, scopePredicates);
+    if (exists && scopePredicates?.hasScope && !scopePredicates.canEdit(target)) {
       return `Error: write_file blocked - ${args.path} is outside the allowed edit scope.`;
     }
-    if (!exists && scopePredicates?.hasScope && !scopePredicates.canCreate(filePath)) {
+    if (!exists && scopePredicates?.hasScope && !scopePredicates.canCreate(target)) {
       return `Error: write_file blocked - ${args.path} is outside the allowed creation scope.`;
     }
     const lockErr = guardToolWriteLock("write_file", args.path, cwd);
@@ -400,7 +405,7 @@ export function createDeterministicToolkit({
     if (isSensitiveEnvFileOrTargetPath(filePath)) {
       return "Error: Editing .env files is blocked. Use documented config examples or code paths instead.";
     }
-    if (scopePredicates?.hasScope && !scopePredicates.canEdit(filePath)) {
+    if (scopePredicates?.hasScope && !scopePredicates.canEdit(realMutationTarget(cwd, filePath, scopePredicates))) {
       return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope.`;
     }
     const lockErr = guardToolWriteLock("edit_file", args.path, cwd);
@@ -410,7 +415,8 @@ export function createDeterministicToolkit({
     if (!fs.existsSync(filePath) && !restoreMissingMaterializedFile(filePath, cwd)) {
       return `Error: File not found: ${displayPath}`;
     }
-    const originalContent = fs.readFileSync(filePath, "utf-8");
+    const originalBytes = fs.readFileSync(filePath);
+    const originalContent = originalBytes.toString("utf-8");
     let content = originalContent;
 
     const exactRequested = args.find !== undefined || args.replace !== undefined;
@@ -444,11 +450,23 @@ export function createDeterministicToolkit({
       return `File mode updated: ${displayPath} (executable=${Boolean(args.executable)})`;
     }
 
+    // Decoding replaced every invalid byte with U+FFFD, so any write would
+    // corrupt the file (decision E2, as the merge resolvers refuse).
+    if (!isUtf8(originalBytes)) {
+      return `Error: edit_file blocked - ${displayPath} is not valid UTF-8 text (non_utf8_content). Its other encoding (for example Latin-1 or UTF-16) would be rewritten as U+FFFD replacement characters, and write_file would replace those bytes the same way. Leave it unchanged, or report that it needs converting to UTF-8.`;
+    }
+
     if (modes[0] === "edits") {
       if (Object.keys(args).some((key) => !["path", "edits"].includes(key))) {
         return "Error: edits mode accepts only path and edits.";
       }
-      const applied = applyBatchEdits(originalContent, edits);
+      // An exact item's inserted line breaks follow the file, as in single mode.
+      const items = Array.isArray(edits)
+        ? edits.map((item) => (item && typeof item === "object" && typeof item.find === "string" && typeof item.replace === "string"
+          ? { ...item, replace: withLineEnding(item.replace, insertedTextEol(originalContent, item.find)) }
+          : item))
+        : edits;
+      const applied = applyBatchEdits(originalContent, items);
       if (!applied.results) return `Error: ${applied.error}.`;
       if (applied.editCount > 0 && applied.content !== originalContent) writeTextFileAtomic(filePath, applied.content);
       return JSON.stringify({
@@ -468,13 +486,15 @@ export function createDeterministicToolkit({
       if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) {
         return "Error: replaceLines requires a 1-based inclusive integer range with 1 <= start <= end. Use insertAt or append when adding content outside an existing range.";
       }
-      const { eol, hadFinalEol, lines } = splitEditableLinesFromModule(content);
+      const { lines } = splitEditableLinesFromModule(content);
       const insertIntoEmptyFile = lines.length === 0 && start === 1 && end === 1;
       if (end > lines.length && !insertIntoEmptyFile) {
         return `Error: replaceLines range ${start}:${end} is outside ${displayPath} (${lines.length} lines). Use insertAt to insert at a valid line or append to add content at the end.`;
       }
-      lines.splice(start - 1, insertIntoEmptyFile ? 0 : end - start + 1, ...splitReplacementLines(source.content));
-      content = joinEditableLines(lines, eol, hadFinalEol);
+      // The edits[] span, so both modes leave every other line's ending as it was.
+      const span = resolveLineSpan(content, { replaceLines: { start, end, content: String(source.content ?? "") } });
+      if (span.error) return `Error: ${span.error}.`;
+      content = content.slice(0, span.start) + span.replacement + content.slice(span.end);
       if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
       return `File edited: ${displayPath} (replaceLines ${start}:${end}${insertIntoEmptyFile ? ", inserted into empty file" : ""})`;
@@ -518,17 +538,16 @@ export function createDeterministicToolkit({
       const source = insertAt && typeof insertAt === "object" && !Array.isArray(insertAt) ? insertAt : {};
       const line = Number(source.line);
       if (!Number.isInteger(line) || line < 1) return "Error: insertAt requires a positive 1-based integer line.";
-      const { eol, hadFinalEol, lines } = splitEditableLinesFromModule(content);
+      const { hadFinalEol, lines } = splitEditableLinesFromModule(content);
       if (line > lines.length + 1) return `Error: insertAt line ${line} is outside ${displayPath} (${lines.length} lines).`;
-      lines.splice(line - 1, 0, ...splitReplacementLines(source.content));
-      content = joinEditableLines(lines, eol, hadFinalEol);
+      content = insertEditableLines(content, line, lines.length, hadFinalEol, splitReplacementLines(source.content), insertedTextEol(content));
       if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
       return `File edited: ${displayPath} (insertAt ${line})`;
     }
 
     if (modes[0] === "append") {
-      content += String(append ?? "");
+      content += withLineEnding(String(append ?? ""), insertedTextEol(content));
       if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
       return `File edited: ${displayPath} (append)`;
@@ -547,9 +566,13 @@ export function createDeterministicToolkit({
       const jsonValue = args.jsonValue;
       const updated = setJsonPathValue(parsed, parsedPath.segments, jsonValue);
       if (!updated.ok) return `Error: ${updated.message}`;
-      const eol = content.includes("\r\n") ? "\r\n" : "\n";
-      const trailing = content.endsWith("\n") ? eol : "";
-      content = JSON.stringify(parsed, null, detectJsonIndent(content)).replace(/\n/g, eol) + trailing;
+      const spliced = spliceJsonPathValue(content, parsedPath.segments, jsonValue, {
+        eol: insertedTextEol(content),
+        // A one-line document stays compact; a multi-line one keeps its indent.
+        indentUnit: content.trim().includes("\n") ? detectJsonIndent(content) : "",
+      });
+      if (!spliced.ok) return `Error: ${spliced.message} in ${displayPath}; edit that occurrence with find/replace or replaceLines instead.`;
+      content = spliced.content;
       if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
       return `File edited: ${displayPath} (jsonPath ${String(jsonPath)})`;
@@ -564,7 +587,8 @@ export function createDeterministicToolkit({
       return `Error: ${ambiguousExactMatchMessage(content, args.find)} in ${displayPath}.`;
     }
     if (exactCount === 1) {
-      content = content.replace(args.find, () => args.replace);
+      const replacement = withLineEnding(args.replace, insertedTextEol(content, args.find));
+      content = content.replace(args.find, () => replacement);
       if (content === originalContent) {
         return `Error: edit_file made no changes in ${displayPath}. find/replace resolved to identical content.`;
       }
@@ -1182,7 +1206,10 @@ export function createDeterministicToolkit({
     const rootPath = safePathImpl(cwd, rootArg, scopePredicates);
     if (!fs.existsSync(rootPath)) return `Error: Artifact output root not found: ${toDisplayPath(cwd, rootPath)}`;
     if (!fs.statSync(rootPath).isDirectory()) return `Error: Artifact output root is not a directory: ${toDisplayPath(cwd, rootPath)}`;
-    if (!isWritableArtifactRoot(rootPath, scopePredicates)) {
+    // The walk does not follow links below the root, so judging the root's
+    // own resolved path judges every file it deletes.
+    const realRootPath = realMutationTarget(cwd, rootPath, scopePredicates);
+    if (!isWritableArtifactRoot(realRootPath, scopePredicates)) {
       return `Error: prune_artifact_output blocked - ${rootArg} is outside the allowed artifact scope.`;
     }
 
@@ -1223,7 +1250,8 @@ export function createDeterministicToolkit({
           kept.push(rel);
           continue;
         }
-        if (scopePredicates?.hasScope && !scopePredicates.canEdit(full) && !scopePredicates.canCreate(full)) {
+        const realFull = path.join(realRootPath, rel);
+        if (scopePredicates?.hasScope && !scopePredicates.canEdit(realFull) && !scopePredicates.canCreate(realFull)) {
           blocked.push(rel);
           continue;
         }
@@ -1299,10 +1327,13 @@ export function createDeterministicToolkit({
     return Math.max(1, Math.min(100, Math.round(n)));
   }
 
+  // Temps sit beside the file a destination link names, so the rename below
+  // stays on its filesystem.
   function tempSiblingPath(destPath, ext) {
+    const target = realpathExistingPrefix(destPath);
     return path.join(
-      path.dirname(destPath),
-      `.${path.basename(destPath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp${ext}`,
+      path.dirname(target),
+      `.${path.basename(target)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp${ext}`,
     );
   }
 
@@ -1310,7 +1341,9 @@ export function createDeterministicToolkit({
     try { fs.rmSync(filePath, { force: true }); } catch { /* best effort */ }
   }
 
-  function replaceFileWithTemp(tempPath, destPath) {
+  function replaceFileWithTemp(tempPath, destArgPath) {
+    // A destination link is written through, as the direct PNG writes are.
+    const destPath = realpathExistingPrefix(destArgPath);
     const backupPath = fs.existsSync(destPath) ? tempSiblingPath(destPath, ".bak") : null;
     try {
       if (backupPath) fs.renameSync(destPath, backupPath);
@@ -1322,6 +1355,21 @@ export function createDeterministicToolkit({
       }
       throw err;
     }
+  }
+
+  // An image destination is judged where the write lands (decision E1): a
+  // link cannot carry it into a protected or out-of-scope path.
+  function imageDestinationError(toolLabel, destArg, destPath, cwd, scopePredicates) {
+    const target = realMutationTarget(cwd, destPath, scopePredicates);
+    for (const candidate of new Set([destPath, target])) {
+      const reason = protectedMutablePathReason(relativePathFromCwd(cwd, candidate));
+      if (reason) return `Error: ${toolLabel} blocked - ${destArg} is protected: ${reason}.`;
+    }
+    if (!scopePredicates?.hasScope) return null;
+    if (fs.existsSync(destPath)) {
+      return scopePredicates.canEdit(target) ? null : `Error: ${toolLabel} blocked - ${destArg} is outside the allowed edit scope.`;
+    }
+    return scopePredicates.canCreate(target) ? null : `Error: ${toolLabel} blocked - ${destArg} is outside the allowed creation scope.`;
   }
 
   function readValidatedJpegDimensions(filePath, toolName) {
@@ -1380,13 +1428,8 @@ export function createDeterministicToolkit({
     const outputFormat = normalizeImageOutputFormat(args.output_format, destPath) || "png";
     const extensionError = validateImageOutputExtension("resize_image", outputFormat, destPath);
     if (extensionError) return extensionError;
-    const destExists = fs.existsSync(destPath);
-    if (destExists && scopePredicates?.hasScope && !scopePredicates.canEdit(destPath)) {
-      return `Error: resize_image blocked - ${destArg} is outside the allowed edit scope.`;
-    }
-    if (!destExists && scopePredicates?.hasScope && !scopePredicates.canCreate(destPath)) {
-      return `Error: resize_image blocked - ${destArg} is outside the allowed creation scope.`;
-    }
+    const destErr = imageDestinationError("resize_image", destArg, destPath, cwd, scopePredicates);
+    if (destErr) return destErr;
     const lockErr = guardToolWriteLock("resize_image", destArg, cwd);
     if (lockErr) return lockErr;
 
@@ -1477,12 +1520,8 @@ export function createDeterministicToolkit({
     if (destExists && !overwrite && destPath !== srcPath) {
       return `Error: optimize_image output exists and overwrite=false: ${destArg}`;
     }
-    if (destExists && scopePredicates?.hasScope && !scopePredicates.canEdit(destPath)) {
-      return `Error: optimize_image blocked - ${destArg} is outside the allowed edit scope.`;
-    }
-    if (!destExists && scopePredicates?.hasScope && !scopePredicates.canCreate(destPath)) {
-      return `Error: optimize_image blocked - ${destArg} is outside the allowed creation scope.`;
-    }
+    const destErr = imageDestinationError("optimize_image", destArg, destPath, cwd, scopePredicates);
+    if (destErr) return destErr;
     const lockErr = guardToolWriteLock("optimize_image", destArg, cwd);
     if (lockErr) return lockErr;
 
@@ -1525,12 +1564,8 @@ export function createDeterministicToolkit({
     if (destExists && !overwrite && destPath !== srcPath) {
       return `Error: reencode_image output exists and overwrite=false: ${destArg}`;
     }
-    if (destExists && scopePredicates?.hasScope && !scopePredicates.canEdit(destPath)) {
-      return `Error: reencode_image blocked - ${destArg} is outside the allowed edit scope.`;
-    }
-    if (!destExists && scopePredicates?.hasScope && !scopePredicates.canCreate(destPath)) {
-      return `Error: reencode_image blocked - ${destArg} is outside the allowed creation scope.`;
-    }
+    const destErr = imageDestinationError("reencode_image", destArg, destPath, cwd, scopePredicates);
+    if (destErr) return destErr;
     const lockErr = guardToolWriteLock("reencode_image", destArg, cwd);
     if (lockErr) return lockErr;
 
@@ -1827,12 +1862,8 @@ export function createDeterministicToolkit({
     if (destExists && !overwrite && destPath !== srcPath) {
       return `Error: clean_image alpha_key output exists and overwrite=false: ${destArg}`;
     }
-    if (destExists && scopePredicates?.hasScope && !scopePredicates.canEdit(destPath)) {
-      return `Error: clean_image alpha_key blocked - ${destArg} is outside the allowed edit scope.`;
-    }
-    if (!destExists && scopePredicates?.hasScope && !scopePredicates.canCreate(destPath)) {
-      return `Error: clean_image alpha_key blocked - ${destArg} is outside the allowed creation scope.`;
-    }
+    const destErr = imageDestinationError("clean_image alpha_key", destArg, destPath, cwd, scopePredicates);
+    if (destErr) return destErr;
     const lockErr = guardToolWriteLock("clean_image", destArg, cwd);
     if (lockErr) return lockErr;
 

@@ -1825,6 +1825,8 @@ deps_fresh() {
   [[ -d "$dir/node_modules" ]] || return 1
   [[ -f "$dir/node_modules/.package-lock.json" ]] || return 1
   [[ "$dir/package.json" -nt "$dir/node_modules/.package-lock.json" ]] && return 1
+  # An update can change the lockfile alone (transitive version bumps).
+  [[ -f "$dir/package-lock.json" && "$dir/package-lock.json" -nt "$dir/node_modules/.package-lock.json" ]] && return 1
   # Timestamps alone cannot detect copied Linux/Windows modules or a changed
   # Node ABI. Exercise SQLite before deciding a previous install is usable.
   (cd "$dir" && "$NODE_BIN" --input-type=commonjs -e 'const D = require("better-sqlite3"); const db = new D(":memory:"); db.close();') >/dev/null 2>&1

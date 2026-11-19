@@ -31,7 +31,7 @@ export const FLOW_GROUPS = Object.freeze({
   }),
   failure_recovery: Object.freeze({
     key: "flow_failure_recovery", label: "Failures and recovery", default: "ask",
-    description: "When work fails, stalls or is blocked. Approve takes the repair action (retry, send back or replan), Reject fails the work, Ask stops for you. Approve never passes or waives failed verification.",
+    description: "When work fails, stalls or is blocked. Approve takes the repair action (retry, send back or replan), Reject fails the work and discards uncommitted partial work, Ask stops for you. Approve never passes or waives failed verification.",
     gates: Object.freeze({
       dirty_worktree_recovery: Object.freeze({ approve: "send_back", reject: "fail" }),
       assessment_evidence_missing: Object.freeze({ approve: "retry_assessment", reject: "fail" }),

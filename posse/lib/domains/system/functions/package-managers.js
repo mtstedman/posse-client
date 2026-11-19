@@ -14,7 +14,7 @@ import { findCommandOnPath } from "../../../shared/platform/functions/command-la
 import { readManifest } from "./environment-paths.js";
 import { inspectPipRequirements, PIP_REQUIREMENT_FILES } from "./pip-requirements.js";
 import { composerLockRepairNames, materializeComposerVendor } from "./composer-install.js";
-import { pnpmWorkspace } from "./pnpm-workspace.js";
+import { pnpmLockfileMatchesManifests, pnpmWorkspace } from "./pnpm-workspace.js";
 
 const has = (dir, name) => fs.existsSync(path.join(dir, name));
 const readText = (file) => { try { return fs.readFileSync(file, "utf8"); } catch { return ""; } };
@@ -22,6 +22,7 @@ const VERSION = /^[a-zA-Z0-9.*~^+<>=!, -]{1,100}$/u;
 const NPM_NAME = /^(?:@[a-z0-9._-]+\/)?[a-z0-9][a-z0-9._-]*$/u;
 const PYTHON_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?:\[[A-Za-z0-9._,-]+\])?$/u;
 const NODE_INSTALL_ENV = { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" };
+const PNPMFILES = [".pnpmfile.cjs", ".pnpmfile.mjs"];
 
 function ancestors(dir) {
   const list = [];
@@ -55,6 +56,32 @@ function assertNodePackage(name, dir, manifest) {
   }
 }
 
+// Verification links a worktree's node_modules entries, including .bin and
+// the hidden lockfile, to the primary checkout's install. A package manager
+// writes through those links, so an install directory that reaches outside
+// this checkout restarts empty and the approved install fills it. Removing a
+// link never follows it.
+function isolateNodeModules(dir, dependencyDirs) {
+  const checkout = fs.realpathSync([path.resolve(dir), ...ancestors(dir)].find((candidate) => has(candidate, ".git")) || dir);
+  const outside = (file) => {
+    let target;
+    try { target = fs.realpathSync(file); } catch { return true; }
+    const relative = path.relative(checkout, target);
+    return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+  };
+  const reachesOutside = (directory) => fs.readdirSync(directory, { withFileTypes: true }).some((entry) => (entry.isSymbolicLink()
+    ? outside(path.join(directory, entry.name))
+    : entry.isDirectory() && entry.name.startsWith("@") && reachesOutside(path.join(directory, entry.name))));
+  for (const relative of dependencyDirs) {
+    const modules = path.join(dir, relative);
+    let stat = null;
+    try { stat = fs.lstatSync(modules); } catch { /* nothing installed yet */ }
+    if (!stat?.isDirectory() || !reachesOutside(modules)) continue;
+    fs.rmSync(modules, { recursive: true, force: true });
+    fs.mkdirSync(modules);
+  }
+}
+
 function yarnBerry(dir, manifest) {
   return has(dir, ".yarnrc.yml") || /^yarn@(?:[2-9]|\d{2,})/u.test(String(manifest.packageManager || ""))
     || readText(path.join(dir, "yarn.lock")).includes("__metadata:");
@@ -70,6 +97,9 @@ function node(name, entry) {
     // Another manager's lockfile appearing after approval invalidates it.
     inputs: () => NODE_LOCKS.map(([, lock]) => lock),
     validate: (dir, manifest) => assertNodePackage(name, dir, manifest),
+    prepareInstall(dir) {
+      isolateNodeModules(dir, this.dependencyDirs(dir, readManifest(path.join(dir, "package.json"))));
+    },
     env: () => NODE_INSTALL_ENV,
     // A successful install with declared dependencies always leaves node_modules.
     verify: (dir, manifest, dependencyDirs) => {
@@ -113,11 +143,15 @@ const REGISTRY = {
   }),
   pnpm: node("pnpm", {
     lockfile: () => "pnpm-lock.yaml",
-    inputs: (dir) => [...NODE_LOCKS.map(([, lock]) => lock), ...(pnpmWorkspace(dir)?.inputs || [])],
+    // pnpm runs a root pnpmfile with or without a workspace unless told to ignore it.
+    configFiles: [".npmrc", ...PNPMFILES],
+    inputs: (dir) => [...new Set([...NODE_LOCKS.map(([, lock]) => lock), ...PNPMFILES, ...(pnpmWorkspace(dir)?.inputs || [])])],
     shownInputs: (dir) => pnpmWorkspace(dir)?.manifests || [],
     dependencyDirs: (dir) => pnpmWorkspace(dir)?.dependencyDirs || ["node_modules"],
+    // Frozen only reproduces a lockfile that already matches the manifests;
+    // a developer's dependency edit must be able to update it.
     install: ({ dir, scripts }) => [{ argv: ["install", "--dir", dir,
-      has(dir, "pnpm-lock.yaml") ? "--frozen-lockfile" : "--no-frozen-lockfile",
+      pnpmLockfileMatchesManifests(dir) ? "--frozen-lockfile" : "--no-frozen-lockfile",
       "--production=false", "--config.confirmModulesPurge=false", "--config.shared-workspace-lockfile=true",
       ...(scripts ? [] : ["--ignore-scripts", "--ignore-pnpmfile"])] }],
     add: ({ dir, scripts, dev }, specs) => [{ argv: ["add", "--dir", dir,
@@ -330,14 +364,31 @@ export function packageCommands(manager, entries, { dir, manifest, command, scri
 }
 
 // Additional dependency declarations the installer reads, keyed by path.
+// The approval question shows at most 32 KB of each and 256 KB in all, and
+// marks what it trims. Every shown file is also a setup input, so approval
+// still binds its full content.
 export function shownPackageInputs(manager, dir, relative) {
-  return Object.fromEntries(manager.shownInputs(dir).map((name) => [relative(name), fs.readFileSync(path.join(dir, name), "utf8")]));
+  let remaining = 256 * 1024;
+  return Object.fromEntries(manager.shownInputs(dir).map((name) => {
+    const content = fs.readFileSync(path.join(dir, name));
+    if (remaining <= 0) return [relative(name), `[not shown: ${content.length} bytes; fingerprinted]`];
+    const limit = Math.min(32 * 1024, remaining);
+    if (content.length <= limit) {
+      remaining -= content.length;
+      return [relative(name), content.toString("utf8")];
+    }
+    // A streaming decode drops a character split at the limit.
+    const shown = new TextDecoder().decode(content.subarray(0, limit), { stream: true });
+    const shownBytes = Buffer.byteLength(shown);
+    remaining -= shownBytes;
+    return [relative(name), `${shown}\n… [truncated: ${shownBytes} of ${content.length} bytes shown; full file fingerprinted]`];
+  }));
 }
 
 export function packageConfigFiles(manager, dir) {
-  return [...manager.configFiles, ...(manager.name === "pnpm"
+  return [...new Set([...manager.configFiles, ...(manager.name === "pnpm"
     ? (pnpmWorkspace(dir)?.inputs || []).filter((file) => /(?:^|\/)\.npmrc$|\.pnpmfile\.[cm]js$/.test(file))
-    : [])];
+    : [])])];
 }
 
 export function readPackageManifest(manager, file) {

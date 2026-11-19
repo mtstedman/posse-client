@@ -36,9 +36,14 @@ import { firstGitLine } from "./workflow-git-utils.js";
 import { inspectPreparedWorktreeLockedAsync } from "./prepared-worktree-recovery.js";
 import { gitTopLevelAsync } from "./worktree-path.js";
 import { reconcileSharedTrunkOperations } from "./shared-trunk.js";
+import { gitWorktreeRoot, topLiteralPathspec } from "./project-paths.js";
 
 const LIVE_PREPARATION_JOB_STATUS_SET = new Set(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
 const STARTUP_DIRTY_LINES_RECORD_LIMIT = 20;
+// The exclude list older SCIP staging wrote into an indexed root's
+// placeholder tsconfig.json (GENERATED_INFER_TSCONFIG.exclude in
+// atlas/v2/scip/stager.js; unchanged since that writer existed).
+const SCIP_GENERATED_TSCONFIG_EXCLUDE = Object.freeze(["node_modules", "dist", "build", "out", "vendor", ".posse", "**/*.min.js"]);
 
 export function waitingLaneStartupInspectionAction(preparation, value, {
   pathExists = false,
@@ -217,7 +222,9 @@ export function createStartupDirtyGuardHelpers(context) {
   // policy reads the tree: policy=commit would otherwise commit a candidate
   // whose gate never finished. The repair takes the merge's worktree lock, so
   // a merge another process is running keeps its staged squash and checkouts.
-  function recoverInterruptedMerge() {
+  // Under policy=block (decision E8) a stale marker cannot prove the staged
+  // changes are that squash, so they are kept and reported as dirt instead.
+  function recoverInterruptedMerge({ keepStaged = false } = {}) {
     const exec = (args, cwd, options = {}) => gitExec(args, cwd, { timeoutMs: GIT_OPERATION_TIMEOUT_MS, ...options });
     let marker = null;
     try {
@@ -238,13 +245,15 @@ export function createStartupDirtyGuardHelpers(context) {
       return withWorktreeLock(projectDir, projectDir, () => recoverInterruptedSquash({
         cwd: projectDir,
         exec,
-        preserveSnapshot: (dir, found) => preserveDirtyWorktreeSnapshot(dir, projectDir, {
+        // The native snapshot requires the worktree root; projectDir may be nested.
+        preserveSnapshot: (dir, found) => preserveDirtyWorktreeSnapshot(gitWorktreeRoot(exec, dir), projectDir, {
           reason: "interrupted-merge-gate",
           branchName: found?.target || null,
           wiId: found?.wi_id ?? null,
           onMsg: (msg) => log(msg),
         }),
         log,
+        keepStaged,
       }));
     } catch (error) {
       // Only an interrupted squash must stop the boot; leftover checkouts of
@@ -547,14 +556,17 @@ export function createStartupDirtyGuardHelpers(context) {
     return diffAddsOnlyRuntimeBlockRules(diff, runtimeGitignoreBlockAdditions(cwd, working, head), { signal });
   }
 
+  // Porcelain names paths from the repository root, so they are staged with
+  // top-anchored pathspecs: a nested project's status also lists dirt outside
+  // its directory, which a project-relative pathspec cannot name.
+  // (The project directory itself, untracked as a whole, stays unstaged.)
   function porcelainPathsForGitAdd(line) {
     const filePath = porcelainPath(line);
     if (!filePath) return [];
-    if (!filePath.includes(" -> ")) return [projectRelativePorcelainPath(filePath)].filter(Boolean);
-    return filePath
-      .split(/\s+->\s+/).slice(-1)
-      .map((part) => projectRelativePorcelainPath(part.replace(/^"|"$/g, "").replace(/\\/g, "/").trim()))
-      .filter(Boolean);
+    const parts = filePath.includes(" -> ")
+      ? filePath.split(/\s+->\s+/).slice(-1).map((part) => part.replace(/^"|"$/g, "").replace(/\\/g, "/").trim())
+      : [filePath];
+    return parts.filter((part) => projectRelativePorcelainPath(part)).map(topLiteralPathspec);
   }
 
   function normalizeStartupDirtyTreePolicy(value) {
@@ -623,8 +635,9 @@ export function createStartupDirtyGuardHelpers(context) {
   // ONLY when the file is both untracked AND matches the exact generated
   // signature, so a real (even minimal) user tsconfig is never deleted.
   // Accepts {} (legacy), {compilerOptions:{allowJs:true}} (legacy), and
-  // {compilerOptions:{allowJs:true}, exclude:[...]} (GENERATED_INFER_TSCONFIG
-  // in atlas/v2/scip/stager.js).
+  // {compilerOptions:{allowJs:true}, exclude:SCIP_GENERATED_TSCONFIG_EXCLUDE}
+  // (GENERATED_INFER_TSCONFIG in atlas/v2/scip/stager.js). Any other exclude
+  // list is the user's own configuration.
   function isGeneratedInferTsconfigContent(raw) {
     try {
       const parsed = JSON.parse(String(raw || ""));
@@ -632,7 +645,9 @@ export function createStartupDirtyGuardHelpers(context) {
       const keys = Object.keys(parsed);
       if (keys.length === 0) return true;
       if (!keys.every((k) => k === "compilerOptions" || k === "exclude")) return false;
-      if ("exclude" in parsed && !Array.isArray(parsed.exclude)) return false;
+      if ("exclude" in parsed && !(Array.isArray(parsed.exclude)
+        && parsed.exclude.length === SCIP_GENERATED_TSCONFIG_EXCLUDE.length
+        && parsed.exclude.every((entry, index) => entry === SCIP_GENERATED_TSCONFIG_EXCLUDE[index]))) return false;
       const compilerOptions = parsed?.compilerOptions;
       return !!compilerOptions
         && Object.keys(compilerOptions).length === 1
@@ -854,7 +869,7 @@ export function createStartupDirtyGuardHelpers(context) {
     // Sweep a SCIP infer-tsconfig placeholder orphaned by an interrupted index
     // before measuring dirtiness, so it can't trip the guard.
     sweepOrphanedInferTsconfig(projectDir);
-    const interrupted = recoverInterruptedMerge();
+    const interrupted = recoverInterruptedMerge({ keepStaged: mode === "block" });
     if (interrupted.action === "failed") {
       emitPhase("interrupted merge could not be repaired");
       return interruptedMergeBlockedResult({ reason, policy: mode, recovery: interrupted });
@@ -953,7 +968,7 @@ export function createStartupDirtyGuardHelpers(context) {
     // before measuring dirtiness, so it can't trip the guard.
     await sweepOrphanedInferTsconfigAsync(projectDir, { signal });
     throwIfAborted(signal);
-    const interrupted = recoverInterruptedMerge();
+    const interrupted = recoverInterruptedMerge({ keepStaged: mode === "block" });
     if (interrupted.action === "failed") {
       emitPhase("interrupted merge could not be repaired");
       return {
@@ -1062,7 +1077,7 @@ export function createStartupDirtyGuardHelpers(context) {
     }
     // The run's guard unstages an interrupted merge's squash before it reads
     // the tree, so this check must not report that squash as dirt.
-    const interrupted = recoverInterruptedMerge();
+    const interrupted = recoverInterruptedMerge({ keepStaged: mode === "block" });
     if (interrupted.action === "failed") {
       return interruptedMergeBlockedResult({ reason, policy: mode, recovery: interrupted });
     }

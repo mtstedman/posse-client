@@ -40,6 +40,7 @@ import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
 import { isAbortError } from "../../runtime/functions/yield.js";
 import { recordReviewedSourceMerge, reviewedSourceMergeTrailer } from "./reviewed-source-merge.js";
 import { dependencyInstallLockHeld } from "../../../shared/concurrency/functions/dependency-install-lock.js";
+import { gitNameList, gitProjectPrefix, gitWorktreeRoot, repoPathToProjectPath, topLiteralPathspec } from "./project-paths.js";
 
 function reservedRuntimeMergeError(paths = []) {
   const blocked = filterPosseRuntimePaths(paths);
@@ -56,18 +57,21 @@ function reservedRuntimeMergeError(paths = []) {
 // operator's own ignored copy of a path the branch adds (a local config, an
 // env file, a database) without error, `git status` never lists it, and a
 // later abort deletes it. Find those paths so the merge can refuse first.
+// Names are repository-relative: `cwd` may be a project nested in its
+// repository, and the squash merge writes the whole repository.
 function ignoredLocalFilesInMergePath(exec, cwd, sourceHead) {
+  const repoRoot = gitWorktreeRoot(exec, cwd);
   const added = String(exec([
     "-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "--diff-filter=A", "HEAD", sourceHead,
   ], cwd, { trim: false }) || "").split("\0").filter(Boolean)
     .filter((file) => {
-      try { return fs.lstatSync(path.join(cwd, file)).isFile(); } catch { return false; }
+      try { return fs.lstatSync(path.join(repoRoot, file)).isFile(); } catch { return false; }
     });
   const ignored = [];
   for (let index = 0; index < added.length; index += 200) {
     ignored.push(...String(exec([
-      "-c", "core.quotePath=false", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
-      ...added.slice(index, index + 200).map((file) => `:(literal)${file}`),
+      "-c", "core.quotePath=false", "ls-files", "-z", "--full-name", "--others", "--ignored", "--exclude-standard", "--",
+      ...added.slice(index, index + 200).map(topLiteralPathspec),
     ], cwd, { trim: false }) || "").split("\0").filter(Boolean));
   }
   return ignored;
@@ -116,6 +120,12 @@ export function createMergeWorkflowHelpers(context, {
 
   function gitMergeExec(args, cwd, { trim = true } = {}) {
     return gitExec(args, cwd, { timeoutMs: GIT_MERGE_TIMEOUT_MS, trim });
+  }
+
+  // The native snapshot captures a whole worktree and requires its root; the
+  // target checkout `cwd` may be a project nested in its repository.
+  function snapshotTargetCheckout(cwd, options) {
+    return preserveDirtyWorktreeSnapshot(gitWorktreeRoot(gitMergeExec, cwd), projectDir, options);
   }
 
   function gitMergeExecAsync(args, cwd, { trim = true } = {}) {
@@ -591,13 +601,13 @@ export function createMergeWorkflowHelpers(context, {
       .filter(Boolean))];
     if (parentHash) {
       try {
-        return linesFrom(gitMergeExec(["diff", "--name-only", parentHash, mergeHash], cwd, { trim: false }));
+        return linesFrom(gitMergeExec(["diff", "--relative", "--name-only", parentHash, mergeHash], cwd, { trim: false }));
       } catch {
         // Fall through to diff-tree below.
       }
     }
     try {
-      return linesFrom(gitMergeExec(["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", mergeHash], cwd, { trim: false }));
+      return linesFrom(gitMergeExec(["diff-tree", "--relative", "--no-commit-id", "--name-only", "-r", "--root", mergeHash], cwd, { trim: false }));
     } catch {
       return [];
     }
@@ -1337,32 +1347,40 @@ export function createMergeWorkflowHelpers(context, {
       // working tree may hold hand-resolution work the stash stack does not.
       // Never drop a stash here: stale conflict cleanup cannot know which
       // stash, if any, caused it.
+      // Names are repository-relative; reset them with top-anchored pathspecs.
+      let unmergedFiles = [];
       try {
-        const unmerged = gitMergeExec(["diff", "--name-only", "--diff-filter=U"], cwd);
-        if (unmerged.length > 0) {
-          const files = unmerged.split("\n").filter(Boolean);
-          let snapshotRef = null;
-          try {
-            snapshotRef = preserveDirtyWorktreeSnapshot(cwd, projectDir, {
-              reason: "merge-preflight-unmerged",
-              branchName: targetBranch,
-              onMsg: (msg) => log(msg),
-            });
-          } catch (snapErr) {
-            snapshotRef = null;
-            log(`Pre-flight snapshot of unmerged paths failed: ${snapErr?.message || String(snapErr)}`);
-          }
-          if (!snapshotRef) {
-            const message = `Merge refused: target worktree has ${files.length} unmerged path(s) and the pre-flight snapshot failed; resolve manually before merging ${branch}`;
-            log(message, { json: { branch, target: targetBranch, files } });
-            return { ok: false, dirty: true, message };
-          }
-          log(`Found ${files.length} unmerged path(s) from stale merge/stash state — snapshotted to ${snapshotRef} then resetting to HEAD, leaving stash stack untouched`, { json: { files, snapshot_ref: String(snapshotRef) } });
-          for (const f of files) {
-            gitMergeExec(["checkout", "HEAD", "--", f], cwd);
-          }
-        }
+        unmergedFiles = [...new Set(gitNameList(gitMergeExec, cwd, ["diff", "--name-only", "--diff-filter=U"]))];
       } catch { /* git diff failed — proceed anyway */ }
+      if (unmergedFiles.length > 0) {
+        let snapshotRef = null;
+        try {
+          snapshotRef = snapshotTargetCheckout(cwd, {
+            reason: "merge-preflight-unmerged",
+            branchName: targetBranch,
+            onMsg: (msg) => log(msg),
+          });
+        } catch (snapErr) {
+          snapshotRef = null;
+          log(`Pre-flight snapshot of unmerged paths failed: ${snapErr?.message || String(snapErr)}`);
+        }
+        if (!snapshotRef) {
+          const message = `Merge refused: target worktree has ${unmergedFiles.length} unmerged path(s) and the pre-flight snapshot failed; resolve manually before merging ${branch}`;
+          log(message, { json: { branch, target: targetBranch, files: unmergedFiles } });
+          return { ok: false, dirty: true, message };
+        }
+        log(`Found ${unmergedFiles.length} unmerged path(s) from stale merge/stash state — snapshotted to ${snapshotRef} then resetting to HEAD, leaving stash stack untouched`, { json: { files: unmergedFiles, snapshot_ref: String(snapshotRef) } });
+        try {
+          for (const f of unmergedFiles) {
+            gitMergeExec(["checkout", "HEAD", "--", topLiteralPathspec(f)], cwd);
+          }
+        } catch (resetErr) {
+          // Proceeding would only refuse later as generic dirt, after another snapshot.
+          const message = `Merge refused: target worktree has ${unmergedFiles.length} unmerged path(s) that could not be reset to HEAD after the pre-flight snapshot ${snapshotLabel(snapshotRef)} (${firstGitLine(resetErr)}); resolve manually before merging ${branch}`;
+          log(message, { json: { branch, target: targetBranch, files: unmergedFiles, snapshot_ref: snapshotLabel(snapshotRef) } });
+          return { ok: false, dirty: true, message };
+        }
+      }
 
       currentBranch = gitMergeExec(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
       const sweptInferTsconfig = sweepOrphanedInferTsconfig(cwd);
@@ -1427,7 +1445,7 @@ export function createMergeWorkflowHelpers(context, {
 
             let snapshotRef = null;
             try {
-              snapshotRef = preserveDirtyWorktreeSnapshot(cwd, projectDir, {
+              snapshotRef = snapshotTargetCheckout(cwd, {
                 reason: `target-checkout-overwrite-${targetBranch}`,
                 branchName: currentBranch,
                 wiId,
@@ -1466,7 +1484,8 @@ export function createMergeWorkflowHelpers(context, {
                 error: firstGitLine(checkoutErr),
               },
             });
-            gitMergeExec(["clean", "-fd", "--", ...checkoutBlockers], cwd);
+            // git names the blockers from the repository root.
+            gitMergeExec(["clean", "-fd", "--", ...checkoutBlockers.map(topLiteralPathspec)], cwd);
             gitMergeExec(["checkout", targetBranch], cwd);
           } else {
             throw checkoutErr;
@@ -1508,8 +1527,15 @@ export function createMergeWorkflowHelpers(context, {
         return mergeBase;
       };
 
-      const runProjectedCandidateGate = (stagedFiles) => {
+      const runProjectedCandidateGate = (stagedRepoFiles) => {
         mergeStep = "integration_gate";
+        // `git diff` names staged files from the repository root; registered
+        // test targets, declared checks and typechecks name them relative to
+        // the project (`cwd`), which is all they can select.
+        const projectPrefix = gitProjectPrefix(gitMergeExec, cwd);
+        const stagedFiles = stagedRepoFiles
+          .filter((file) => file.startsWith(projectPrefix))
+          .map((file) => repoPathToProjectPath(file, projectPrefix));
         const gateDeadlineMs = Math.min(Date.now() + MERGE_GATE_WALL_BUDGET_MS, budgetEndMs);
         // Select checks before paying for a candidate checkout: registered
         // tests the changed files select, else the jobs' declared commands.
@@ -1781,7 +1807,7 @@ export function createMergeWorkflowHelpers(context, {
           if (blockers.length > 0) {
             let snapshotRef = null;
             try {
-              snapshotRef = preserveDirtyWorktreeSnapshot(cwd, projectDir, {
+              snapshotRef = snapshotTargetCheckout(cwd, {
                 reason: `target-checkout-overwrite-${targetBranch}`,
                 branchName: currentBranch,
                 wiId,
@@ -1808,7 +1834,7 @@ export function createMergeWorkflowHelpers(context, {
                 },
               });
               try {
-                gitMergeExec(["clean", "-fd", "--", ...blockers], cwd);
+                gitMergeExec(["clean", "-fd", "--", ...blockers.map(topLiteralPathspec)], cwd);
                 mergeHash = attemptSquashMerge("retry");
               } catch (retryErr) {
                 finalMergeErr = retryErr;
@@ -2053,7 +2079,7 @@ export function createMergeWorkflowHelpers(context, {
     const run = () => recoverInterruptedSquashIn({
       cwd,
       exec: gitMergeExec,
-      preserveSnapshot: (dir, marker) => preserveDirtyWorktreeSnapshot(dir, projectDir, {
+      preserveSnapshot: (dir, marker) => snapshotTargetCheckout(dir, {
         reason: "interrupted-merge-gate",
         branchName: marker?.target || null,
         wiId: marker?.wi_id ?? null,

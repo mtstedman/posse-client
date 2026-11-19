@@ -172,6 +172,58 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
     return gitExec(["status", "--porcelain"], worktreePath, { timeoutMs: 5000 }).trim();
   }
 
+  function nulSeparatedPaths(raw) {
+    return String(raw || "").split("\0").filter(Boolean);
+  }
+
+  /**
+   * Proof that a stash-shaped snapshot commit (worktree tree W with parents
+   * HEAD, index I, untracked U) holds every byte of the worktree's current
+   * dirt, so removing the worktree loses nothing a restore cannot bring back.
+   * Any doubt answers false: a directory fallback, an unreadable ref, an
+   * untracked directory (a nested repository is captured only as a gitlink),
+   * a non-regular untracked file, or any content mismatch.
+   */
+  function snapshotCoversWorktreeDirt(wtDir, snapshotRef) {
+    if (typeof snapshotRef === "object" && snapshotRef?.storageType !== "git-ref") return false;
+    const refName = String(typeof snapshotRef === "object" ? snapshotRef?.refName || "" : snapshotRef || "");
+    if (!refName.startsWith("refs/")) return false;
+    const opts = { timeoutMs: GIT_OPERATION_TIMEOUT_MS };
+    try {
+      const [commit, ...parents] = gitExec(["rev-list", "--parents", "-n", "1", refName, "--"], wtDir, opts).trim().split(/\s+/);
+      if (!commit || parents.length !== 3) return false;
+      if (gitExec(["rev-parse", "--verify", "HEAD"], wtDir, opts).trim() !== parents[0]) return false;
+      // Exit 1 on any difference throws, which answers false below.
+      gitExec(["diff", "--quiet", "--no-ext-diff", commit, "--"], wtDir, opts);
+      gitExec(["diff", "--quiet", "--no-ext-diff", "--cached", parents[1], "--"], wtDir, opts);
+      const untracked = nulSeparatedPaths(gitExec(
+        ["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z"],
+        wtDir,
+        { ...opts, trim: false },
+      ));
+      if (untracked.length === 0) return true;
+      if (untracked.some((relPath) => relPath.endsWith("/") || relPath.includes("\n"))) return false;
+      if (!untracked.every((relPath) => fs.lstatSync(path.join(wtDir, relPath)).isFile())) return false;
+      const captured = new Map();
+      for (const entry of nulSeparatedPaths(gitExec(
+        ["-c", "core.quotePath=false", "ls-tree", "-r", "-z", "--full-tree", parents[2]],
+        wtDir,
+        { ...opts, trim: false },
+      ))) {
+        const tab = entry.indexOf("\t");
+        const [, type, oid] = entry.slice(0, tab).split(" ");
+        if (type === "blob") captured.set(entry.slice(tab + 1), oid);
+      }
+      const hashes = gitExec(["hash-object", "--stdin-paths"], wtDir, { ...opts, input: `${untracked.join("\n")}\n` })
+        .trim()
+        .split(/\r?\n/);
+      return hashes.length === untracked.length
+        && untracked.every((relPath, index) => captured.get(relPath) === hashes[index].trim());
+    } catch {
+      return false;
+    }
+  }
+
   function logWorktreeSnapshotCleanupFailure(wi, wtDir, message, extra = {}) {
     logEvent({
       work_item_id: wi?.id ?? null,
@@ -269,10 +321,11 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
   }
 
   /**
-   * Snapshot-gated single-worktree removal: snapshot any dirty state, verify
-   * clean (a verify that RAN and still reports dirt refuses removal even
-   * after a "successful" snapshot — leftovers are what the stash cannot
-   * capture, e.g. nested repos), then remove. Shared by
+   * Snapshot-gated single-worktree removal: snapshot any dirty state, then
+   * remove only a worktree that verifies clean or whose remaining dirt the
+   * snapshot is proven to hold (the native snapshot leaves the dirt in place;
+   * what it cannot capture, e.g. a nested repository, refuses removal). The
+   * admin lane may remove after any successful snapshot. Shared by
    * snapshotAndRemoveWorktreeOnly and cleanupWiBranch.
    */
   function snapshotGateAndRemoveWorktree(wi, wtDir, reason, { requireCleanWorktree = false } = {}) {
@@ -319,6 +372,7 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
 
       let snapshotSucceeded = false;
       let snapshotFailed = false;
+      let snapshotRef = null;
       let status = "";
       try {
         status = gitWorktreePorcelain(wtDir);
@@ -332,7 +386,7 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
           return;
         }
         if (status) {
-          const snapshotRef = preserveDirtyWorktreeSnapshot(wtDir, projectDir, {
+          snapshotRef = preserveDirtyWorktreeSnapshot(wtDir, projectDir, {
             reason,
             branchName: wi.branch_name || null,
             wiId: wi.id,
@@ -372,14 +426,19 @@ export function createCleanupWorkflowHelpers(context, { guardStartupDirtyTreeAsy
         }
       }
 
-      const snapshottedRemovalAllowed = context.allowSnapshottedWorktreeRemoval === true && snapshotSucceeded;
+      const snapshottedRemovalAllowed = snapshotSucceeded && (
+        context.allowSnapshottedWorktreeRemoval === true
+        || (verifyRan && !verifiedClean && snapshotCoversWorktreeDirt(wtDir, snapshotRef))
+      );
       if (!verifiedClean && !snapshottedRemovalAllowed && (verifyRan || !snapshotSucceeded)) {
         if (!snapshotFailed) {
           logWorktreeSnapshotCleanupFailure(
             wi,
             wtDir,
-            "Worktree cleanup skipped because dirty state was not snapshotted and worktree is not clean",
-            { reason, porcelain: status },
+            snapshotSucceeded
+              ? `Worktree cleanup skipped because the snapshot at ${snapshotRef} could not be verified to hold all of the worktree's uncommitted state; leaving worktree on disk`
+              : "Worktree cleanup skipped because dirty state was not snapshotted and worktree is not clean",
+            { reason, porcelain: status, ...(snapshotSucceeded ? { snapshot_ref: String(snapshotRef) } : {}) },
           );
         }
         return;

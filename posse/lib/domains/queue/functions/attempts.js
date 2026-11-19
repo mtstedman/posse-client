@@ -1,9 +1,10 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { ASSESSMENT_LIFECYCLE, ASSESSMENT_LIFECYCLE_STATES } from "../../../catalog/job.js";
+import { ASSESSMENT_LIFECYCLE, ASSESSMENT_LIFECYCLE_STATES, ASSESSMENT_ONLY_FAILURE_STATES, JOB_TOOL_USAGE_PAYLOAD_KEY } from "../../../catalog/job.js";
 import { LEASE_HOLDING_STATUSES, now, runImmediateTransaction } from "./common.js";
 import { graceCutoff } from "./lease-clock.js";
 import { REVIEWED_COMPLETION_KEY } from "../../../catalog/reviewed-handoffs.js";
 import { isReviewedTransfer } from "./reviewed-handoff-records.js";
+import { recordDeterministicVerificationAtVerdict } from "./deterministic-verification.js";
 
 let _attemptStartHook = null;
 export function registerAttemptStartHook(fn) { _attemptStartHook = fn; }
@@ -185,6 +186,11 @@ export function setAssessmentLifecycle(jobId, state, {
 } = {}) {
   if (!ASSESSMENT_LIFECYCLE_STATES.includes(state)) throw new Error(`Invalid assessment lifecycle state: ${state}`);
   const db = getDb();
+  // Every route into an assessment-only failure records what deterministic
+  // verification said about the committed result, while its observations are
+  // still retained; the failed work item's accept guard reads that record.
+  // Recorded first: on its own it changes no decision.
+  if (ASSESSMENT_ONLY_FAILURE_STATES.includes(state)) recordDeterministicVerificationAtVerdict(jobId);
   const result = db.prepare(`
     UPDATE jobs
     SET assessment_state = ?,
@@ -237,6 +243,9 @@ export function beginJobRetryGeneration(jobId, {
   nextPayload._retry_generation = marker;
   delete nextPayload.skip_assessment;
   delete nextPayload._pre_attempt_repeat_key;
+  // Tool allowances are per job across its automatic attempts; a retry the
+  // operator authorizes starts them again, or exhausted caps block the rework.
+  delete nextPayload[JOB_TOOL_USAGE_PAYLOAD_KEY];
   // The attempt boundary can stay unchanged across pre-provider failures.
   // Every explicit retry still permits one fresh reviewed-import check.
   if (Array.isArray(nextPayload._cross_wi_file_syncs)) {

@@ -17,6 +17,7 @@ import {
   WEB_RESEARCH_LIMITS,
   WEB_RESEARCH_PROTOCOL,
   WEB_RESEARCH_QUESTION_OVERSIZED_OBSERVATION_TYPE,
+  WEB_SOURCE_SNAPSHOT_STATUSES,
 } from "../../../catalog/web-research.js";
 import { getSetting } from "../../queue/functions/index.js";
 import { surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
@@ -568,7 +569,9 @@ export class WebResearchRuntime {
     this.dispatches.set(dispatch.id, dispatch);
     this.activeChildren += 1;
     const timeoutMs = budget?.timeoutMs || this.timeoutMs;
+    let timedOut = false;
     const timeout = setTimeout(() => {
+      timedOut = true;
       dispatch.controller.abort(runtimeError(
         "WEB_RESEARCH_TIMEOUT",
         `Web research exceeded ${timeoutMs}ms`,
@@ -630,15 +633,31 @@ export class WebResearchRuntime {
         return { ok: true, protocol: WEB_RESEARCH_PROTOCOL, route: "web", result: salvaged, usage: childUsage(result) };
       }
       const { sources: nominatedSources, dropped_sources: droppedSources, ...handoff } = dispatch.packet;
-      const sources = nominatedSources.length > 0
-        ? await Promise.race([this.captureSources(nominatedSources, {
-          context,
-          projectDir: registration.projectDir || runtimeContext.projectDir || null,
-          signal: dispatch.controller.signal,
-          dispatchId: dispatch.id,
-        }), abortPromise])
-        : [];
-      if (dispatch.controller.signal.aborted) throw dispatch.controller.signal.reason;
+      let sources = [];
+      if (nominatedSources.length > 0) {
+        const settled = [];
+        try {
+          sources = await Promise.race([this.captureSources(nominatedSources, {
+            context,
+            projectDir: registration.projectDir || runtimeContext.projectDir || null,
+            signal: dispatch.controller.signal,
+            dispatchId: dispatch.id,
+            onSource: (source) => { settled.push(source); },
+          }), abortPromise]);
+        } catch (error) {
+          // One deadline covers the child and snapshot capture. The handoff
+          // was already accepted, so its findings stand; snapshots captured
+          // before the deadline are kept and the rest are reported missing.
+          if (!timedOut || signal?.aborted) throw error;
+          sources = nominatedSources.map((source, index) => settled[index] || {
+            url: source.url,
+            label: source.label,
+            status: WEB_SOURCE_SNAPSHOT_STATUSES.SKIPPED,
+            reason: `web research deadline of ${timeoutMs}ms reached before the snapshot was captured`,
+          });
+        }
+      }
+      if (dispatch.controller.signal.aborted && !timedOut) throw dispatch.controller.signal.reason;
       const findings = handoff.findings.map((finding) => this.surfaceFinding(finding, context));
       const reportRef = this.surfaceReport(context, {
         summary: handoff.summary,

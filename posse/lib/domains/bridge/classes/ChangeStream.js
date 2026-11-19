@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import Database from "better-sqlite3";
 
 import { BRIDGE_EVENT_KINDS, BRIDGE_FRAME_TYPES, BRIDGE_OPEN_GATE_STATUSES, BRIDGE_PROTOCOL_VERSION } from "../../../catalog/bridge.js";
-import { BACKGROUND_JOB_TYPES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { BACKGROUND_JOB_TYPES, FAILED_JOB_STATUSES_SQL, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
 import { AGENT_ACTIVITY_KINDS, AGENT_ACTIVITY_LIMITS, AGENT_ACTIVITY_PROTOCOL, AGENT_ACTIVITY_STATUSES, EVENT_TYPES } from "../../../catalog/event.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
@@ -16,6 +16,8 @@ import { buildReviewBrief } from "../functions/review-brief.js";
 import { projectBridgeGateDetail, projectBridgeJobState, projectBridgeWorkItemFromJobs } from "../functions/state-snapshot.js";
 import { workItemCost } from "../../billing/functions/cost.js";
 import { WORK_ITEM_BOUNDS, createStreamFeedPayload, projectFeedEvent } from "../functions/work-item-feed.js";
+import { AGENT_CALL_LIFECYCLE_PHASE, agentCallLifecycleSummary, isAgentCallLifecycleActivity } from "../functions/agent-activity-privacy.js";
+import { ConversationStreamPoller } from "../../conversation/classes/ConversationStreamPoller.js";
 
 const DEFAULT_REPLAY_LIMIT = 1000;
 const DEFAULT_TAIL_LIMIT = 100;
@@ -23,6 +25,11 @@ const MAX_TAIL_LIMIT = 500;
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const OPEN_GATE_STATUSES = new Set(BRIDGE_OPEN_GATE_STATUSES);
 const NONTERMINAL_GATE_CLOSE_STATUSES = new Set(["waiting_on_review"]);
+// The one failed member of TERMINAL_WORK_ITEM_STATUSES (catalog/work-item.js).
+const FAILED_WORK_ITEM_STATUS = "failed";
+// The relay rejects a `failed` frame whose summary is empty or over 500
+// characters and shows at most 180 in a push; stay inside the shorter one.
+const FAILED_SUMMARY_CHARS = 180;
 const PLAN_GATE_EVENT_TYPES = new Set([
   EVENT_TYPES.PLAN_APPROVAL_GATE_CREATED,
   EVENT_TYPES.PLAN_APPROVED,
@@ -152,16 +159,21 @@ function payloadForDbEvent(row) {
       && row.message.trim()
       && row.work_item_id != null;
     if (!isCanonical && !isLegacyAgentFeedback) return null;
-    const summary = isCanonical
-      ? event.summary
-      : row.message.trim().replace(/\s+/g, " ").slice(0, AGENT_ACTIVITY_LIMITS.SUMMARY_CHARS);
+    // Agent-call lifecycle frames name the call, never its activity text: for
+    // a delegated web-research child that text is the delegated question.
+    const callLifecycle = isCanonical && isAgentCallLifecycleActivity(row, event);
+    const summary = callLifecycle
+      ? agentCallLifecycleSummary(row.actor_type, event.status)
+      : isCanonical
+        ? event.summary
+        : row.message.trim().replace(/\s+/g, " ").slice(0, AGENT_ACTIVITY_LIMITS.SUMMARY_CHARS);
     return {
       protocol: isCanonical ? event.protocol : AGENT_ACTIVITY_PROTOCOL,
       kind: isCanonical ? event.kind : "progress",
       status: isCanonical ? event.status : "running",
-      phase: isCanonical ? event.phase ?? null : null,
+      phase: callLifecycle ? AGENT_CALL_LIFECYCLE_PHASE : isCanonical ? event.phase ?? null : null,
       summary,
-      detail: isCanonical ? event.detail ?? null : null,
+      detail: isCanonical && !callLifecycle ? event.detail ?? null : null,
       agent_call_id: isCanonical ? event.agent_call_id ?? null : null,
       provider: isCanonical ? event.provider ?? null : null,
       model: isCanonical ? event.model ?? null : null,
@@ -249,6 +261,7 @@ export class ChangeStream extends EventEmitter {
     this.useBridgeChangeSeq = false;
     this.gateStatusByJobId = new Map();
     this.gateAnnouncedByJobId = new Map();
+    this.failedWorkItemIds = new Set();
     this.replay = [];
     // instance_status: emit on change, min interval apart.
     this.instanceStatusMinIntervalMs = Math.max(250, Number(instanceStatusMinIntervalMs) || 2_000);
@@ -270,6 +283,7 @@ export class ChangeStream extends EventEmitter {
     this.providerUsageInFlight = null;
     this.latestProviderUsage = null;
     this.providerUsageLastJson = "";
+    this.conversation = null;
   }
 
   start() {
@@ -286,6 +300,9 @@ export class ChangeStream extends EventEmitter {
       ? { seq: this.readBridgeChangeCursor("jobs") }
       : this.readUpdatedCursor("jobs");
     this.seedGateStatuses();
+    this.seedFailedWorkItems();
+    this.conversation = new ConversationStreamPoller({ db: this.db });
+    this.conversation.seed();
     this.timer = setInterval(() => this.poll(), this.pollMs);
     this.timer.unref?.();
   }
@@ -343,6 +360,79 @@ export class ChangeStream extends EventEmitter {
       this.gateStatusByJobId.set(jobId, row.status);
       this.gateAnnouncedByJobId.set(jobId, isOpenGateJob(row, payload));
     }
+  }
+
+  /**
+   * `gate_opened` frames for every gate this stream has announced that is
+   * still open in the ledger, for a transport that missed the original
+   * announcement. They stay out of the live stream and the replay window and
+   * carry event_id 0 like a snapshot, so no client cursor moves. A gate the
+   * poll has not announced yet is left to its normal transition, which keeps
+   * this to one announcement per gate per caller.
+   */
+  openGateFrames() {
+    if (!this.db) return [];
+    const readGate = this.db.prepare(`
+      SELECT j.*, hg.gate_state AS human_gate_state
+      FROM jobs j
+      LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.id = ? AND j.job_type = 'human_input'
+    `);
+    const frames = [];
+    for (const [jobId, announced] of this.gateAnnouncedByJobId) {
+      if (!announced) continue;
+      const row = readGate.get(jobId);
+      if (!row || !isOpenGateJob(row, parseJsonField(row.payload_json) || {})) continue;
+      frames.push(createBridgeEventFrame(BRIDGE_EVENT_KINDS.GATE_OPENED, gatePayloadForJob(row), {
+        instanceId: this.instanceId,
+        eventId: 0,
+        bridgeEpoch: this.bridgeEpochId,
+      }));
+    }
+    return frames;
+  }
+
+  /**
+   * Work items that are already failed when the bridge starts are old news;
+   * only a transition observed afterwards is announced.
+   */
+  seedFailedWorkItems() {
+    this.failedWorkItemIds.clear();
+    const rows = this.db.prepare(`SELECT id FROM work_items WHERE status = ?`).all(FAILED_WORK_ITEM_STATUS);
+    for (const row of rows) this.failedWorkItemIds.add(Number(row.id));
+  }
+
+  /**
+   * One `failed` event per entry into the failed state: the relay pushes
+   * "Posse run failed" for this kind, and `work_item_updated` alone never
+   * reaches a locked phone. A failed row that is merely touched again stays
+   * quiet; leaving failed re-arms the item so a later failure is announced.
+   */
+  emitWorkItemFailure(row) {
+    const workItemId = Number(row.id);
+    if (row.status !== FAILED_WORK_ITEM_STATUS) {
+      this.failedWorkItemIds.delete(workItemId);
+      return;
+    }
+    if (this.failedWorkItemIds.has(workItemId)) return;
+    this.failedWorkItemIds.add(workItemId);
+    // The phone routes on work_item_id; job_id names the job that sank the
+    // item when there is one, so the failure can be opened directly.
+    const failedJob = this.db.prepare(`
+      SELECT id
+      FROM jobs
+      WHERE work_item_id = ? AND status IN (${FAILED_JOB_STATUSES_SQL})
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 1
+    `).get(workItemId);
+    const title = String(row.title || "").trim().replace(/\s+/g, " ");
+    const summary = title ? `Work item failed: ${title}` : `Work item ${workItemId} failed`;
+    this.emitBridgeEvent(BRIDGE_EVENT_KINDS.FAILED, {
+      job_id: failedJob ? Number(failedJob.id) : null,
+      work_item_id: workItemId,
+      // Cut by code point: half a surrogate pair is not valid relay JSON.
+      summary: Array.from(summary).slice(0, FAILED_SUMMARY_CHARS).join(""),
+    });
   }
 
   emitBridgeEvent(kind, payload) {
@@ -441,6 +531,7 @@ export class ChangeStream extends EventEmitter {
       this.pollInstanceStatus();
       this.pollJobProgress();
       this.pollCosts();
+      this.pollConversation();
       void this.pollProviderUsage();
     } catch (err) {
       this.emitBridgeEvent(BRIDGE_EVENT_KINDS.FAILED, {
@@ -630,6 +721,14 @@ export class ChangeStream extends EventEmitter {
     }
   }
 
+  // conversation_entry hints from the durable conversation tables.
+  pollConversation(nowMs = Date.now()) {
+    if (!this.conversation) return;
+    for (const payload of this.conversation.poll(nowMs)) {
+      this.emitBridgeEvent(BRIDGE_EVENT_KINDS.CONVERSATION_ENTRY, payload);
+    }
+  }
+
   shouldSuppressDbGateEvent(row) {
     if (!PLAN_GATE_EVENT_TYPES.has(row?.event_type)) return false;
     const gateJobId = eventGateJobId(row);
@@ -662,6 +761,7 @@ export class ChangeStream extends EventEmitter {
         BRIDGE_EVENT_KINDS.WORK_ITEM_UPDATED,
         this.projectWorkItem(row),
       );
+      this.emitWorkItemFailure(row);
     }
   }
 
@@ -679,6 +779,7 @@ export class ChangeStream extends EventEmitter {
         BRIDGE_EVENT_KINDS.WORK_ITEM_UPDATED,
         this.projectWorkItem(row),
       );
+      this.emitWorkItemFailure(row);
     }
   }
 
@@ -781,5 +882,6 @@ export class ChangeStream extends EventEmitter {
       this.db.close();
       this.db = null;
     }
+    this.conversation = null;
   }
 }

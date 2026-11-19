@@ -2363,7 +2363,12 @@ async function cleanupOrphanStagingFiles(dir, {
   let removed = 0;
   // Owner stamps go last so each PHP reservation is judged by its stamp.
   const ordered = [...entries].sort((a, b) => Number(isPhpOwnerStamp(a.name)) - Number(isPhpOwnerStamp(b.name)));
+  const sweepPhpProjects = isAtlasScipDir(dir);
   for (const entry of ordered) {
+    if (entry.isDirectory()) {
+      if (sweepPhpProjects && await removeAbandonedPhpProjectDir(dir, entry.name)) removed++;
+      continue;
+    }
     if (!entry.isFile()) continue;
     if (!SCIP_STAGING_TEMP_NAME_RE.test(entry.name)) continue;
     const filePath = path.join(dir, entry.name);
@@ -2396,6 +2401,42 @@ async function cleanupOrphanStagingFiles(dir, {
 // (`.php-tmp.posse-owner`). A timeout kills the wrapper's process group before
 // its own cleanup runs, so both strand beside the staging file.
 const SCIP_STAGING_TEMP_NAME_RE = /^\..+\.scip\.(\d+)\.\d+\.[a-z0-9]+\.staging(?:\.php-tmp(?:\.posse-owner)?)?$/iu;
+
+// scip-php copies a project without composer.json into
+// `php-project-<wrapper pid>-<ms>-<rand>/` beside its output and removes the
+// copy when the wrapper finishes; a killed wrapper leaves the whole copy.
+const PHP_FALLBACK_PROJECT_DIR_RE = /^php-project-(\d+)-\d+-[a-z0-9]+$/u;
+
+/**
+ * True for the canonical `<root>/.posse/atlas/scip` staging directory, the
+ * only place a recursive sweep may delete.
+ *
+ * @param {string} dir
+ */
+function isAtlasScipDir(dir) {
+  const parts = path.resolve(dir).split(path.sep);
+  return parts.slice(-3).join("/") === ".posse/atlas/scip";
+}
+
+/**
+ * Remove a scip-php fallback project copy whose wrapper has exited. Only a
+ * real directory (readdir Dirents never report a symlink as one) with the
+ * wrapper's name shape is considered; a live wrapper keeps its copy.
+ *
+ * @param {string} dir
+ * @param {string} name
+ * @returns {Promise<boolean>}
+ */
+async function removeAbandonedPhpProjectDir(dir, name) {
+  const match = String(name || "").match(PHP_FALLBACK_PROJECT_DIR_RE);
+  if (!match || processIsAlive(Number(match[1]))) return false;
+  try {
+    await fs.promises.rm(path.join(dir, name), { recursive: true, force: true });
+    return true;
+  } catch {
+    return false; // best effort, like the staging-file sweep
+  }
+}
 
 function isPhpOwnerStamp(name) {
   return /\.staging\.php-tmp\.posse-owner$/iu.test(String(name || ""));
@@ -2607,12 +2648,16 @@ function runScipIndexer(plan, { cwd, onProgress = null }) {
     let stderrTail = "";
     const startedAt = Date.now();
     let timer = null;
+    let killTimer = null;
+    // The timeout result, held until the timed-out indexer has exited.
+    let timedOut = null;
     let heartbeat = null;
     let outputPoll = null;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       if (heartbeat) clearInterval(heartbeat);
       if (outputPoll) clearInterval(outputPoll);
       resolve(result);
@@ -2688,8 +2733,15 @@ function runScipIndexer(plan, { cwd, onProgress = null }) {
     const stderr = child.stderr;
     if (stdout) stdout.on("data", (chunk) => handleLine("stdout", chunk));
     if (stderr) stderr.on("data", (chunk) => handleLine("stderr", chunk));
-    child.on("error", (err) => finish({ ok: false, error: formatAtlasError(err) }));
+    child.on("error", (err) => {
+      if (timedOut) return; // a timed-out run settles when the indexer exits
+      finish({ ok: false, error: formatAtlasError(err) });
+    });
     child.on("exit", (status, signal) => {
+      if (timedOut) {
+        finish(timedOut);
+        return;
+      }
       if (outputPoll) emitOutputFileProgress({ force: true });
       finish({
         ok: status === 0,
@@ -2716,15 +2768,21 @@ function runScipIndexer(plan, { cwd, onProgress = null }) {
       outputPoll.unref?.();
     }
     timer = setTimeout(() => {
+      timedOut = { ok: false, error: `timed out after ${plan.timeoutMs}ms`, sourceFiles: syntheticTotal };
       killProcessTree(child);
       // SIGTERM is advisory for a wedged indexer. Escalate to SIGKILL after a
       // short grace so ignored terminations don't accumulate live orphans
-      // holding piped stdio handles in the parent process.
-      const killTimer = setTimeout(() => {
+      // holding piped stdio handles in the parent process. The run settles
+      // only once the indexer has exited: the caller then restores the
+      // previous index onto the path the indexer writes (the no-swap branch),
+      // so settling at SIGTERM let a late write land on the canonical path. A
+      // child that still reports no exit one grace after SIGKILL is given up.
+      killTimer = setTimeout(() => {
         if (child.exitCode == null) killProcessTree(child, { force: true });
+        killTimer = setTimeout(() => finish(timedOut), SCIP_INDEXER_KILL_GRACE_MS);
+        killTimer.unref?.();
       }, SCIP_INDEXER_KILL_GRACE_MS);
       killTimer.unref?.();
-      finish({ ok: false, error: `timed out after ${plan.timeoutMs}ms`, sourceFiles: syntheticTotal });
     }, plan.timeoutMs);
     timer.unref?.();
   });

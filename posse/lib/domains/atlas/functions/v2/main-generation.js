@@ -17,12 +17,16 @@ import {
   finishAtlasMainIntake,
   readAtlasMainIntakeState,
 } from "./main-intake-state.js";
-import { ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS } from "./contracts/jobs.js";
+import {
+  ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS,
+  ATLAS_MAIN_GENERATION_PUBLISHED_PROOF_REASONS,
+} from "./contracts/jobs.js";
 import { normalizeTreeCompressionMode } from "./tree-compression-policy.js";
 import { inspectViewMaterialization } from "./view-health.js";
 
 const MAIN_GENERATION_PURPOSES = new Set(["main-incremental", "main-full", "main-merge"]);
 const ACCOUNTED_SKIP_REASONS = new Set(ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS);
+const [PUBLISHED_REASON, PUBLISHED_ON_RETRY_REASON] = ATLAS_MAIN_GENERATION_PUBLISHED_PROOF_REASONS;
 
 function capString(value, max = 700) {
   const text = String(value ?? "");
@@ -191,7 +195,7 @@ export async function publishAtlasMainGenerationIfProven({
   }
   try {
     result.generation = await publishGeneration(sourceProof);
-    result.generation_proof_reason = "clean_exact_oid_before_after";
+    result.generation_proof_reason = PUBLISHED_REASON;
   } catch (err) {
     let publishError = err;
     const stale = new Set([
@@ -201,7 +205,7 @@ export async function publishAtlasMainGenerationIfProven({
     if (stale) {
       try {
         result.generation = await publishGeneration(sourceProof);
-        result.generation_proof_reason = "clean_exact_oid_before_after_retry";
+        result.generation_proof_reason = PUBLISHED_ON_RETRY_REASON;
         return result;
       } catch (retryError) {
         publishError = retryError;
@@ -275,6 +279,55 @@ export function publishAtlasMainGenerationToView({
 }
 
 /**
+ * Paths changed between the last published exact generation and this source
+ * pin. A warm's hint paths come from the events that reached it; a dropped
+ * event, a pathless refresh, or a warm that failed in between would otherwise
+ * publish the new pin over rows that still describe older source. Returns
+ * null when there is nothing to add (no published generation for this target,
+ * or the same pin), and asks for a repository recheck when Git cannot list the
+ * difference.
+ *
+ * @param {{
+ *   repoRoot: string,
+ *   targetBranch: string,
+ *   sourceProof: any,
+ *   signal?: AbortSignal | null,
+ *   execGit?: (args: string[], cwd: string, options: Record<string, any>) => Promise<any>,
+ * }} args
+ * @returns {Promise<{ paths: string[], repository_recheck: boolean } | null>}
+ */
+export async function atlasMainSourceDeltaSincePublished({
+  repoRoot,
+  targetBranch,
+  sourceProof,
+  signal = null,
+  execGit = gitExecAsync,
+}) {
+  const previous = readAtlasMainIntakeState(repoRoot);
+  if (previous?.status !== "complete" || previous.target_branch !== targetBranch) return null;
+  const oid = (value) => {
+    const text = String(value || "").trim().toLowerCase();
+    return /^[0-9a-f]{40,64}$/u.test(text) ? text : null;
+  };
+  const publishedOid = oid(previous?.generation?.git_oid || previous.git_oid);
+  const pinOid = oid(sourceProof?.git_oid);
+  if (!publishedOid || !pinOid || publishedOid === pinOid) return null;
+  try {
+    // Project-relative (`--relative`), with both sides of a rename listed.
+    const output = await execGit(
+      ["diff", "--name-only", "--no-renames", "--relative", "-z", publishedOid, pinOid, "--"],
+      repoRoot,
+      { signal, timeoutMs: 30_000, trim: false },
+    );
+    const paths = [...new Set(String(output || "").split("\0").filter((value) => value.length > 0))];
+    return { paths, repository_recheck: false };
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    return { paths: [], repository_recheck: true };
+  }
+}
+
+/**
  * Universal main-index lifecycle. This is called by ParseEngine itself, so a
  * new caller cannot accidentally warm the main view without recording its
  * source pin and terminal outcome.
@@ -318,12 +371,19 @@ export async function runAtlasMainIntake({
       );
       throw error;
     }
+    const sourceDelta = await atlasMainSourceDeltaSincePublished({
+      repoRoot,
+      targetBranch,
+      sourceProof,
+      signal,
+    });
     const intake = beginAtlasMainIntake({
       repoRoot,
       purpose,
       targetBranch,
       sourceProof,
       paths,
+      sourceDelta,
     });
     let result;
     try {

@@ -13,6 +13,8 @@ import { getRuntimeRoot } from "../../runtime/functions/paths.js";
 // touches the native daemon (the admin lane supplies its own recoveryRootFn).
 import { writeLegacyFallbackSnapshot } from "./worktree-snapshots.js";
 import { adminGitExec, adminGitExecAsync } from "./admin-git-exec.js";
+// Local file locks; resolving and taking them never calls the native daemon.
+import { acquireWorktreeLock, gitStashLockPath } from "./worktree-locks.js";
 
 export { adminGitExec, adminGitExecAsync };
 
@@ -167,9 +169,15 @@ export function adminPreserveDirtyWorktreeSnapshot(wtPath, projectDir, {
   const capturedAt = new Date().toISOString().replace(/[:.]/g, "-");
   const refName = `refs/posse/snapshots/${wiPart}-${safeReason}-${capturedAt}-${token}`;
   const message = `posse-snapshot:${reason}:${token}`;
+  let stashLock = null;
   try {
     const status = adminGitExec(["status", "--porcelain"], wtPath, { timeoutMs: 5000 });
     if (!String(status || "").trim()) return null;
+    // refs/stash is shared by every linked worktree: hold the stash lock from
+    // push through drop, as the snapshot machinery does.
+    const stashLockPath = gitStashLockPath(wtPath, projectDir);
+    stashLock = acquireWorktreeLock(stashLockPath);
+    if (!stashLock.acquired) throw new Error(`timed out waiting for the git stash lock: ${stashLockPath}`);
     try {
       adminGitExec(["stash", "push", "--include-untracked", "-m", message], wtPath);
     } catch {
@@ -192,10 +200,20 @@ export function adminPreserveDirtyWorktreeSnapshot(wtPath, projectDir, {
       }
       return refName;
     }
-    try { adminGitExec(["stash", "drop", stashRef], wtPath); } catch { /* pinned ref remains authoritative */ }
+    // A positional stash@{N} goes stale when any lane pushes or drops (see
+    // utils.js): drop only the slot re-verified against the pinned hash.
+    try {
+      const dropRef = String(adminGitExec(["stash", "list", "--format=%H %gd"], wtPath) || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim().split(" "))
+        .find(([hash, slot]) => hash === stashHash && slot)?.[1];
+      if (dropRef) adminGitExec(["stash", "drop", dropRef], wtPath);
+    } catch { /* pinned ref remains authoritative */ }
     return refName;
   } catch (error) {
     if (typeof onMsg === "function") onMsg(`snapshot failed for ${wtPath}: ${error?.message || String(error)}`);
     throw error;
+  } finally {
+    if (stashLock?.acquired) stashLock.release();
   }
 }

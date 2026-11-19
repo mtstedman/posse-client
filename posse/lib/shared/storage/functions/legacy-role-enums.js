@@ -1,5 +1,6 @@
 import { JOB_STATUS_LIST_SQL } from "../../../catalog/job.js";
 import { withForeignKeysDisabled } from "./table-definitions.js";
+import { addMissingColumns } from "./table-copy.js";
 
 export function repairLegacyRoleEnums(_db) {
   // ── Migration: add 'artificer' to job_type, worker_type, actor_type CHECKs ──
@@ -15,6 +16,7 @@ export function repairLegacyRoleEnums(_db) {
         const tmpName = `_${name}_artmig`;
         const tmpCreate = createSql.replace(new RegExp(`\\b${name}\\b`), tmpName);
         _db.exec(tmpCreate);
+        addMissingColumns(_db, name, tmpName);
         const oldCols = _db.pragma(`table_info(${name})`).map(c => c.name);
         const newCols = _db.pragma(`table_info(${tmpName})`).map(c => c.name);
         const common = oldCols.filter(c => newCols.includes(c)).join(", ");
@@ -157,6 +159,7 @@ export function repairLegacyRoleEnums(_db) {
         const tmpName = `_${name}_promomig`;
         const tmpCreate = createSql.replace(new RegExp(`\\b${name}\\b`), tmpName);
         _db.exec(tmpCreate);
+        addMissingColumns(_db, name, tmpName);
         const oldCols = _db.pragma(`table_info(${name})`).map(c => c.name);
         const newCols = _db.pragma(`table_info(${tmpName})`).map(c => c.name);
         const common = oldCols.filter(c => newCols.includes(c)).join(", ");

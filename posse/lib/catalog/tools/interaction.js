@@ -31,9 +31,9 @@ export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
   shared_trunk_push_refused: Object.freeze(["acknowledge"]),
   shared_trunk_push_remote_error: Object.freeze(["acknowledge"]),
   shared_trunk_provenance: Object.freeze(["accept", "reject"]),
-  // @linked +posse:posse/lib/domains/bridge/functions/work-item-feed.js#validStoredChoiceEntries +posse:posse/lib/domains/queue/functions/interaction-contract.js#validChoiceEntries (ordered subsets)
+  // @linked +posse:posse/lib/domains/bridge/functions/gate-question.js#validStoredChoiceEntries +posse:posse/lib/domains/queue/functions/interaction-contract.js#validChoiceEntries (ordered subsets)
   work_item_failure_disposition: Object.freeze(["retry", "accept", "abandon"]),
-  // @linked +posse:posse/lib/domains/bridge/functions/work-item-feed.js#validStoredChoiceEntries +posse:posse/lib/domains/queue/functions/interaction-contract.js#validChoiceEntries (ordered subsets)
+  // @linked +posse:posse/lib/domains/bridge/functions/gate-question.js#validStoredChoiceEntries +posse:posse/lib/domains/queue/functions/interaction-contract.js#validChoiceEntries (ordered subsets)
   cross_wi_upstream_disposition: Object.freeze(["wait", "rebuild", "abandon"]),
   merge_verification_review: Object.freeze(["pass", "fail"]),
   merge_failure_recovery: Object.freeze(["merge", "commit", "waive_tests", "send_back"]),
@@ -41,6 +41,14 @@ export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
   legacy_unstructured: Object.freeze([]),
 });
 // @catalog-sync end
+
+// An assessment_review gate raised by the final reviewer (an escalation)
+// dispatches no assessor and nothing clears the review, so an assessment-only
+// retry would return the same verdict and reopen the gate; send_back covers a
+// rerun.
+export const FINAL_REVIEW_ESCALATION_CHOICE_IDS = Object.freeze(
+  WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review.filter((id) => id !== "retry_assessment"),
+);
 
 export const DEV_COMPLETION_STATUSES = Object.freeze([
   "COMPLETE",

@@ -1,5 +1,11 @@
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
-import { getEvents, getSetting } from "../../../queue/functions/index.js";
+import { getEvents, getJob, getSetting } from "../../../queue/functions/index.js";
+import { parseJobPayload } from "../../../queue/functions/payload.js";
+
+// Job payload key counting the internal assessment retries queued for the job.
+// The retry events are tail-pruned from the database, and a later process run
+// reads only its own event archive, so the limit is counted on the job.
+export const ASSESSMENT_INTERNAL_RETRIES_PAYLOAD_KEY = "_assess_internal_retries";
 
 export function getAssessmentInternalRetryLimit() {
   try {
@@ -13,11 +19,16 @@ export function getAssessmentInternalRetryLimit() {
 }
 
 export function countInternalAssessmentRetries(jobId) {
+  let recorded = 0;
   try {
-    return getEvents(jobId, 100).filter((e) => e.event_type === "job.assessment_internal_retry").length;
-  } catch {
-    return 0;
-  }
+    recorded = Math.max(0, Math.floor(Number(parseJobPayload(getJob(jobId))[ASSESSMENT_INTERNAL_RETRIES_PAYLOAD_KEY]) || 0));
+  } catch { /* count the retained events only */ }
+  // Retained events still count retries queued before the count was recorded.
+  let logged = 0;
+  try {
+    logged = getEvents(jobId, 100).filter((e) => e.event_type === "job.assessment_internal_retry").length;
+  } catch { /* the recorded count stands */ }
+  return Math.max(recorded, logged);
 }
 
 // A/B harnesses compare execution routes, not assessor strength. The harness

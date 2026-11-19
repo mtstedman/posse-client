@@ -4,6 +4,7 @@ import path from "node:path";
 import { getRuntimeDbPath } from "../../../domains/runtime/functions/paths.js";
 import { bumpRunTelemetryEpoch } from "../../telemetry/functions/run-telemetry.js";
 import { installEventState } from "./event-state.js";
+import { installAgentToolGroupsSchema } from "./agent-tool-groups-schema.js";
 import {
   installBridgeChangeTracking,
   installExportClaimColumns,
@@ -27,6 +28,7 @@ import {
   createResearchReportClaimDraftTable,
   ensureAgentCallsProviderUsageIndex,
   ensureAgentInteractionsActionIdIndex,
+  withForeignKeysDisabled,
 } from "./table-definitions.js";
 import {
   needsAgentCallsExtendedThinkingRepair,
@@ -98,36 +100,13 @@ export function getDb() {
   _dbPath = dbPath;
   // Keep the handle provisional until every bootstrap and migration step succeeds.
   try {
-    // Legacy upgrades must run in their historical order before the registered
-    // host migrations. Keep the sequence with the connection lifecycle.
-    installLegacyCoreTables(_db);
-    repairLegacyJobColumns(_db);
-    repairLegacyReferences(_db);
-    repairLegacyRoleEnums(_db);
-    installLegacyFeatureTables(_db);
-
-    runRegisteredHostMigrations(_db, {
-      needsAgentCallsExtendedThinkingRepair, repairAgentCallsExtendedThinkingSchema,
-      needsAgentCallsParentageRepair, repairAgentCallsParentageSchema,
-      needsAgentCallsChildKindsRepair, repairAgentCallsChildKindsSchema,
-      needsAgentCallsInterruptedStatusRepair, repairAgentCallsInterruptedStatusSchema,
-    });
-    installBridgeChangeTracking(_db);
-    // Additive, idempotent index for the provider usage summary read; runs
-    // after the agent_calls repairs so rebuilt tables get it too.
-    ensureAgentCallsProviderUsageIndex(_db);
-    // Additive, idempotent partial index for the operator action lookup.
-    ensureAgentInteractionsActionIdIndex(_db);
-    ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);
-
-    createHashRefStoreTables(_db);
-    createAgentHandoffPacketTable(_db);
-    createResearchReportClaimDraftTable(_db);
-    installJsonValidityTriggers(_db);
-    installTerminalTransitionTracking(_db);
-    installEventState(_db);
-    installExportClaimColumns(_db);
-
+    // One write transaction for the whole setup: processes starting together
+    // on one database, a new one included, queue on the write lock, and each
+    // checks the schema the previous one committed instead of racing it to
+    // add the same column or rebuild the same table. Table rebuilds need
+    // foreign keys off (a DROP TABLE would cascade), which cannot change
+    // inside a transaction, so they are off for the whole setup.
+    withForeignKeysDisabled(_db, () => _db.transaction(() => installSchema(_db)).immediate());
     _dbReady = true;
     return _db;
   } catch (err) {
@@ -137,6 +116,39 @@ export function getDb() {
     _dbReady = false;
     throw err;
   }
+}
+
+function installSchema(db) {
+  // Legacy upgrades must run in their historical order before the registered
+  // host migrations. Keep the sequence with the connection lifecycle.
+  installLegacyCoreTables(db);
+  repairLegacyJobColumns(db);
+  repairLegacyReferences(db);
+  repairLegacyRoleEnums(db);
+  installLegacyFeatureTables(db);
+
+  runRegisteredHostMigrations(db, {
+    needsAgentCallsExtendedThinkingRepair, repairAgentCallsExtendedThinkingSchema,
+    needsAgentCallsParentageRepair, repairAgentCallsParentageSchema,
+    needsAgentCallsChildKindsRepair, repairAgentCallsChildKindsSchema,
+    needsAgentCallsInterruptedStatusRepair, repairAgentCallsInterruptedStatusSchema,
+  });
+  installBridgeChangeTracking(db);
+  // Additive, idempotent index for the provider usage summary read; runs
+  // after the agent_calls repairs so rebuilt tables get it too.
+  ensureAgentCallsProviderUsageIndex(db);
+  // Additive, idempotent partial index for the operator action lookup.
+  ensureAgentInteractionsActionIdIndex(db);
+  ensureHostSchemaVersion(db, HOST_SCHEMA_VERSION);
+
+  createHashRefStoreTables(db);
+  createAgentHandoffPacketTable(db);
+  createResearchReportClaimDraftTable(db);
+  installAgentToolGroupsSchema(db);
+  installJsonValidityTriggers(db);
+  installTerminalTransitionTracking(db);
+  installEventState(db);
+  installExportClaimColumns(db);
 }
 
 export function __testInstallJsonValidityTriggers(db) {

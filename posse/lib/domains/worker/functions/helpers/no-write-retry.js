@@ -85,6 +85,8 @@ export async function detectBranchNetDiffForNoWriteAsync({
     return { ok: true, hasDiff: false, targetBranch: target, mergeBase: base || null, head: currentHead || null, files: [] };
   }
 
+  // Names, pathspecs and diff headers are all relative to `cwd` (a project
+  // may be nested in its repository), the space files_committed uses.
   let nameStatus = "";
   try {
     nameStatus = await gitExecAsync(
@@ -93,6 +95,7 @@ export async function detectBranchNetDiffForNoWriteAsync({
         "core.quotePath=false",
         "diff",
         "--no-renames",
+        "--relative",
         "--name-status",
         `${base}..HEAD`,
         ...(pathspec.length > 0 ? ["--", ...pathspec] : []),
@@ -129,16 +132,16 @@ export async function detectBranchNetDiffForNoWriteAsync({
 
   let diff = "";
   let diffStat = "";
-  const scopedFiles = entries.map((entry) => entry.file).slice(0, Math.max(1, maxFiles));
+  const scopedFiles = entries.map((entry) => `:(literal)${entry.file}`).slice(0, Math.max(1, maxFiles));
   try {
     [diff, diffStat] = await Promise.all([
       gitExecAsync(
-        ["-c", "core.quotePath=false", "diff", "--no-renames", "--unified=6", `${base}..HEAD`, "--", ...scopedFiles],
+        ["-c", "core.quotePath=false", "diff", "--no-renames", "--relative", "--unified=6", `${base}..HEAD`, "--", ...scopedFiles],
         cwd,
         { timeoutMs: 20_000, maxBuffer: 1024 * 1024 * 8 },
       ),
       gitExecAsync(
-        ["-c", "core.quotePath=false", "diff", "--stat", "--summary", `${base}..HEAD`, "--", ...scopedFiles],
+        ["-c", "core.quotePath=false", "diff", "--relative", "--stat", "--summary", `${base}..HEAD`, "--", ...scopedFiles],
         cwd,
         { timeoutMs: 20_000, maxBuffer: 1024 * 1024 * 2 },
       ),

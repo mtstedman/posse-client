@@ -239,6 +239,8 @@ ${aliasDiagnostic}
     ${C.dim}             admin init [--provider-clis-only] | admin describe --json | admin set/clear [--json] | admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin provider-pause [clear <provider|all>] | admin settings${C.reset}
     ${C.cyan}merge${C.reset}      Merge a completed WI branch
     ${C.dim}             merge <wi_id> [--yes]${C.reset}
+    ${C.cyan}deploy${C.reset}     Push merged work to the remote (shows what would go first)
+    ${C.dim}             deploy [--diff] [--yes]${C.reset}
     ${C.cyan}prune${C.reset}      Clean up orphaned worktrees
     ${C.dim}             prune [--dry-run]${C.reset}
     ${C.cyan}purge${C.reset}      Delete ALL posse/* branches + worktrees (asks first)

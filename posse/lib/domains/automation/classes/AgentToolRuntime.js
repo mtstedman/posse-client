@@ -83,11 +83,20 @@ export class AgentToolRuntime {
       });
       usage(result.usage);
       if (state.uncertain && invocation?.execution) invocation.execution.state.uncertain = true;
-      const output = JSON.stringify(result);
       // Never clip a success into malformed JSON or lose the child identity.
-      if (Buffer.byteLength(output) > tool.manifest.max_output_bytes) {
+      // By the time the result is measured the child's money is spent and
+      // its writes are done, so the tool summary (up to 8 KiB of result per
+      // call) gives way first: its results, then its entries, then the call
+      // receipts. Only a reply too large on its own fails the call.
+      const fits = () => Buffer.byteLength(JSON.stringify(result)) <= tool.manifest.max_output_bytes;
+      if (!fits() && Array.isArray(result.tool_summary)) {
+        result.tool_summary = result.tool_summary.map(item => item.result == null ? item : { ...item, result: null, result_truncated: true });
+        while (result.tool_summary.length && !fits()) result.tool_summary.pop();
+        if (!result.tool_summary.length) delete result.tool_summary;
+      }
+      if (!fits()) result.tool_calls = [];
+      if (!fits()) {
         result.reply = "Child result exceeded this tool's output limit; inspect its conversation.";
-        result.tool_calls = []; delete result.tool_summary;
         result.status = "failed"; result.error = { code: "agent_output_limit", message: result.reply };
       }
       return { ok: result.status === "done", exit_code: result.status === "done" ? 0 : 1,

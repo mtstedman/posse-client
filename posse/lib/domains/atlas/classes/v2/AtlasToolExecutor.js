@@ -12,7 +12,7 @@ import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
 import { ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS } from "../../functions/v2/contracts/jobs.js";
 import { normalizeAtlasIdentifier } from "../../functions/v2/contracts/identifiers.js";
-import { normalizeActionName } from "../../functions/v2/retrieval/dispatch.js";
+import { atlasNestedAction, atlasNestedActionArgKeys } from "../../../../shared/tools/functions/atlas-nested-action.js";
 import { normalizeCodeLensContextLines } from "../../functions/v2/retrieval/code.js";
 import { codeSurveyPathError } from "../../functions/v2/retrieval/survey.js";
 import { recordAtlasUsageEvent } from "../../functions/v2/retrieval/usage.js";
@@ -50,6 +50,7 @@ import {
 } from "../../functions/v2/retrieval/search-beam.js";
 import { resolveVendoredSourcePromotions } from "../../functions/v2/retrieval/vendored-dependencies.js";
 import { AtlasToolDispatchCache } from "./AtlasToolDispatchCache.js";
+import fs from "node:fs";
 import path from "node:path";
 
 const DEFAULT_DEDUPE_WINDOW_MS = 1500;
@@ -224,6 +225,31 @@ function semanticRepeatScope(request, repoKey) {
   return identity == null || String(identity).trim() === ""
     ? null
     : `${repoKey}|scope=${String(identity).trim()}`;
+}
+
+// code.lens renders lines read from disk, and only the write tools bump the
+// write epoch. Pin a remembered repeat to the file it read, so an edit made
+// any other way (shell formatter, codegen, provider-native patch) is read
+// again instead of being answered "already surfaced".
+function semanticRepeatSourcePath(action, args, value = null) {
+  if (action !== "code.lens") return null;
+  if (typeof args?.file === "string" && args.file) return args.file;
+  if (!value) return null;
+  try {
+    const rel = JSON.parse(String(value.result?.content?.[0]?.text || ""))?.repo_rel_path;
+    return typeof rel === "string" && rel ? rel : null;
+  } catch {
+    return null;
+  }
+}
+
+function sourceFileSignature(root, relPath) {
+  try {
+    const stat = fs.statSync(path.resolve(root, relPath), { bigint: true });
+    return `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  } catch {
+    return "missing";
+  }
 }
 
 function duplicateSuppressedToolResult(action) {
@@ -567,17 +593,10 @@ function resolveAtlasAction(toolName = "") {
 
 function gatewayEffectiveAction(action, args = {}) {
   if (!ATLAS_GATEWAY_ACTIONS.has(action)) return action;
-  const target = String(
-    args?.gatewayAction
-    || args?.targetAction
-    || args?.actionName
-    || args?.action
-    || "",
-  ).trim();
-  // Normalize alias spellings so the blocking/dedupe gates classify the SAME
-  // action dispatch will execute (raw-string checks let a variant spelling
-  // slip a mutation through the read path).
-  return target ? normalizeActionName(target) : action;
+  // Resolve key and value spellings exactly as dispatch does so the
+  // blocking/dedupe gates classify the SAME action dispatch will execute
+  // (a spelling read here but not there slips a mutation through the read path).
+  return atlasNestedAction(args) || action;
 }
 
 function dispatchCachePolicyFor(action) {
@@ -586,11 +605,7 @@ function dispatchCachePolicyFor(action) {
 
 function gatewaySelectorKeysFor(action, args = {}) {
   if (!ATLAS_GATEWAY_ACTIONS.has(action) || !args || typeof args !== "object") return [];
-  const keys = [];
-  for (const key of ["gatewayAction", "targetAction", "actionName", "action"]) {
-    if (Object.prototype.hasOwnProperty.call(args, key)) keys.push(key);
-  }
-  return keys;
+  return atlasNestedActionArgKeys(args);
 }
 
 function directReadEligible(action, args = {}) {
@@ -944,7 +959,12 @@ export class AtlasToolExecutor {
       ? `${semanticScope}|${action}|${stableStringify(args)}`
       : null;
     const codeWindowPolicy = codeWindowPolicyForRequest(request, action);
-    if (semanticRepeatKey && this.#semanticRepeats.has(semanticRepeatKey)) {
+    const repeatSourceRoot = semanticRepeatKey ? this.#requestReadContext(request)?.readRoot || null : null;
+    // Stat a named file before the read, so an edit racing the read fails the
+    // next repeat check instead of being recorded as already seen.
+    const repeatArgsSource = repeatSourceRoot ? semanticRepeatSourcePath(action, args) : null;
+    const repeatArgsSignature = repeatArgsSource ? sourceFileSignature(repeatSourceRoot, repeatArgsSource) : null;
+    if (semanticRepeatKey && this.#semanticRepeatHolds(semanticRepeatKey)) {
       return duplicateSuppressedToolResult(action);
     }
     const run = async () => {
@@ -977,7 +997,14 @@ export class AtlasToolExecutor {
         }
       }
       if (semanticRepeatKey && successfulAtlasToolResult(value)) {
-        this.#rememberSemanticRepeat(semanticRepeatKey, dedupeRepoKey);
+        const sourcePath = repeatArgsSource
+          || (repeatSourceRoot ? semanticRepeatSourcePath(action, args, value) : null);
+        const source = sourcePath ? {
+          root: repeatSourceRoot,
+          path: sourcePath,
+          signature: repeatArgsSource ? repeatArgsSignature : sourceFileSignature(repeatSourceRoot, sourcePath),
+        } : null;
+        this.#rememberSemanticRepeat(semanticRepeatKey, dedupeRepoKey, source);
       }
       return value;
     };
@@ -1887,8 +1914,20 @@ export class AtlasToolExecutor {
     this.#dispatchCache?.clearRepo?.(repoKey);
   }
 
-  #rememberSemanticRepeat(key, repoKey) {
-    this.#semanticRepeats.set(key, { repoKey, atMs: this.#now() });
+  #semanticRepeatHolds(key) {
+    const entry = this.#semanticRepeats.get(key);
+    if (!entry) return false;
+    const source = entry.source;
+    // An unreadable source proves nothing about whether the file changed.
+    if (!source) return true;
+    const signature = sourceFileSignature(source.root, source.path);
+    if (signature !== "missing" && signature === source.signature) return true;
+    this.#semanticRepeats.delete(key);
+    return false;
+  }
+
+  #rememberSemanticRepeat(key, repoKey, source = null) {
+    this.#semanticRepeats.set(key, { repoKey, atMs: this.#now(), source });
     while (this.#semanticRepeats.size > DEFAULT_SEMANTIC_REPEAT_MAX) {
       const oldest = this.#semanticRepeats.keys().next().value;
       if (oldest == null) break;

@@ -465,6 +465,11 @@ function classifyCompletedRun(invocation, { code, stdout, stderr, executionCount
         return { outcome: "infrastructure_error", reason: "php_dependency_unavailable" };
       }
       return { outcome: "product_failed", reason: "tests_failed" };
+    case "ruby":
+      // `ruby file.rb` exits 0 for a file with no self-running tests; only a
+      // Minitest or RSpec summary shows that any ran.
+      if (code === 0) return !counts || zeroTests ? noTests : { outcome: "passed", reason: null };
+      return { outcome: "product_failed", reason: "tests_failed" };
     case "python_script":
       if (code === 0) return { outcome: "passed", reason: null };
       if (missingExternalPythonModule(root, output)) return { outcome: "infrastructure_error", reason: "python_dependency_unavailable" };

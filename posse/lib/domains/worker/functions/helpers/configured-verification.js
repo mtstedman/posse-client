@@ -2,9 +2,12 @@ import { classifyNestedRunnerInfrastructureFailure } from "../../../verification
 import { readSettingText, readSettingBool } from "../../../settings/functions/safe-setting-read.js";
 import { diffPorcelainEntries, parsePorcelainZ } from "../../../git/functions/porcelain-diff.js";
 import { getWorkItem, logEvent } from "../../../queue/functions/index.js";
+import { activeSiblingWriteLocks, findActiveSiblingLockForPath } from "../../../queue/functions/sibling-locks.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
-import { snapshotAndResetDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
+import { withWorktreeLockAsync } from "../../../git/functions/worktree.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
+import { ACTIVE_LEASE_STATUSES } from "../../../../catalog/job.js";
+import { snapshotAndRestorePathsAsync } from "./shared-worktree-reset.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { C } from "../../../../shared/format/functions/colors.js";
@@ -53,6 +56,25 @@ async function gitPorcelainZ(cwd) {
 
 
 
+
+// The paths a hook run dirtied: in no entry of the status from before it
+// ran. Dirt already there (a parked sibling's edits, say) is not the hook's,
+// nor is a path a running same-WI job holds a lock on, which that job may
+// have written meanwhile. Paths are named from the repository root.
+async function hookOutputPaths(job, cwd, before, changedEntries) {
+  const paths = (entry) => [entry.path, entry.old_path].filter(Boolean);
+  const preexisting = new Set(parsePorcelainZ(before).flatMap(paths));
+  const produced = [...new Set(changedEntries
+    .filter((entry) => !paths(entry).some((file) => preexisting.has(file)))
+    .flatMap(paths))];
+  const running = activeSiblingWriteLocks(job).filter((lock) => ACTIVE_LEASE_STATUSES.includes(lock.job_status));
+  if (running.length === 0 || produced.length === 0) return produced;
+  const prefix = String(await gitExecAsync(["rev-parse", "--show-prefix"], cwd) || "").trim();
+  return produced.filter((file) => {
+    if (prefix && !file.startsWith(prefix)) return true;
+    return !findActiveSiblingLockForPath(file.slice(prefix.length), job, { locks: { jobs: running } });
+  });
+}
 
 async function commitBinding(cwd, assessedCommitHash) {
   const assessed = String(assessedCommitHash || "").trim().toLowerCase();
@@ -246,24 +268,31 @@ export async function ensureConfiguredVerification(worker, {
       const dirtyPaths = dirtyEntries.map((entry) => entry.path).filter(Boolean);
       const preview = dirtyPaths.slice(0, 10).join(", ");
       const more = dirtyPaths.length > 10 ? " ..." : "";
-      const generatedOnly = before === ""
-        && dirtyEntries.length > 0
-        && dirtyEntries.every((entry) => entry.status === "??");
+      // Only the hook's own output is reset; cleanup is verified by the tree
+      // matching its status from before the hook ran.
+      let snapshotDir = null;
+      let snapshotError = null;
+      let resetPaths = [];
+      try {
+        resetPaths = await hookOutputPaths(job, wtPath, before, dirtyEntries);
+        if (resetPaths.length > 0) {
+          snapshotDir = await withWorktreeLockAsync(wtPath, worker.projectDir, () => snapshotAndRestorePathsAsync(wtPath, worker.projectDir, resetPaths, {
+            reason: `pre-assess-dirty-wi-${job.work_item_id}-job-${job.id}`,
+            branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+            wiId: job.work_item_id,
+            onMsg: (message) => worker.emit(job.id, `${C.dim}[pre-assess] ${message}${C.reset}`),
+          }));
+        }
+      } catch (error) {
+        snapshotDir = error?.snapshotDir || snapshotDir;
+        snapshotError = error?.message || String(error);
+      }
+      const reset = new Set(resetPaths);
+      const generatedOnly = dirtyEntries.length > 0
+        && dirtyEntries.every((entry) => entry.status === "??" && reset.has(entry.path));
       const sideEffectMessage = generatedOnly
         ? `Pre-assessment hook generated disposable file(s)${preview ? `: ${preview}${more}` : ""}`
         : `Pre-assessment hook left worktree dirty${preview ? `: ${preview}${more}` : ""}`;
-      let snapshotDir = null;
-      let snapshotError = null;
-      try {
-        snapshotDir = await snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
-          reason: `pre-assess-dirty-wi-${job.work_item_id}-job-${job.id}`,
-          branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-          wiId: job.work_item_id,
-          onMsg: (message) => worker.emit(job.id, `${C.dim}[pre-assess] ${message}${C.reset}`),
-        });
-      } catch (error) {
-        snapshotError = error?.message || String(error);
-      }
       const sideEffectColor = generatedOnly ? C.dim : C.yellow;
       worker.emit(job.id, `${sideEffectColor}[pre-assess] ${sideEffectMessage}${snapshotDir ? ` (snapshot: ${snapshotDir})` : ""}${C.reset}`);
       let cleanupVerified = false;
@@ -289,6 +318,7 @@ export async function ensureConfiguredVerification(worker, {
           changed_entries: dirtyEntries.slice(0, 100),
           before_entries: parsePorcelainZ(before).slice(0, 100),
           after_entries: parsePorcelainZ(after).slice(0, 100),
+          reset_paths: resetPaths.slice(0, 100),
           snapshot_dir: snapshotDir,
           snapshot_error: snapshotError,
           cleanup_verified: cleanupVerified,

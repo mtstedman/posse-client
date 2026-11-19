@@ -46,6 +46,27 @@ export function safePath(cwd, filePath, scopePredicates = null) {
   return resolved;
 }
 
+/**
+ * A mutation is judged where it lands (sweep 5 decision E1): the scope and
+ * protected-path checks see the symlink-resolved target of a lexical path, not
+ * its spelling. The target is re-expressed under the lexical root that holds
+ * it (the cwd, else an external scope root), so root-relative scope entries
+ * still match when the root itself is reached through a link.
+ * `followFinalLink: false` resolves only the parent, for operations on the
+ * entry itself (rename and copy replace a final link rather than write it).
+ */
+export function realMutationTarget(cwd, absPath, scopePredicates = null, { followFinalLink = true } = {}) {
+  const lexical = path.resolve(cwd, absPath);
+  const real = followFinalLink
+    ? realpathExistingPrefix(lexical)
+    : path.join(realpathExistingPrefix(path.dirname(lexical)), path.basename(lexical));
+  for (const root of [path.resolve(cwd), ...(scopePredicates?.readableRoots || [])]) {
+    const realRoot = realpathExistingPrefix(root);
+    if (isInsideRoot(real, realRoot, { followSymlinks: false })) return path.join(root, path.relative(realRoot, real));
+  }
+  return real;
+}
+
 // Only the corresponding dependency tree of this worktree's primary checkout
 // may be read through a link. A package-internal link to source, secrets, another
 // checkout, or an external store must still pass the normal boundary instead.

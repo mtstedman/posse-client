@@ -91,13 +91,12 @@ export function describeOpenGatesAtExit(gates = [], {
   limit = 8,
 } = {}) {
   const excluded = new Set(excludeGateIds.map(Number));
-  const open = gates.filter((gate) => gate && !excluded.has(Number(gate.id)));
+  // A push offer is not a question waiting on the operator: it unlocks
+  // `posse deploy`, and deployReadyLineAtExit names it.
+  const open = gates.filter((gate) => gate && !excluded.has(Number(gate.id)) && !isPushOfferJob(gate));
   const lines = open.slice(0, limit).map((gate) => {
     const payload = parseJobPayload(gate);
     const wi = gate.work_item_id == null ? "" : ` for WI#${gate.work_item_id}`;
-    if (payload.subtype === "push_offer") {
-      return `#${gate.id} push offer (${firstLine(gate.title, "push to remote")}): push or decline it from the phone or at the next run's wrap-up`;
-    }
     if (payload.subtype === "plan_approval") {
       return `#${gate.id} plan approval${wi}: posse plan approve|reject ${gate.work_item_id ?? "<wiId>"}`;
     }
@@ -111,6 +110,14 @@ export function describeOpenGatesAtExit(gates = [], {
   });
   if (open.length > lines.length) lines.push(`+${open.length - lines.length} more open gate(s)`);
   return lines;
+}
+
+/** One exit-summary line when merged work can be deployed, or null. */
+export function deployReadyLineAtExit(gates = []) {
+  const offer = gates.find((gate) => gate && isPushOfferJob(gate));
+  return offer
+    ? `Merged work is ready to deploy (${firstLine(offer.title, "push to remote")}): posse deploy, or review it first with posse deploy --diff`
+    : null;
 }
 
 /**

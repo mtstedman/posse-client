@@ -1332,6 +1332,7 @@
  * @typedef {Object} MemorySurfaceData
  * @property {SymbolId[]} symbols
  * @property {string[]} files
+ * @property {string[]} [domains] Domain-only requests: requested domains that have memories.
  */
 
 /**
@@ -1351,6 +1352,7 @@
  * @typedef {Object} MemoryGetData
  * @property {Record<string, MemoryGetRow[]>} symbols
  * @property {Record<string, MemoryGetRow[]>} files
+ * @property {Record<string, MemoryGetRow[]>} [domains] Domain-only requests: bodies grouped by requested domain.
  */
 
 /**

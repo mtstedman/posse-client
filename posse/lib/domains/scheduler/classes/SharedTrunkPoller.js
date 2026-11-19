@@ -9,8 +9,7 @@ import {
   TRUNK_HEAD_PATTERN,
 } from "../../../catalog/session-sync.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
-import { getLivePairingState } from "../../pairing/functions/state.js";
+import { getLivePairingState, sessionInstanceId } from "../../pairing/functions/state.js";
 import {
   clearSessionHold,
   readSessionHoldStatus,
@@ -227,7 +226,10 @@ export class SharedTrunkPoller {
     reconcile = reconcileSharedTrunkOperations,
     syncClaims = syncCrossInstanceClaims,
     activeLocks = listActiveFileLocks,
-    instanceId = ensureBridgeInstanceId,
+    // Claims carry the identity peers know this clone by: the session row's
+    // inside a session, which a phone pairing's new bridge identity does not
+    // replace (see sessionInstanceId).
+    instanceId = sessionInstanceId,
     log = logEvent,
     readStatus = readRuntimeStatus,
     updateStatus = updateSharedTrunkRuntimeStatus,

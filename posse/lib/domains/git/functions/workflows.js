@@ -52,6 +52,7 @@ export function createGitWorkflowHelpers(options = {}) {
     notifyDirtyState: review.notifyDirtyState,
     sourceWorktreeDirtyState: review.sourceWorktreeDirtyState,
     offerPush: push.offerPush,
+    runDeploy: push.runDeploy,
     refreshPushOfferGate: push.refreshPushOfferGate,
     startupWorktreeCleanup: cleanup.startupWorktreeCleanup,
     gitDiffStat: merge.gitDiffStat,

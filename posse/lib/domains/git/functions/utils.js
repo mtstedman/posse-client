@@ -81,6 +81,10 @@ export async function gitCurrentHashAsync(cwd, options = {}) {
   return runGitNativeMethodAsync("git.currentHash", { cwd, refName: "HEAD" }, nativeAsyncOptions(options));
 }
 
+export async function gitStatusPorcelainAsync(cwd, args = [], options = {}) {
+  return runGitNativeMethodAsync("git.statusPorcelain", { cwd, args }, nativeAsyncOptions(options));
+}
+
 export function gitHasChanges(cwd, nativeParity = {}) {
   return runGitNativeMethod("git.hasChanges", { cwd }, nativeParity);
 }

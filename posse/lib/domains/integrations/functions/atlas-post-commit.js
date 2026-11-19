@@ -46,7 +46,8 @@ function headCommitFacts(cwd) {
 
 function commitRangePaths(cwd, fromSha, toSha) {
   if (!fromSha || !toSha) return [];
-  const raw = hookGitExecSafe(["diff", "--name-only", fromSha, toSha], cwd);
+  // Project-relative names, limited to the project: Atlas indexes `cwd`.
+  const raw = hookGitExecSafe(["diff", "--relative", "--name-only", fromSha, toSha], cwd);
   return raw.split("\n").map((line) => String(line || "").replace(/\\/g, "/").trim()).filter(Boolean);
 }
 

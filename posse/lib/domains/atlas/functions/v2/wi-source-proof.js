@@ -73,15 +73,18 @@ async function isAncestorCommit(cwd, ancestor, descendant, signal) {
 }
 
 /**
- * The commit's whole tracked snapshot (not the index, which can hold a
- * sibling job's staged work), as repo-relative path -> tree entry.
+ * The commit's whole tracked snapshot under `worktreePath` (not the index,
+ * which can hold a sibling job's staged work), as path -> tree entry. Paths are
+ * relative to `worktreePath`, the Atlas path space: for a project nested in its
+ * repository that is the project directory, and git's repository-relative
+ * names would match nothing in the ledger.
  *
  * @param {string} worktreePath
  * @param {string} commitSha
  * @returns {Promise<Map<string, { mode: string, type: string, oid: string }>>}
  */
 export async function wiCommitTree(worktreePath, commitSha) {
-  const listing = String(await gitExecAsync(["ls-tree", "-r", "-z", "--full-tree", commitSha], worktreePath, {
+  const listing = String(await gitExecAsync(["ls-tree", "-r", "-z", commitSha], worktreePath, {
     maxBuffer: WI_COMMIT_TREE_MAX_BUFFER,
   }));
   const entries = new Map();
@@ -96,15 +99,84 @@ export async function wiCommitTree(worktreePath, commitSha) {
 
 /**
  * Paths whose working-tree bytes differ from the commit, e.g. a sibling job's
- * staged or unstaged edits in the shared WI worktree.
+ * staged or unstaged edits in the shared WI worktree, relative to
+ * `worktreePath` like wiCommitTree.
  *
  * @param {string} worktreePath
  * @param {string} commitSha
  * @returns {Promise<Set<string>>}
  */
 export async function wiPathsDifferingFromCommit(worktreePath, commitSha) {
-  const out = await gitExecAsync(["diff", "--name-only", "--no-renames", "--no-color", "-z", commitSha, "--"], worktreePath);
+  const out = await gitExecAsync(["diff", "--relative", "--name-only", "--no-renames", "--no-color", "-z", commitSha, "--"], worktreePath);
   return new Set(String(out).split("\0").filter(Boolean));
+}
+
+/**
+ * Paths under `worktreePath` deleted from `commitSha`'s parent (none for a
+ * root commit) to `head`; a rename counts as a deletion of its old name.
+ *
+ * @param {string} worktreePath
+ * @param {string} commitSha
+ * @param {string} head
+ * @returns {Promise<string[]>}
+ */
+export async function wiCommitDeletedPaths(worktreePath, commitSha, head) {
+  let base = commitSha;
+  try {
+    base = String(await gitExecAsync(["rev-parse", "--verify", "--quiet", `${commitSha}^`], worktreePath)).trim() || commitSha;
+  } catch {
+    // A root commit has no parent; it deletes nothing itself.
+  }
+  const out = await gitExecAsync([
+    "diff", "--relative", "--name-only", "--no-renames", "--no-color", "-z", "--diff-filter=D", base, head, "--",
+  ], worktreePath, { trim: false });
+  return String(out).split("\0").filter(Boolean);
+}
+
+const HISTORY_DELETION_SAMPLE = 64;
+
+/** True when some commit reachable from `head` deleted one of `paths` (relative to `worktreePath`). */
+async function wiHistoryDeletesAny(worktreePath, head, paths) {
+  const sample = paths.slice(0, HISTORY_DELETION_SAMPLE);
+  if (sample.length === 0) return false;
+  try {
+    const out = await gitExecAsync([
+      "log", "-1", "--no-renames", "--diff-filter=D", "--format=%H", head, "--",
+      ...sample.map((repoRelPath) => `:(literal)${repoRelPath}`),
+    ], worktreePath);
+    return String(out).trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Refuse a refresh that would drop more of the WI's indexed paths than it
+ * keeps when the indexed commits delete nothing. A real change does not do
+ * that; a commit listing in a different path space from the ledger does
+ * (sweep 5 A1: repository-relative names against a project-relative ledger
+ * removed every path and mounted an empty view as verified). Paths still live
+ * in the checkout (untracked or edited) are restored by the live overlay, so
+ * they are not drops.
+ *
+ * @param {{ worktreePath: string, commitSha: string, head: string,
+ *   tree: Map<string, unknown>, snapshot: Map<string, unknown> }} args
+ */
+export async function assertWiRefreshKeepsSource({ worktreePath, commitSha, head, tree, snapshot }) {
+  const absent = [...snapshot.keys()].filter((repoRelPath) => !tree.has(repoRelPath));
+  const kept = snapshot.size - absent.length;
+  if (absent.length <= kept) return;
+  const live = new Set(await wiLivePaths(worktreePath, head));
+  const dropped = absent.filter((repoRelPath) => !live.has(repoRelPath));
+  if (dropped.length <= kept) return;
+  if ((await wiCommitDeletedPaths(worktreePath, commitSha, head)).length > 0) return;
+  // The ledger can predate commitSha's parent (coalesced warms keep only the
+  // newest commit; an earlier refresh may have failed), so an earlier commit
+  // that deleted a dropped path also explains the drop.
+  if (await wiHistoryDeletesAny(worktreePath, head, dropped)) return;
+  throw new Error(`WI source refresh would drop ${dropped.length} of ${snapshot.size} indexed paths `
+    + `(first: ${dropped[0]}) and keep ${kept}, but ${String(commitSha).slice(0, 12)}..${String(head).slice(0, 12)} `
+    + "deletes none; refusing to publish the WI view");
 }
 
 /**

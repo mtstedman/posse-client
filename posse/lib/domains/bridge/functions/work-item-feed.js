@@ -1,18 +1,28 @@
-import { gateQuestionChoiceEntries, validQuestionChoiceEntries } from "../../../catalog/question-choices.js";
 import crypto from "node:crypto";
 import path from "node:path";
 
 import { WORK_ITEM_BOUNDS, WORK_ITEM_FEED_EVENT_PROTOCOL } from "../../../catalog/bridge.js";
-import { FAILED_JOB_STATUSES, OPEN_HUMAN_GATE_JOB_STATUSES, PENDING_HUMAN_GATE_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
-import { humanGateNameForPayload } from "../../../catalog/human-input.js";
+import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { AGENT_ACTIVITY_PROTOCOL } from "../../../catalog/event.js";
+import { NUDGE_STATES, QUESTION_STATES } from "../../../catalog/work-item-interactions.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { listRunTelemetryFiles, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { getSetting } from "../../queue/functions/settings.js";
-import { jobHasLiveLeaseAt } from "../../queue/functions/lease-state.js";
-import { redactBridgeValue } from "./redaction.js";
+import { exactText, parseJsonObject, safeText } from "./feed-text.js";
+import {
+  actionMetadata,
+  projectGateQuestionContract,
+  sanitizeChoiceRecord,
+  storedChoiceRecord,
+  storedQuestionAction,
+  validStoredChoiceEntries,
+} from "./gate-question.js";
+import { QUESTION_INPUT_KINDS } from "../../../catalog/agent-conversation.js";
+import { agentCallLifecycleSummary, isAgentCallLifecycleActivity } from "./agent-activity-privacy.js";
 
+export { parseJsonObject, safeText } from "./feed-text.js";
 export {
   WORK_ITEM_ACTION_PROTOCOL,
   WORK_ITEM_BOUNDS,
@@ -40,50 +50,9 @@ const AGENT_FEEDBACK_PHASES = new Set([
 ]);
 const AGENT_FEEDBACK_STATUSES = new Set(["running", "blocked", "waiting", "verifying", "done"]);
 const TERMINAL_FEEDBACK_JOB_STATUSES = new Set(TERMINAL_JOB_STATUSES);
-const FAILED_JOB_STATUS_SET = new Set(FAILED_JOB_STATUSES);
-const QUESTION_STATES = new Set(["open", "pending", "answered", "rejected", "expired", "superseded", "closed"]);
 const QUESTION_KINDS = new Set(Object.keys(WORK_ITEM_QUESTION_CHOICE_IDS));
-const LIVE_OWNER_DELIVERY_QUESTION_KINDS = new Set([
-  "file_scope_approval", "assessment_review", "assessment_transport_recovery",
-  "assessment_retry_limit", "blocked_recovery", "partial_work_recovery",
-  "dead_letter_recovery", "pipeline_head_recovery", "unexecuted_replan_recovery",
-  "artifact_routing_admin", "one_shot_file_scope",
-]);
-const NUDGE_STATES = new Set([
-  "queued", "signaled", "retrieved", "accepted", "rejected", "deferred", "superseded", "expired",
-]);
 const ACKNOWLEDGEMENT_DECISIONS = new Set(["accepted", "rejected", "deferred"]);
-const QUESTION_CHOICE_IDS = WORK_ITEM_QUESTION_CHOICE_IDS;
 
-
-const QUESTION_CHOICE_COPY = Object.freeze({
-  approve: ["Approve", "Allow the exact requested transition."],
-  reject: ["Reject", "Reject the exact requested transition."],
-  pass: ["Pass", "Accept the current work as passing."],
-  fail: ["Fail", "Mark the current work as failed."],
-  skip: ["Skip", "Skip this work and continue where policy permits."],
-  replan: ["Replan", "Return the Work Item to its planning path."],
-  retry: ["Retry", "Retry through the canonical owner transition."],
-  send_back: ["Send back", "Return the implementation for repair and reassessment."],
-  retry_assessment: ["Retry assessment", "Run assessment again on the current implementation."],
-  explicit_waiver: ["Explicit waiver", "Accept the current work while recording that deterministic verification did not pass."],
-  "retry:claude": ["Retry with Claude", "Retry through the Claude provider path."],
-  "retry:anthropic": ["Retry with Anthropic API", "Retry through the direct Anthropic API provider path."],
-  "retry:openai": ["Retry with OpenAI", "Retry through the OpenAI provider path."],
-  "retry:codex": ["Retry with Codex", "Retry through the Codex provider path."],
-  "retry:grok": ["Retry with Grok", "Retry through the Grok provider path."],
-  extend: ["Extend", "Resume partial work with an extended turn budget."],
-  commit: ["Commit", "Commit the bounded partial output for assessment."],
-  revert: ["Revert", "Discard the bounded partial output."],
-  plan: ["Use planned flow", "Create a plan instead of a one-shot edit."],
-  cancel: ["Cancel request", "Stop without creating a continuation job."],
-  push: ["Push", "Run the repository-aware canonical push gate."],
-  decline: ["Decline", "Close this push offer without pushing."],
-  accept: ["Accept", "Accept the work item outcome and continue."],
-  abandon: ["Abandon", "Stop the affected work item without retrying it."],
-  wait: ["Wait", "Keep the dependent work item waiting for its upstream work."],
-  rebuild: ["Rebuild", "Rebuild the dependent work from the updated upstream state."],
-});
 
 export function normalizeRepositoryPath(value = process.cwd(), platform = process.platform) {
   let normalized = path.resolve(String(value || process.cwd())).replaceAll("\\", "/");
@@ -101,130 +70,10 @@ export function validateRepositoryBinding(args = {}, context = {}) {
   return { ok: true, repoPath: expected };
 }
 
-export function safeText(value, maxChars, { nullable = true } = {}) {
-  if (value == null) return nullable ? null : "";
-  const redacted = redactBridgeValue(String(value));
-  const text = String(redacted)
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
-    .trim();
-  if (!text) return nullable ? null : "";
-  return Array.from(text).slice(0, maxChars).join("");
-}
-
-export function parseJsonObject(value) {
-  if (value == null || value === "") return {};
-  if (typeof value === "object" && !Array.isArray(value)) return value;
-  try {
-    const parsed = JSON.parse(String(value));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function exactText(value, maxBytes, pattern = null) {
-  if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > maxBytes) return null;
-  if (pattern && !pattern.test(value)) return null;
-  return value;
-}
-
 function utcTimestamp(value, { nullable = false } = {}) {
   if (value == null && nullable) return null;
   if (typeof value !== "string" || !value.endsWith("Z") || !Number.isFinite(Date.parse(value))) return undefined;
   return value;
-}
-
-function choiceIdFromEntry(entry) {
-  if (typeof entry === "string") return entry;
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return "";
-  return String(entry.choice_id ?? entry.value ?? entry.id ?? "").trim();
-}
-
-function choiceDanger(choiceId) {
-  if (["fail", "revert"].includes(choiceId)) return "destructive";
-  if (["reject", "skip", "replan", "cancel", "decline"].includes(choiceId)) return "caution";
-  return "normal";
-}
-
-function storedChoiceRecord(entry) {
-  const choiceId = choiceIdFromEntry(entry);
-  if (!choiceId) return null;
-  const overrides = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
-  const [defaultLabel, defaultConsequence] = QUESTION_CHOICE_COPY[choiceId]
-    || [choiceId, "Run the exact owner transition."];
-  const danger = overrides.danger || choiceDanger(choiceId);
-  return {
-    choice_id: choiceId,
-    label: safeText(overrides.label || defaultLabel, 160, { nullable: false }),
-    consequence: safeText(overrides.consequence || overrides.description || defaultConsequence, 400, { nullable: false }),
-    danger,
-    requires_confirmation: overrides.requires_confirmation === true || danger === "destructive",
-  };
-}
-
-function validStoredChoiceEntries(kind, entries) {
-  return validQuestionChoiceEntries(kind, entries);
-}
-
-function storedQuestionKind(payload) {
-  try { return humanGateNameForPayload(payload); } catch { return "legacy_unstructured"; }
-}
-
-function storedQuestionChoices(kind, payload) {
-  if (kind === "legacy_unstructured") return [];
-  const entries = kind === "one_shot_file_scope"
-    ? payload?.selector?.options
-    : gateQuestionChoiceEntries(kind, payload);
-  if ((!Array.isArray(entries) || entries.length === 0) && LIVE_OWNER_DELIVERY_QUESTION_KINDS.has(kind)) {
-    return (QUESTION_CHOICE_IDS[kind] || []).map(storedChoiceRecord).filter(Boolean);
-  }
-  if (!validStoredChoiceEntries(kind, entries)) {
-
-    return [];
-  }
-  return entries.map((entry) => storedChoiceRecord(entry)).filter(Boolean);
-}
-
-function questionStateForJob(job) {
-  // History replay may observe a gate job before reconciliation has copied a
-  // completed durable contract back onto the job row. Never turn that stale
-  // row into a fresh actionable question.
-  if (job?.human_gate_state === "resolved") return "answered";
-  if (job?.human_gate_state === "superseded") return "rejected";
-  if (job?.human_gate_state === "resolving") return "pending";
-  if (OPEN_HUMAN_GATE_JOB_STATUSES.includes(job?.status)) return "open";
-  if (PENDING_HUMAN_GATE_JOB_STATUSES.includes(job?.status)) return "pending";
-  if (job?.status === "succeeded") return "answered";
-  if (FAILED_JOB_STATUS_SET.has(job?.status)) return "rejected";
-  return "closed";
-}
-
-function observedQuestionStateForJob(job, observedAt = new Date().toISOString(), {
-  allowLiveOwnerDelivery = false,
-} = {}) {
-  const state = questionStateForJob(job);
-  if (state !== "open" || !jobHasLiveLeaseAt(job, observedAt)) return state;
-  return allowLiveOwnerDelivery ? "open" : "pending";
-}
-
-function storedQuestionAction(db, questionId) {
-  try {
-    return db.prepare(`
-      SELECT * FROM agent_interactions
-      WHERE kind = 'approval'
-        AND json_extract(metadata_json, '$.work_item_action.action_kind') = 'question.answer'
-        AND json_extract(metadata_json, '$.work_item_action.target.question_id') = ?
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(questionId) || null;
-  } catch {
-    return null;
-  }
-}
-
-function actionMetadata(row) {
-  const action = parseJsonObject(row?.metadata_json).work_item_action;
-  return action && typeof action === "object" && !Array.isArray(action) ? action : null;
 }
 
 function questionAnswerFromAction(actionRow, fallbackEventId = null) {
@@ -245,22 +94,6 @@ function structuredRelationship(relationships, kinds, targetId) {
   ));
 }
 
-function sanitizeChoiceRecord(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const choiceId = exactText(value.choice_id, 128);
-  const label = safeText(value.label, 160, { nullable: false });
-  const consequence = safeText(value.consequence, 400, { nullable: false });
-  if (!choiceId || !label || !consequence || !["normal", "caution", "destructive"].includes(value.danger)
-    || typeof value.requires_confirmation !== "boolean") return null;
-  return {
-    choice_id: choiceId,
-    label,
-    consequence,
-    danger: value.danger,
-    requires_confirmation: value.requires_confirmation,
-  };
-}
-
 export function sanitizeQuestionRecord(value, event = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const questionId = exactText(value.question_id, 256, /^(?:gate:[1-9]\d*:(?:0|[1-9]\d*)|interaction:[1-9]\d*)$/);
@@ -275,7 +108,7 @@ export function sanitizeQuestionRecord(value, event = {}) {
   const generation = exactText(value.generation, 128, /^(?:0|[1-9]\d*)$/);
   if (!questionId || !workItemId || !jobId || (value.attempt_id != null && !attemptId)
     || (value.agent_call_id != null && !agentCallId) || !QUESTION_KINDS.has(value.kind)
-    || !["single_choice", "informational"].includes(value.input_kind) || !promptSummary
+    || !QUESTION_INPUT_KINDS.includes(value.input_kind) || !promptSummary
     || !QUESTION_STATES.has(value.state) || openedAt === undefined || expiresAt === undefined || !generation
     || !Array.isArray(value.choices) || value.choices.length > 32) return null;
   const choices = value.choices.map(sanitizeChoiceRecord);
@@ -628,6 +461,9 @@ function projectedAgentActivity(row, event, db) {
   if (!Number.isSafeInteger(interactionId) || interactionId <= 0) return null;
   let activity;
   try {
+    // actor_id names an interaction only on agent_feedback events. Job-phase,
+    // model and commentary events reuse it for a job or agent-call id, so the
+    // lookup stays inside the row's own Work Item and job.
     activity = db.prepare(`
       SELECT
         ai.*, jobs.job_type, jobs.status AS job_status,
@@ -636,13 +472,18 @@ function projectedAgentActivity(row, event, db) {
       LEFT JOIN jobs ON jobs.id = ai.job_id
       LEFT JOIN agent_calls calls ON calls.id = ai.agent_call_id
       WHERE ai.id = ? AND ai.kind = 'activity' AND ai.direction = 'agent_to_user'
-    `).get(interactionId);
+        AND ai.work_item_id = ? AND ai.job_id IS ?
+    `).get(interactionId, Number(row.work_item_id), row.job_id == null ? null : Number(row.job_id));
   } catch {
     return null;
   }
   if (!activity) return null;
   const metadata = parseJsonObject(activity.metadata_json);
   const phase = String(metadata.phase || "");
+  // Inside one job a call id can still equal a feedback interaction id. The
+  // feedback envelope carries the interaction's own phase; anything else is
+  // a different event that only shares the number.
+  if (event.protocol === AGENT_ACTIVITY_PROTOCOL && event.phase != null && String(event.phase) !== phase) return null;
   const status = String(metadata.status || metadata.action || "");
   const summary = safeText(activity.body, 180, { nullable: false });
   if (!AGENT_FEEDBACK_PHASES.has(phase) || !AGENT_FEEDBACK_STATUSES.has(status) || !summary) return null;
@@ -689,25 +530,14 @@ function projectedGateQuestion(row, event, db, questionId, kind) {
     `).get(Number(match[1]), row.work_item_id);
   } catch { return null; }
   if (!job || job.job_type !== "human_input") return null;
-  const payload = parseJsonObject(job.payload_json);
-  const rawQuestions = Array.isArray(payload.questions) && payload.questions.length > 0
-    ? payload.questions
-    : [payload.prompt || job.title || "Human input requested"];
-  const questionKind = storedQuestionKind(payload);
-  const choices = storedQuestionChoices(questionKind, payload);
-  const questions = choices.length > 0 && rawQuestions.length > 1
-    ? [rawQuestions.join("\n\n")]
-    : rawQuestions;
-  const index = Number(match[2]);
-  if (!Number.isSafeInteger(index) || index < 0 || index >= questions.length) return null;
-  const actionRow = storedQuestionAction(db, questionId);
-  const action = actionMetadata(actionRow);
-  let state = observedQuestionStateForJob(job, new Date().toISOString(), {
-    allowLiveOwnerDelivery: LIVE_OWNER_DELIVERY_QUESTION_KINDS.has(questionKind),
+  const contract = projectGateQuestionContract(db, job, {
+    questionIndex: Number(match[2]),
+    observedAt: new Date().toISOString(),
   });
-  if (["reserved", "delivered"].includes(action?.state) && ["open", "pending"].includes(state)) {
-    state = "pending";
-  }
+  if (!contract) return null;
+  const actionRow = contract.action_row;
+  const action = contract.action;
+  let state = contract.state;
   if (kind === "answer") state = action?.result?.question_state
     || (event.outcome === "accepted" ? "answered" : "rejected");
   const fallbackEventId = kind === "answer" ? `event:${row.id}` : null;
@@ -717,7 +547,7 @@ function projectedGateQuestion(row, event, db, questionId, kind) {
     if (!choiceId) return null;
     answer = { choice_id: choiceId, answered_at: row.created_at, result_event_id: fallbackEventId };
   }
-  const actionable = kind === "question" && state === "open" && choices.length > 0 && questionKind !== "legacy_unstructured";
+  const actionable = kind === "question" && contract.actionable;
   const attemptId = decimalId(row.attempt_id);
   const agentCallId = decimalId(event.agent_call_id);
   const question = {
@@ -726,19 +556,15 @@ function projectedGateQuestion(row, event, db, questionId, kind) {
     job_id: String(job.id),
     attempt_id: attemptId,
     agent_call_id: agentCallId,
-    kind: questionKind,
-    input_kind: choices.length > 0 ? "single_choice" : "informational",
-    prompt_summary: safeText(questions[index], 2000, { nullable: false }),
-    context_summary: safeText(payload.context || payload.prompt, 1000),
+    kind: contract.kind,
+    input_kind: contract.input_kind,
+    prompt_summary: contract.prompt_summary,
+    context_summary: contract.context_summary,
     state,
     opened_at: job.created_at,
-    expires_at: payload.expires_at || null,
-    generation: String(
-      action?.descriptor?.question_generation
-      ?? job.human_gate_generation
-      ?? 1
-    ),
-    choices,
+    expires_at: contract.expires_at,
+    generation: contract.generation,
+    choices: contract.choices,
     capability: actionable ? "question.answer" : null,
     answer,
     unavailable_reason: actionable || state !== "open" ? null : "unstructured_choices",
@@ -953,7 +779,12 @@ export function projectFeedEvent(row, { db = getDb() } = {}) {
   const activity = kind === "agent_update" ? projectedAgentActivity(row, event, db) : null;
   const nudge = kind === "nudge" ? projectedNudge(row, event, db) : null;
   const question = ["question", "answer"].includes(kind) ? projectedQuestion(row, event, db, kind) : null;
-  const semantic = activity || nudge || question;
+  // A provider call's lifecycle summary is its activity text, which for a
+  // delegated child is the delegated question; project identity and status.
+  const callLifecycle = kind === "agent_update" && !activity && isAgentCallLifecycleActivity(row, event)
+    ? { summary: agentCallLifecycleSummary(row.actor_type, event.status), detail: null }
+    : null;
+  const semantic = activity || nudge || question || callLifecycle;
   const semanticEvent = semantic ? { ...event, ...semantic } : event;
   const state = semantic?.state
     || (kind === "agent_update" ? statusForAgentUpdate(event) : safeText(event.state, 80) || "unknown");

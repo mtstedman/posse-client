@@ -26,10 +26,15 @@ export function normalizeModelId(value) {
   return id.toLowerCase();
 }
 
+// Number(null) is 0: an absent rate must stay absent, never become free.
+function rateNumber(value) {
+  return value == null ? NaN : Number(value);
+}
+
 export function normalizePricing(raw) {
   if (raw == null || typeof raw !== "object") return null;
-  const input = Number(raw.input_per_million_usd);
-  const output = Number(raw.output_per_million_usd);
+  const input = rateNumber(raw.input_per_million_usd);
+  const output = rateNumber(raw.output_per_million_usd);
   const validRate = (value) => Number.isFinite(value) && value >= 0 && value <= MAX_PRICE_PER_MILLION_USD;
   if (!validRate(input) || !validRate(output)) return null;
   let cachedInput = null;
@@ -196,9 +201,9 @@ export function reviveStoredCatalog(parsed) {
 
 export function normalizeStoredPricing(pricing) {
   if (pricing == null || typeof pricing !== "object") return null;
-  const input = Number(pricing.input);
-  const output = Number(pricing.output);
+  const input = rateNumber(pricing.input);
+  const output = rateNumber(pricing.output);
   if (!Number.isFinite(input) || !Number.isFinite(output)) return null;
-  const cachedInput = Number(pricing.cachedInput);
+  const cachedInput = rateNumber(pricing.cachedInput);
   return { input, output, cachedInput: Number.isFinite(cachedInput) ? cachedInput : null };
 }

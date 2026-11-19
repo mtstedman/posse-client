@@ -6,18 +6,20 @@
 import crypto from "node:crypto";
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
-import { SESSION_COMPUTE_OWNERS, SESSION_COMPUTE_POLICIES, SESSION_JOB_PROTOCOL, SESSION_PACKET_PROTOCOL, SESSION_JOB_OFFER_TTL_MS, SESSION_JOB_CLAIM_TTL_MS, SESSION_ROUTABLE_JOB_TYPES, defaultSessionComputeOwner } from "../../../catalog/session-sync.js";
+import { SESSION_COMPUTE_OWNERS, SESSION_COMPUTE_POLICIES, SESSION_JOB_HOLD_REASONS, SESSION_JOB_PROTOCOL, SESSION_PACKET_PROTOCOL, SESSION_JOB_OFFER_TTL_MS, SESSION_JOB_CLAIM_TTL_MS, SESSION_ROUTABLE_JOB_TYPES, defaultSessionComputeOwner } from "../../../catalog/session-sync.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { adminGitExecAsync } from "../../git/functions/admin-git.js";
 import { casPushSharedTrunkClaimNative } from "../../git/functions/shared-trunk-native.js";
 import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
-import { getLivePairingState } from "../../pairing/functions/state.js";
+import { getLivePairingState, sessionInstanceId } from "../../pairing/functions/state.js";
 import { leasedToSessionHost, normalizeComputeOwner, offersSessionWorkTo, ownComputeOwner } from "../../pairing/functions/compute-lease.js";
 import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
-import { createJob, createWorkItem, getWorkItem, logEvent, refreshWorkItemStatus, updateJobProvider, updateJobStatus, updateWorkItemStatus } from "./queue-store.js";
+import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { completionBlockersForWorkItem, createJob, createWorkItem, getWorkItem, logEvent, refreshWorkItemStatus, setMergeState, updateJobProvider, updateJobStatus, updateWorkItemStatus } from "./queue-store.js";
 import { now, runImmediateTransaction } from "./common.js";
+import { logDurableEvent } from "./events.js";
+import { PIPELINE_BOOTSTRAP_JOB_TYPES } from "./work-item-execution-contract.js";
 
 // These names were already exported from this module; preserve that API while
 // the catalog owns their canonical values.
@@ -214,25 +216,130 @@ export function sessionMustWaitForHost(state, job) {
     && !parseJson(job?.payload_json).session_delegation;
 }
 
+/**
+ * The session host when it is in the session, advertises that it runs this
+ * job type, and lists the providers it runs without this job's provider: it
+ * will never take the job. An absent host, one with no advert yet, or one out
+ * of headroom may still take it, so those return null.
+ */
+function presentHostLackingProvider(peers, job) {
+  if (!job?.provider) return null;
+  const host = (Array.isArray(peers) ? peers : []).find((peer) => peer?.role === "host");
+  const capabilities = host?.capabilities || {};
+  if (!Array.isArray(capabilities.job_types) || !capabilities.job_types.includes(job.job_type)) return null;
+  if (!Array.isArray(capabilities.providers) || capabilities.providers.includes(job.provider)) return null;
+  return host;
+}
+
+/**
+ * A provider that can stand in for the one the present host lacks: any the
+ * host advertises with headroom (preferring one in this job's role pool on
+ * this clone), meeting the job's hard needs (an image job needs an
+ * image-capable chat provider). The host re-resolves against its own pool. A provider the
+ * planner pinned is substituted too: no job field marks a pin as required,
+ * and the one hard capability provider selection checks, image generation,
+ * is required of the substitute. Null when none fits.
+ */
+async function hostSubstituteProvider(host, job) {
+  // Provider policy imports the queue, so it loads on first use (as
+  // commit-message-policy.js does); a module-level import deadlocks the cycle.
+  const [
+    { delegationRoleForJobType, selectFallbackProvider },
+    { needsImageGeneration, shouldPreservePinnedProvider },
+    { getAvailableProviders },
+  ] = await Promise.all([
+    import("../../providers/functions/delegation-routing.js"),
+    import("../../providers/functions/execution-routing.js"),
+    import("../../providers/functions/provider.js"),
+  ]);
+  const role = delegationRoleForJobType(job.job_type);
+  const pool = getAvailableProviders(role);
+  const needsImages = role === "artificer" && needsImageGeneration(parseJson(job.payload_json));
+  // The host runs the job on its own machine and account, so what this
+  // clone's pool allows does not limit the choice (Mason, 2026-11-19): any
+  // provider the host advertises with headroom will do. One this clone also
+  // runs for the role is preferred, as the closest to what was planned.
+  const advertised = (host?.capabilities?.providers || []).filter((name) => peerHeadroomAllows(host, name));
+  const candidates = [...pool.filter((name) => advertised.includes(name)), ...advertised.filter((name) => !pool.includes(name))];
+  const provider = selectFallbackProvider(candidates, job.provider, needsImages);
+  return provider
+    ? { provider, role, pool, inPool: pool.includes(provider), pinned: shouldPreservePinnedProvider(job, role, pool) }
+    : null;
+}
+
+/**
+ * Move a held job onto its substitute provider and say so once; returns the
+ * job as it now stands. The host runs work within its own pool for the job's
+ * role, and its advert lists only the providers it runs for any role (the
+ * Remote keeps job_types, providers, tier and headroom), so this clone cannot
+ * know whether the substitute is in that pool: the host selects the provider.
+ */
+function substituteHostProvider(job, host, substitute) {
+  const from = job.provider;
+  const to = substitute.provider;
+  updateJobProvider(job.id, to, null);
+  logEvent({
+    work_item_id: job.work_item_id,
+    job_id: job.id,
+    event_type: EVENT_TYPES.JOB_PROVIDER_REROUTED,
+    actor_type: EVENT_ACTORS.SCHEDULER,
+    message: `Job #${job.id} needs ${from}, which the session host does not run; offered to the host on ${to}, `
+      + (substitute.inPool
+        ? `which the host advertises and this clone's ${substitute.role} providers allow`
+        : `which the host advertises (the host runs the job, so this clone's ${substitute.role} providers do not limit it)`)
+      + (substitute.pinned ? ` (in place of the ${from} the job was assigned; it needs no capability only ${from} has)` : "")
+      + `. The host runs it on its own ${substitute.role} provider if ${to} is not in that pool.`,
+    event_json: JSON.stringify({
+      reason: SESSION_JOB_HOLD_REASONS.HOST_LACKS_PROVIDER,
+      from,
+      to,
+      provider_pool: substitute.pool,
+      host_instance_id: host.instance_id || null,
+      pinned: substitute.pinned,
+      host_selects_provider: true,
+    }),
+  });
+  return { ...job, provider: to, model_name: null };
+}
+
+/** Why a host-leased job cannot start while the host lacks its provider, and the two ways out. */
+export function sessionHostLacksProviderText(job, provider = job?.provider) {
+  return `Job #${job?.id} needs provider ${provider}, which the session host does not run, `
+    + "and this clone's lease sends its work to the host, so it never runs here. "
+    + "The host can run `posse session lease <member-id> member` to let this clone run its own work, "
+    + `or configure ${provider} on the host.`;
+}
+
 export async function offerSessionJob(job, {
   projectDir = process.cwd(),
   state = getLivePairingState(),
   snapshot = readPairingPeerSnapshot(),
-  instanceId = ensureBridgeInstanceId(projectDir),
+  instanceId = sessionInstanceId(projectDir, state),
   casPush = casPushSharedTrunkClaimNative,
   localCanRun = localProviderCanRun(job),
 } = {}) {
   const peers = (snapshot?.peers || []).filter((peer) => peer.instance_id !== instanceId);
-  const executors = sessionJobExecutors(state, job, peers, { localCanRun });
+  let executors = sessionJobExecutors(state, job, peers, { localCanRun });
+  // A present host without the job's provider runs it on a viable substitute.
+  if (executors.length === 0 && sessionMustWaitForHost(state, job)) {
+    const host = presentHostLackingProvider(peers, job);
+    const substitute = host ? await hostSubstituteProvider(host, job) : null;
+    if (substitute) {
+      job = substituteHostProvider(job, host, substitute);
+      executors = sessionJobExecutors(state, job, peers, { localCanRun });
+    }
+  }
   const target = executors[0];
   if (!target) {
     // A host lease whose host cannot take this job right now does NOT run it
     // here: the caller holds the job until the host can (see
-    // sessionMustWaitForHost). Say so to the caller.
-    return {
-      delegated: false,
-      reason: sessionMustWaitForHost(state, job) ? "host_unavailable" : "local_execution",
-    };
+    // sessionMustWaitForHost). Say so to the caller, and say when the host is
+    // here but does not run the job's provider, which waiting cannot fix.
+    if (!sessionMustWaitForHost(state, job)) return { delegated: false, reason: "local_execution" };
+    const host = presentHostLackingProvider(peers, job);
+    return host
+      ? { delegated: false, reason: SESSION_JOB_HOLD_REASONS.HOST_LACKS_PROVIDER, provider: job.provider, hostInstanceId: host.instance_id }
+      : { delegated: false, reason: SESSION_JOB_HOLD_REASONS.HOST_UNAVAILABLE };
   }
   const workItem = getWorkItem(job.work_item_id);
   if (!workItem) return { delegated: false, reason: "missing_work_item" };
@@ -446,16 +553,18 @@ function importPacketRows(packet, executorInstanceId, offerKey, claimOid, { comp
 }
 
 export async function reconcileSessionDelegationCommits(projectDir = process.cwd(), {
-  instanceId = ensureBridgeInstanceId(projectDir),
   execGit = adminGitExecAsync,
   casPush = casPushSharedTrunkClaimNative,
 } = {}) {
   const state = getLivePairingState();
+  // The delegations this clone originated (an executor's import always has a
+  // local job), each matched under the identity it was offered with: once its
+  // session has ended, a phone pairing may have replaced the bridge identity.
   const rows = getDb().prepare(`
     SELECT * FROM work_item_delegations
-    WHERE originator_instance_id=? AND state IN ('offered','claimed','running')
+    WHERE local_job_id IS NULL AND state IN ('offered','claimed','running')
     ORDER BY created_at
-  `).all(instanceId);
+  `).all();
   if (rows.length === 0) return { inspected: 0, merged: 0 };
   let output;
   try {
@@ -467,18 +576,54 @@ export async function reconcileSessionDelegationCommits(projectDir = process.cwd
   } catch {
     return { inspected: rows.length, merged: 0, unavailable: true };
   }
-  const messages = String(output || "").split("\x1e").map((entry) => entry.slice(entry.indexOf("\x1f") + 1));
+  const commits = String(output || "").split("\x1e").map((entry) => {
+    const separator = entry.indexOf("\x1f");
+    return { hash: separator >= 0 ? entry.slice(0, separator).trim() || null : null, message: entry.slice(separator + 1) };
+  });
+  const terminal = new Set(TERMINAL_JOB_STATUSES);
   let merged = 0;
   for (const row of rows) {
-    const trailer = `Posse-Origin-Work-Item: ${instanceId}:${row.origin_work_item_id}`;
-    if (!messages.some((message) => message.split(/\r?\n/u).includes(trailer))) continue;
-    if (!updateJobStatus(row.origin_job_id, "succeeded", { expectedStatuses: ["blocked"] })) continue;
-    getDb().prepare(`
-      UPDATE work_item_delegations
-      SET state='merged', completed_at=COALESCE(completed_at, ?), updated_at=?
-      WHERE offer_key=?
-    `).run(now(), now(), row.offer_key);
-    refreshWorkItemStatus(row.origin_work_item_id);
+    const trailer = `Posse-Origin-Work-Item: ${row.originator_instance_id}:${row.origin_work_item_id}`;
+    const commit = commits.find(({ message }) => message.split(/\r?\n/u).includes(trailer));
+    if (!commit) continue;
+    // One transaction: the work item is never refreshed with the job settled
+    // but without the merge evidence that job's delegation carries.
+    const settled = runImmediateTransaction(getDb(), () => {
+      if (!updateJobStatus(row.origin_job_id, "succeeded", { expectedStatuses: ["blocked"] })) return false;
+      getDb().prepare(`
+        UPDATE work_item_delegations
+        SET state='merged', completed_at=COALESCE(completed_at, ?), updated_at=?
+        WHERE offer_key=?
+      `).run(now(), now(), row.offer_key);
+      // A delegated plan or research job handed the executor this work item's
+      // whole pipeline, and the trailer proves that work is on trunk: the
+      // executor's merge is this work item's merge. Local work still to run
+      // keeps the work item's own merge, as does a delegated dev job, which is
+      // one step of a pipeline whose other steps may be on a local branch.
+      if (PIPELINE_BOOTSTRAP_JOB_TYPES.has(row.job_type)
+        && !completionBlockersForWorkItem(row.origin_work_item_id).some((job) => !terminal.has(job.status))) {
+        const alreadyMerged = getWorkItem(row.origin_work_item_id)?.merge_state === "merged";
+        setMergeState(row.origin_work_item_id, "merged");
+        // The merge record every other merge path writes (merge evidence,
+        // the work item's outcome and the run monitor read it), once.
+        if (!alreadyMerged) logDurableEvent({
+          work_item_id: row.origin_work_item_id,
+          job_id: row.origin_job_id,
+          event_type: EVENT_TYPES.WORK_ITEM_MERGED,
+          actor_type: EVENT_ACTORS.SCHEDULER,
+          message: `Merged on trunk by session executor ${row.executor_instance_id || "(unknown)"} at ${commit.hash || "(unknown)"}`,
+          event_json: JSON.stringify({
+            merge_hash: commit.hash,
+            offer_key: row.offer_key,
+            executor_instance_id: row.executor_instance_id || null,
+            trailer,
+          }),
+        });
+      }
+      refreshWorkItemStatus(row.origin_work_item_id);
+      return true;
+    });
+    if (!settled) continue;
     logEvent({
       work_item_id: row.origin_work_item_id,
       job_id: row.origin_job_id,

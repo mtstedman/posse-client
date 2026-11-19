@@ -4,16 +4,20 @@ import path from "node:path";
 import { safePath, isSensitiveEnvFileOrTargetPath } from "../../../shared/tools/functions/toolkit/index.js";
 import { protectedMutablePathReason } from "../../runtime/functions/protected-paths.js";
 import { gitCommitAll } from "../../git/functions/commit-scope.js";
+import { gitProjectPrefix } from "../../git/functions/project-paths.js";
 import { gitExec, gitExecSafe } from "../../git/functions/utils.js";
 import { withWorktreeLock } from "../../git/functions/worktree.js";
 
-// The worktree lock is keyed by the primary checkout's runtime root, where
-// review commits, merges and dirty-worktree resets take theirs for the same
-// checkout. A lock keyed by the linked worktree itself excludes none of them.
+// The worktree lock is keyed by the project directory in the primary checkout,
+// whose runtime root holds the locks the worker and review commits take for
+// the same work item worktree. A lock keyed by the linked worktree itself
+// excludes none of them. In a nested project the job runs at wi-N/<prefix> and
+// its project directory is <prefix> in the primary checkout, not the
+// repository top level.
 function scopeCreateProjectDir(workspaceCwd) {
   const commonDir = gitExecSafe(["rev-parse", "--path-format=absolute", "--git-common-dir"], workspaceCwd);
-  if (commonDir && path.basename(commonDir) === ".git") return path.dirname(commonDir);
-  return workspaceCwd;
+  if (!commonDir || path.basename(commonDir) !== ".git") return workspaceCwd;
+  return path.join(path.dirname(commonDir), gitProjectPrefix(gitExec, workspaceCwd));
 }
 
 // workspaceCwd comes from the executing host, never from tool arguments. Keep

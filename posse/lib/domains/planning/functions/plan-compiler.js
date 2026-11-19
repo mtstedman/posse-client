@@ -51,7 +51,8 @@ import { broadNarrowScopedCodeTaskSignal, parseUnderScopedBroadGateMode } from "
 import { pruneIgnoredModifyScope, reconcilePlannerFileKinds } from "./scope-reconciliation.js";
 import { dependencyIndexesAfterSplit, rewriteDependenciesAfterSplit, rewriteDependenciesAroundPostMergeDbTasks } from "./dependency-rewrite.js";
 import { cancelSupersededPlanChildren } from "./plan-cleanup.js";
-import { normalizeExplicitImageGenerationTask, resolvePromoteSourceDir, rewriteTaskImageOutputPaths, routePromoteTaskByOutputDir, splitTaskByCreateFileKind } from "./task-splitting.js";
+import { placePlannerTaskQuestions } from "./planner-question-gates.js";
+import { imageRenamesWithLinkedPaths, normalizeExplicitImageGenerationTask, resolvePromoteSourceDir, rewriteTaskImageOutputPaths, routePromoteTaskByOutputDir, splitTaskByCreateFileKind } from "./task-splitting.js";
 import { ASSESSABLE_JOB_TYPES, TERMINAL_JOB_STATUSES, WORKTREE_JOB_TYPES } from "../../../catalog/job.js";
 import { normPath } from "../../../shared/scope/functions/path.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -1132,8 +1133,9 @@ function compileJobsFromPlan(worker, planJob, tasks, {
       }
       if (planRasterReplacements.size > 0) {
         const replacements = [...planRasterReplacements.entries()];
+        const linkedReplacements = imageRenamesWithLinkedPaths(tasks, replacements);
         for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
-          tasks[taskIndex] = rewriteTaskImageOutputPaths(tasks[taskIndex], replacements);
+          tasks[taskIndex] = rewriteTaskImageOutputPaths(tasks[taskIndex], linkedReplacements);
         }
         for (const [from, to] of replacements) {
           worker.emit(
@@ -1347,25 +1349,65 @@ function compileJobsFromPlan(worker, planJob, tasks, {
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: invalid job_type "${t.job_type}" in task "${t.title}" — defaulting to "dev"`);
         }
         if (jobType === "human_input") {
-          const gate = spawnFromRole(plannerRole, "succeeded", "human_input", {
+          const questions = Array.isArray(t.questions) && t.questions.length > 0
+            ? t.questions : [t.task_spec || t.instructions || t.title];
+          const spawnGate = (parentJobId) => spawnFromRole(plannerRole, "succeeded", "human_input", {
             work_item_id: planJob.work_item_id,
             title: t.title,
-            parent_job_id: planJob.id,
+            parent_job_id: parentJobId,
             priority: t.priority || planJob.priority || "normal",
             model_tier: "cheap",
             payload_json: JSON.stringify({
-              questions: Array.isArray(t.questions) && t.questions.length > 0
-                ? t.questions : [t.task_spec || t.instructions || t.title],
+              questions,
               context: t.task_spec || null,
               allow_best_judgment: false,
             }),
           });
-          allCreatedJobIds.add(gate.id);
-          humanInputGateIds.push(gate.id);
+          const questionOwner = {
+            questions,
+            taskIndex: Number.isInteger(t._planner_index) ? t._planner_index : i,
+            title: t.title,
+          };
+          // createJob returns the plan's open gate for a second human_input
+          // task: its questions join that gate rather than being dropped.
+          let gate = spawnGate(planJob.id);
+          let placement = placePlannerTaskQuestions(gate.id, questionOwner);
+          if (!placement.ok) {
+            // The open gate is being answered and cannot take more questions.
+            // The plan holds its one open gate slot, so ask on a gate of its
+            // own that follows the one being answered.
+            const busyGateId = gate.id;
+            gate = spawnGate(busyGateId);
+            placement = placePlannerTaskQuestions(gate.id, questionOwner);
+            if (!placement.ok) {
+              throw new Error(`Planner task "${t.title}" could not ask its questions: gate #${gate.id} ${placement.reason}`);
+            }
+            worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: gate #${busyGateId} is being answered; task "${t.title}" asks on gate #${gate.id}`);
+          } else if (placement.shared) {
+            worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: task "${t.title}" asks its questions on gate #${gate.id}`);
+            logEvent({
+              work_item_id: planJob.work_item_id,
+              job_id: gate.id,
+              event_type: EVENT_TYPES.PLAN_HUMAN_INPUT_MERGED,
+              actor_type: EVENT_ACTORS.SYSTEM,
+              message: `Added the questions of planner task "${t.title}" to open gate #${gate.id}`,
+              event_json: JSON.stringify({
+                gate_job_id: gate.id,
+                task_index: questionOwner.taskIndex,
+                task_title: t.title,
+                question_ids: placement.question_ids,
+                appended_question_ids: placement.appended_question_ids,
+              }),
+            });
+          }
+          if (!allCreatedJobIds.has(gate.id)) {
+            allCreatedJobIds.add(gate.id);
+            createdCount++;
+          }
+          if (!humanInputGateIds.includes(gate.id)) humanInputGateIds.push(gate.id);
           recordCompiledTaskJob(i, gate.id);
           jobMap.set(i, gate.id);
           recordPlannerDependencies(gate, t, i);
-          createdCount++;
           continue;
         }
         // Planner output can cross the tier and effort enums; resolve known
@@ -1553,11 +1595,12 @@ function compileJobsFromPlan(worker, planJob, tasks, {
         let normalizedJobType = PLANNER_ALLOWED_TYPES.has(t.job_type) ? t.job_type : jobType;
         const fileKindRoute = splitTaskByCreateFileKind(t, i, artifactDirAbs, { taskMode, normalizedJobType, wiMode });
         if (fileKindRoute?.replacements?.length > 0) {
+          const linkedReplacements = imageRenamesWithLinkedPaths(tasks, fileKindRoute.replacements);
           for (let siblingIndex = 0; siblingIndex < tasks.length; siblingIndex += 1) {
             if (siblingIndex === i) continue;
             tasks[siblingIndex] = rewriteTaskImageOutputPaths(
               tasks[siblingIndex],
-              fileKindRoute.replacements,
+              linkedReplacements,
             );
           }
           for (const [from, to] of fileKindRoute.replacements) {
@@ -2108,6 +2151,13 @@ function compileJobsFromPlan(worker, planJob, tasks, {
           });
           if (!promoteClaim.ok) {
             dropDuplicatePromoteTask(promoteClaim, t.title);
+            // The surviving promote installs the same destinations: wait on it,
+            // as a superseded promote's dependents do.
+            const survivor = promoteClaimsByJobId.get(promoteClaim.conflict.jobId);
+            if (survivor) {
+              survivor.taskIndexes.push(i);
+              jobMap.set(i, survivor.jobId);
+            }
             continue;
           }
         }
@@ -2137,7 +2187,19 @@ function compileJobsFromPlan(worker, planJob, tasks, {
               ? validatePlannerTestCommandForRepository(declaredTestCommand, planReadRoot, { filesToCreate: t.files_to_create || [] })
               : testCommandValidation;
             plannerTestCommandValid = repositoryValidation.ok;
-            if (testCommandValidation.ok && !repositoryValidation.ok) {
+            // A Node script with arguments in a repository that declares no
+            // runner is an operational command, not an invalid test.
+            const undeclaredRunnerApproval = testCommandValidation.ok
+              && repositoryValidation.reason === "repository_test_runner_not_declared"
+              ? operationalCommandApprovalRequest(declaredTestCommand, { cwd: planReadRoot })
+              : null;
+            if (undeclaredRunnerApproval) {
+              operationalCommandApproval = undeclaredRunnerApproval;
+              worker.emit(
+                planJob.id,
+                `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: test command "${declaredTestCommand.slice(0, 60)}" for task "${t.title}" is an operational command (${repositoryValidation.reason}) — assessor policy treats the task as untested; exact-command human approval is required before post-change execution`,
+              );
+            } else if (testCommandValidation.ok && !repositoryValidation.ok) {
               rejectedPlannerTestCommand = {
                 schema_version: 1,
                 failure_class: "verification_plan_invalid",
@@ -2690,6 +2752,40 @@ function compileJobsFromPlan(worker, planJob, tasks, {
         }
       }
 
+      // Answering a clarification resolves the question, not the requirement.
+      // Mixed plans also need a continuation, even if independent work passes.
+      // It waits only on gates still live (a dropped prerequisite may have
+      // canceled one), and is spawned before the approval gate so a rejected
+      // plan cancels its continuation with the rest of the batch.
+      const liveHumanInputGateIds = humanInputGateIds.filter((gateId) => {
+        const gateJob = getJob(gateId);
+        return gateJob && !TERMINAL_JOB_STATUSES.includes(gateJob.status);
+      });
+      if (modality.requiresHumanInputContinuation && liveHumanInputGateIds.length > 0) {
+        const deferralRound = humanInputDeferrals + 1;
+        const followUpPlan = spawnPlanAfterHumanInputDeferral(worker, planJob, liveHumanInputGateIds, { deferralRound });
+        allCreatedJobIds.add(followUpPlan.id);
+        worker.emit(
+          planJob.id,
+          `${C.yellow}[plan-recovery]${C.reset} WI#${planJob.work_item_id}: follow-up plan #${followUpPlan.id} will incorporate answers from gate(s) ${liveHumanInputGateIds.map((id) => `#${id}`).join(", ")} (deferral ${deferralRound}/${MAX_CONSECUTIVE_HUMAN_INPUT_DEFERRALS})`,
+        );
+        logEvent({
+          work_item_id: planJob.work_item_id,
+          job_id: planJob.id,
+          event_type: EVENT_TYPES.PLAN_MODALITY_RECOVERY,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Queued follow-up plan #${followUpPlan.id} behind the planner's human input gate(s)`,
+          event_json: JSON.stringify({
+            reason: "human_input_deferral",
+            deferral_round: deferralRound,
+            gate_job_ids: liveHumanInputGateIds,
+            follow_up_plan_job_id: followUpPlan.id,
+            required_outputs: modality.requiredOutputs,
+            missing_outputs: modality.missingOutputs,
+          }),
+        });
+      }
+
       // ── Plan-approval gate ──
       // Every created job gets a hard-dep on the gate so none run until the
       // human approves/rejects. The gate is a human_input job parked at
@@ -2707,7 +2803,7 @@ function compileJobsFromPlan(worker, planJob, tasks, {
           if (!createdJob || !["dev", "fix"].includes(createdJob.job_type)) return [];
           const createdPayload = parseJobPayload(createdJob);
           const required = createdPayload?._operational_command_approval_required;
-          const request = operationalCommandApprovalRequest(createdPayload?.test_command);
+          const request = operationalCommandApprovalRequest(createdPayload?.test_command, { cwd: planReadRoot });
           if (!request || required?.command_sha256 !== request.command_sha256) return [];
           return [{
             job_id: createdJob.id,
@@ -2767,29 +2863,4 @@ function compileJobsFromPlan(worker, planJob, tasks, {
         throw gateError;
       }
 
-      // Answering a clarification resolves the question, not the requirement.
-      // Mixed plans also need a continuation, even if independent work passes.
-      if (modality.requiresHumanInputContinuation && humanInputGateIds.length > 0) {
-        const deferralRound = humanInputDeferrals + 1;
-        const followUpPlan = spawnPlanAfterHumanInputDeferral(worker, planJob, humanInputGateIds, { deferralRound });
-        worker.emit(
-          planJob.id,
-          `${C.yellow}[plan-recovery]${C.reset} WI#${planJob.work_item_id}: follow-up plan #${followUpPlan.id} will incorporate answers from gate(s) ${humanInputGateIds.map((id) => `#${id}`).join(", ")} (deferral ${deferralRound}/${MAX_CONSECUTIVE_HUMAN_INPUT_DEFERRALS})`,
-        );
-        logEvent({
-          work_item_id: planJob.work_item_id,
-          job_id: planJob.id,
-          event_type: EVENT_TYPES.PLAN_MODALITY_RECOVERY,
-          actor_type: EVENT_ACTORS.SYSTEM,
-          message: `Queued follow-up plan #${followUpPlan.id} behind the planner's human input gate(s)`,
-          event_json: JSON.stringify({
-            reason: "human_input_deferral",
-            deferral_round: deferralRound,
-            gate_job_ids: humanInputGateIds,
-            follow_up_plan_job_id: followUpPlan.id,
-            required_outputs: modality.requiredOutputs,
-            missing_outputs: modality.missingOutputs,
-          }),
-        });
-      }
 }

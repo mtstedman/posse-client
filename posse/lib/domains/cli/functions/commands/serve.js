@@ -8,6 +8,7 @@ import { getBridgeConfig } from "../../../bridge/functions/auth.js";
 import { ServedSession } from "../../../pairing/classes/ServedSession.js";
 import { createPairingRemoteClient } from "../../../pairing/functions/remote-client.js";
 import { runPairCommand } from "../../../pairing/functions/phone-pairing.js";
+import { foregroundCommandRunning } from "../../../pairing/functions/foreground-command.js";
 export { runPairCommand } from "../../../pairing/functions/phone-pairing.js";
 
 function hasFlag(argv, flag) { return (argv || []).includes(flag); }
@@ -229,14 +230,21 @@ function waitForShutdown(stopped = null, abortSignal = null, onShutdown = () => 
       onShutdown();
       resolve(signal);
     };
+    // A Ctrl+C while the session console has handed the terminal to a
+    // foreground command (go, add, merge, deploy) is that command's. `on`, not
+    // `once`, so the one ignored here does not use up the handler.
+    const interrupted = (signal) => {
+      if (signal === "SIGINT" && foregroundCommandRunning()) return;
+      done(signal);
+    };
     cleanup = () => {
-      for (const signal of signals) process.off(signal, done);
+      for (const signal of signals) process.off(signal, interrupted);
       abortSignal?.removeEventListener("abort", canceled);
     };
     const canceled = () => done("session closed");
     abortSignal?.addEventListener("abort", canceled, { once: true });
     if (abortSignal?.aborted) canceled();
-    for (const signal of signals) process.once(signal, done);
+    for (const signal of signals) process.on(signal, interrupted);
     if (stopped) void stopped.then(done);
   }).finally(() => {
     cleanup();

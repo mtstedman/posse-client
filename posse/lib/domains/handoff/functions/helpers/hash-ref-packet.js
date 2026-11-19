@@ -100,6 +100,7 @@ function entryParts(entry, maxWhyChars) {
     return {
       ref: selector?.ref || entry.ref || entry.hash || entry.ref_hash,
       lines: selector?.lines || entry.lines || null,
+      path: entry.path ?? null,
       why: compactText(entry.why ?? entry.reason ?? entry.note, maxWhyChars),
       sourceRef: entry.source_ref ?? entry.sourceRef ?? null,
       sourceSelector: entry.source_selector ?? entry.sourceSelector ?? null,
@@ -117,6 +118,10 @@ function entryParts(entry, maxWhyChars) {
   return { ref: "", why: "" };
 }
 
+
+function laneSourcePath(value) {
+  return typeof value === "string" ? value.trim().replace(/\\/g, "/").replace(/^\.\//, "").slice(0, 500) : "";
+}
 
 function packetLaneSource(input, lane) {
   if (Array.isArray(input?.lanes?.[lane])) return input.lanes[lane];
@@ -238,12 +243,14 @@ export function normalizeHashRefHandoffPacket(input, opts = {}) {
       const ref = normalizeHashRefAlias(parts.ref);
       const lines = normalizeLineRange(parts.lines);
       const selector = formatHashRefSelector(ref, lines);
+      // A ref can hold several files; the path names which one a range cites.
+      const sourcePath = lines ? laneSourcePath(parts.path) : "";
       const why = compactText(parts.why, maxWhyChars);
       if (!isHashRefAlias(ref)) {
         dropped.push({ lane, ref: String(parts.ref || "").trim(), reason: "invalid_ref" });
         continue;
       }
-      if (seen.has(selector)) {
+      if (seen.has(`${selector}\0${sourcePath}`)) {
         dropped.push({ lane, ref: selector, reason: "duplicate_ref" });
         continue;
       }
@@ -251,9 +258,10 @@ export function normalizeHashRefHandoffPacket(input, opts = {}) {
         dropped.push({ lane, ref, reason: "missing_decoy_why" });
         continue;
       }
-      seen.add(selector);
+      seen.add(`${selector}\0${sourcePath}`);
       const normalized = { ref };
       if (lines) normalized.lines = lines;
+      if (sourcePath) normalized.path = sourcePath;
       if (why) normalized.why = why;
       if (parts.sourceRef) normalized.source_ref = normalizeHashRefAlias(parts.sourceRef);
       if (parts.sourceSelector && parseHashRefSelector(parts.sourceSelector)) {
@@ -338,13 +346,14 @@ function validMaterializedSourceWindows(entry) {
     });
 }
 
-function selectStructuredSourceContent(entry, lines) {
+function selectStructuredSourceContent(entry, lines, sourcePath = "") {
   let parsed;
   try { parsed = JSON.parse(String(entry?.payload_text || "")); } catch { return null; }
   const envelope = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
   if (!envelope || typeof envelope !== "object") return null;
   const windows = normalizedEvidenceSourceWindows(entry?.metadata?.source_windows)
-    .filter((window) => lines.start >= window.source_start_line && lines.end <= window.source_end_line);
+    .filter((window) => (!sourcePath || window.path === sourcePath)
+      && lines.start >= window.source_start_line && lines.end <= window.source_end_line);
   if (windows.length !== 1) return null;
   const [window] = windows;
   const candidates = [
@@ -385,11 +394,30 @@ function selectStructuredSourceContent(entry, lines) {
   };
 }
 
-function selectSourceCoordinatePayload(entry, lines) {
+// Windows of one file that continue each other in both source and payload
+// coordinates select as one, as materialization coalesces them.
+function coalescedMaterializedSourceWindows(windows) {
+  const out = [];
+  for (const window of windows) {
+    const prior = out.findLast((candidate) => candidate.path === window.path);
+    if (prior
+      && window.source_start_line === prior.source_end_line + 1
+      && window.materialized_start_line === prior.materialized_end_line + 1) {
+      prior.source_end_line = window.source_end_line;
+      prior.materialized_end_line = window.materialized_end_line;
+    } else {
+      out.push({ ...window });
+    }
+  }
+  return out;
+}
+
+function selectSourceCoordinatePayload(entry, lines, sourcePath = "") {
   if (String(entry?.metadata?.line_semantics || "").toLowerCase() !== "source") return null;
-  const structuredSelection = selectStructuredSourceContent(entry, lines);
+  const structuredSelection = selectStructuredSourceContent(entry, lines, sourcePath);
   if (structuredSelection) return structuredSelection;
-  const windows = validMaterializedSourceWindows(entry);
+  const windows = coalescedMaterializedSourceWindows(validMaterializedSourceWindows(entry))
+    .filter((window) => !sourcePath || window.path === sourcePath);
   const sourceCandidates = windows.filter((window) => (
     lines.start >= window.source_start_line && lines.end <= window.source_end_line
   ));
@@ -445,10 +473,13 @@ function entryForResurface(fetchResult, laneEntry = null) {
   if (!entry) return null;
   if (entry.entry_kind === "materialized") {
     const sourceSelection = laneEntry?.lines
-      ? selectSourceCoordinatePayload(entry, laneEntry.lines)
+      ? selectSourceCoordinatePayload(entry, laneEntry.lines, laneSourcePath(laneEntry.path))
       : null;
+    // Source-coordinate lines are not payload lines: when no single window
+    // holds the range, reissue the whole ref rather than a raw payload slice.
+    const sourceCoordinates = String(entry.metadata?.line_semantics || "").toLowerCase() === "source";
     const payloadText = sourceSelection?.payloadText
-      ?? selectedPayloadText(entry.payload_text, laneEntry?.lines);
+      ?? (laneEntry?.lines && sourceCoordinates ? null : selectedPayloadText(entry.payload_text, laneEntry?.lines));
     if (laneEntry?.lines && payloadText == null) {
       return {
         entryKind: "materialized",

@@ -1,3 +1,4 @@
+import { findOpenPushOfferJob } from "../../queue/functions/push-offer.js";
 import { getAgentCallById } from "../../queue/functions/agent-calls.js";
 import { createHash } from "node:crypto";
 
@@ -244,6 +245,8 @@ export class RunDisplayActions {
     });
     this.display.onSkipJob = (jobId) => this.skip(jobId);
     this.display.onReviewPending = () => this.reviewPending();
+    this.display.onDeployPending = () => this.deployPending();
+    this.display.deployAvailable = () => this.deployAvailable();
     this.display.onAsk = (question) => this.ask(question);
     this.display.onAnswerJob = (jobId) => this.answerJob(jobId);
     const pairing = getLivePairingState();
@@ -298,7 +301,7 @@ export class RunDisplayActions {
    * summary and takes the host's typed approval, and the screen comes back.
    * The run itself keeps going underneath.
    */
-  async runForegroundSessionCommand(args) {
+  async runForegroundSessionCommand(args, { tag = "session" } = {}) {
     const display = this.display;
     const label = `posse ${args.join(" ")}`;
     const { input, output } = this.terminal;
@@ -310,13 +313,13 @@ export class RunDisplayActions {
     this.foregroundStopped = false;
     let outcome = null;
     try {
-      output.write(`\n  ${this.C.cyan}[session]${this.C.reset} ${label} (the run keeps going; Ctrl+C here cancels only this command)\n\n`);
+      output.write(`\n  ${this.C.cyan}[${tag}]${this.C.reset} ${label} (the run keeps going; Ctrl+C here cancels only this command)\n\n`);
       this.foregroundChild = this.spawnPosse(args, { cwd: this.projectDir });
       outcome = await waitForForegroundExit(this.foregroundChild);
       // The command's output sits on the plain terminal, which the run screen
       // is about to cover: let the host read it first. A run that is shutting
       // down has no screen to come back to and must not wait on a key.
-      if (!this.foregroundStopped) await this.waitForEnter(`\n  ${this.C.dim}Press Enter to return to the session screen.${this.C.reset} `);
+      if (!this.foregroundStopped) await this.waitForEnter(`\n  ${this.C.dim}Press Enter to return to the ${tag === "session" ? "session" : "run"} screen.${this.C.reset} `);
     } catch (error) {
       outcome = outcome || { error };
     } finally {
@@ -841,6 +844,37 @@ export class RunDisplayActions {
     } catch (err) {
       this.display.addEvent(`${this.C.red}Skip failed for job #${jobId}: ${err.message}${this.C.reset}`);
     }
+  }
+
+  /**
+   * Whether merged work is waiting to be pushed: an open push offer exists.
+   * The run screen asks on every render, so the answer is kept briefly.
+   */
+  deployAvailable() {
+    const nowMs = Date.now();
+    if (this.deployAvailableChecked && nowMs - this.deployAvailableChecked.at < 2_000) return this.deployAvailableChecked.value;
+    let value = false;
+    try { value = findOpenPushOfferJob() != null; } catch { value = false; }
+    this.deployAvailableChecked = { at: nowMs, value };
+    return value;
+  }
+
+  /** The deploy key: `posse deploy` with the terminal, then back to the run. */
+  deployPending() {
+    if (this.foregroundCommandActive()) {
+      this.display.addEvent(`${this.C.dim}Another command has the terminal${this.C.reset}`);
+      return;
+    }
+    this.trackSessionCommand(this.runForegroundSessionCommand(["deploy"], { tag: "deploy" })
+      .catch((err) => {
+        this.display.addEvent(err?.cancelled
+          ? `${this.C.dim}Deploy canceled; nothing was pushed${this.C.reset}`
+          : `${this.C.red}Deploy failed: ${err?.message || err}${this.C.reset}`);
+      })
+      .finally(() => {
+        this.deployAvailableChecked = null;
+        this.display.requestRender?.({ force: true });
+      }));
   }
 
   reviewPending() {

@@ -350,9 +350,15 @@ export async function ingestScipFile({
       })
     : null;
 
-  const effectiveForce = force === true && !(forceIfMissing === true && existingIndexId != null);
+  const stored = storedScipIndexDecision({
+    existingRow: existingIndexId == null ? null : storedScipIndexRow(ledger, existingIndexId),
+    rowDocuments,
+    force,
+    forceIfMissing,
+  });
+  const effectiveForce = stored.effectiveForce;
 
-  if (existingIndexId != null && !effectiveForce) {
+  if (stored.skip) {
     // Backfill the cheap-skip key: this row matched by fileset hash even
     // though the raw bytes (or recorded head) differ — a restaged-but-
     // content-identical index, or a pre-migration row. Next boot takes the
@@ -385,17 +391,17 @@ export async function ingestScipFile({
     return {
       skipped: true,
       documents_ingested: 0,
-      documents_failed: 0,
+      documents_failed: stored.failedDocuments.length,
       documents_skipped: 0,
       blobs_reused: 0,
       external_symbols: 0,
       covered_content_hashes: [],
-      failed_documents: [],
+      failed_documents: stored.failedDocuments,
       ledger_entries_appended: 0,
       scheme,
       fileset_hash: filesetHash,
       scip_index_id: existingIndexId,
-      status: "complete",
+      status: stored.status,
     };
   }
 
@@ -720,6 +726,82 @@ export async function ingestScipFile({
     scip_index_id: recordedId,
     status,
   };
+}
+
+const SKIPPED_DOCUMENT_REASONS = new Set(["minified_skip", "generated_artifact_skip"]);
+
+/**
+ * Documents the rows themselves fail, before any ledger write: the checks the
+ * write loop applies first, with the reasons it records.
+ *
+ * @param {Array<Record<string, any>>} rowDocuments
+ * @returns {Array<{ repo_rel_path: string, content_hash: string, reason: string }>}
+ */
+function rowScipDocumentFailures(rowDocuments) {
+  const failed = [];
+  for (const document of Array.isArray(rowDocuments) ? rowDocuments : []) {
+    const repoRelPath = String(document?.repo_rel_path || "");
+    const skipReason = document?.skip_reason ? String(document.skip_reason) : "";
+    let reason = "";
+    if (!repoRelPath) reason = skipReason || "path_not_canonical";
+    else if (SKIPPED_DOCUMENT_REASONS.has(skipReason)) continue;
+    else if (skipReason) reason = skipReason;
+    else if (!document?.content_hash) reason = "parse_error";
+    if (reason) failed.push({ repo_rel_path: repoRelPath, content_hash: String(document?.content_hash || ""), reason });
+  }
+  return failed;
+}
+
+/**
+ * @param {any} ledger
+ * @param {number} id
+ */
+function storedScipIndexRow(ledger, id) {
+  const rows = typeof ledger.listScipIndexes === "function" ? ledger.listScipIndexes() : null;
+  // A ledger without the listing keeps the earlier contract: a matched row is present.
+  return (Array.isArray(rows) ? rows.find((row) => Number(row?.id) === Number(id)) : null)
+    || { id, status: "complete", documents_failed: 0 };
+}
+
+/**
+ * What an already recorded index identity means for this ingest. A complete
+ * row is skipped (unless forced). A partial row is skipped only when this
+ * artifact's own rows explain every failure it recorded, and then reports
+ * those documents and `partial`, so no caller acknowledges them; failures the
+ * rows cannot name came from the ledger write and are retried. `forceIfMissing`
+ * treats only a complete row as present.
+ *
+ * @param {{ existingRow: any, rowDocuments: Array<Record<string, any>>, force?: boolean, forceIfMissing?: boolean }} args
+ * @returns {{ skip: boolean, effectiveForce: boolean, status: "complete" | "partial", failedDocuments: Array<{ repo_rel_path: string, content_hash: string, reason: string }> }}
+ */
+function storedScipIndexDecision({ existingRow, rowDocuments, force = false, forceIfMissing = false }) {
+  const retry = (effectiveForce) => ({ skip: false, effectiveForce, status: /** @type {"complete"} */ ("complete"), failedDocuments: [] });
+  if (!existingRow) return retry(force === true);
+  const storedFailed = String(existingRow.status || "") === "complete"
+    ? 0
+    : Math.max(0, Math.floor(Number(existingRow.documents_failed) || 0));
+  const effectiveForce = force === true && !(forceIfMissing === true && storedFailed === 0);
+  if (effectiveForce) return retry(true);
+  if (storedFailed === 0) return { skip: true, effectiveForce: false, status: "complete", failedDocuments: [] };
+  const failedDocuments = rowScipDocumentFailures(rowDocuments);
+  if (failedDocuments.length < storedFailed) return retry(false);
+  return { skip: true, effectiveForce: false, status: "partial", failedDocuments };
+}
+
+export const __testStoredScipIndexDecision = storedScipIndexDecision;
+
+/**
+ * Whether an ingest result's artifact reached the ledger. A decode failure
+ * reports itself as a non-complete skip with no bookkeeping row: none of its
+ * documents were recorded and it cannot say which. A short-circuited partial
+ * row has its id and names its failed documents; the rest are recorded.
+ *
+ * @param {Record<string, any> | null | undefined} result
+ */
+export function scipIngestRecordedArtifact(result) {
+  return !(result?.skipped === true
+    && result?.status !== "complete"
+    && !Number.isSafeInteger(result?.scip_index_id));
 }
 
 /**

@@ -100,7 +100,8 @@ export async function dispatchLocalProvider(request, {
     const frame = accept(result, true);
     if (frame.type !== "dispatch.completed") {
       throw Object.assign(new Error(frame.error?.message || "Local provider dispatch failed"), {
-        code: frame.error?.code || "provider_dispatch_failed", classification: frame.error?.class,
+        // The local provider reported this failure; its text is a provider notice.
+        code: frame.error?.code || "provider_dispatch_failed", classification: frame.error?.class, providerFailure: true,
         details: { partialOutput: frame.partialOutput || output, stats: frame.stats || usage, diagnostic: frame.error?.detail },
       });
     }

@@ -3,12 +3,13 @@
 // trunk and publish it to the kept private repository, so a new session can
 // start on it instead of uploading the whole history again.
 
-import { execFileSync } from "node:child_process";
+import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import fs from "node:fs";
 import path from "node:path";
 
 function defaultGit(args, cwd) {
-  return String(execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000 }) || "").trim();
+  // An operator surface: system Git through the sanctioned direct adapter.
+  return String(adminGitExec(args, cwd, { timeoutMs: 10 * 60_000 }) || "").trim();
 }
 
 function succeeds(git, args, cwd) {

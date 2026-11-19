@@ -99,7 +99,7 @@ export function getLiveSchedulerBlockMessage(lockName = "main", { graceMs = LIVE
 // later), a dual-scheduling window. 45s tolerates one fully-missed renewal
 // cycle while still beating the lock's 60s (LOCK_RENEW_SEC*2) natural DB expiry,
 // so a genuinely dead holder is still force-recovered faster than expiry.
-const FORCE_ACQUIRE_LIVENESS_SEC = 45;
+export const FORCE_ACQUIRE_LIVENESS_SEC = 45;
 
 export function forceAcquireSchedulerLock(lockName, ownerId, durationSec = 60) {
   const db = getDb();

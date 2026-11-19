@@ -217,6 +217,11 @@ export class AgentSessionRegistry {
         error: { code: complete.error_code || "agent_tool_failed", message: complete.error || "Child execution failed" } } },
         run_id: complete.id, duration_ms: Math.max(0, this.now() - started), delegated_usage: complete.delegated_usage };
     }
+    // A failed script answers the agent as a tool result (`output.ok` false,
+    // with its exit code, output and stderr), not as an owner error.
+    if (complete?.status === "failed" && complete.error_code === "script_failed" && complete.output) {
+      return { output: complete.output, run_id: complete.id, duration_ms: Math.max(0, this.now() - started), capability: publicCapability(capability) };
+    }
     demand(complete?.status === "succeeded", complete?.error || `Tool ${tool} failed`, complete?.error_code || "agent_tool_failed");
     return { output: complete.output, run_id: complete.id, duration_ms: Math.max(0, this.now() - started), capability: publicCapability(capability), ...(complete.delegated_usage ? { delegated_usage: complete.delegated_usage } : {}) };
   }

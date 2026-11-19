@@ -87,3 +87,25 @@ export const HANDLER_BY_KIND = readonlyMap([
   ["post_merge_db_task", "human_input"],
   ["cross_wi_upstream_disposition", "human_input"],
 ]);
+
+// Closed lifecycle vocabularies shared by the work-item feed and the agent
+// conversation projection.
+export const QUESTION_STATES = readonlySet([
+  "open", "pending", "answered", "rejected", "expired", "superseded", "closed",
+]);
+
+export const NUDGE_STATES = readonlySet([
+  "queued", "signaled", "retrieved", "accepted", "rejected", "deferred", "superseded", "expired",
+]);
+
+// A nudge can still be replaced (latest correction wins) only while it is
+// waiting for, or has just reached, the agent.
+export const REPLACEABLE_NUDGE_STATES = readonlySet(["queued", "signaled", "retrieved"]);
+
+// The surface an operator action came from, recorded as a nudge's or an
+// answer's `source` (the conversation's `origin`).
+export const OPERATOR_ACTION_SOURCES = Object.freeze({
+  TERMINAL: "terminal",
+  BRIDGE: "bridge",
+  BOSSY: "bossy",
+});

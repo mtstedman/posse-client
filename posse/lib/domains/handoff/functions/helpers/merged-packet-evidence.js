@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { materializedEvidenceIdentity } from "./evidence-selector.js";
 
 // Merge only source-coordinate excerpts with identical overlapping bytes.
 // Materialized multi-window/annotated results retain their independent refs.
@@ -30,12 +31,12 @@ export function mergeEvidenceCatalog(evidence) {
   const pointers = new Map();
   const catalog = merged.map((group, id) => {
     if (group.members.length === 1) {
-      pointers.set(group.item.selector, { evidence_id: id });
+      pointers.set(materializedEvidenceIdentity(group.item), { evidence_id: id });
       return group.item;
     }
     for (const member of group.members) {
       const { excerpt: _excerpt, ...metadata } = member;
-      pointers.set(member.selector, { evidence_id: id, evidence_merged_into: id, original: metadata,
+      pointers.set(materializedEvidenceIdentity(member), { evidence_id: id, evidence_merged_into: id, original: metadata,
         excerpt_offset: (member.source_start_line ?? member.lines.start) - group.start,
         excerpt_lines: String(member.excerpt).split("\n").length });
     }

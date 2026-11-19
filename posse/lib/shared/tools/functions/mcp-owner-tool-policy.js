@@ -7,6 +7,7 @@ import { isInternalAtlasAction } from "./issued-tool-policy.js";
 import { ATLAS_NESTED_ACTION_WRAPPERS } from "./planner-triage.js";
 import { researcherDispatcherIssuedActions } from "../../../domains/integrations/functions/deterministic-mcp/researcher-dispatcher.js";
 import { ATLAS_HISTORICAL_ACTION_ALIASES } from "../../../catalog/atlas.js";
+import { atlasNestedAction } from "./atlas-nested-action.js";
 
 const ATLAS_TOOL_ACTION_SET = /** @type {Set<string>} */ (new Set(ATLAS_TOOL_ACTIONS));
 
@@ -36,16 +37,6 @@ function normalizeAtlasActionName(name) {
   return stripped;
 }
 
-function nestedAtlasAction(args = {}) {
-  return normalizeAtlasActionName(
-    args?.gatewayAction
-    || args?.targetAction
-    || args?.actionName
-    || args?.action
-    || "",
-  );
-}
-
 export function requestedToolPolicyName(name, args = {}) {
   const raw = stripPosseMcpGatewayPrefix(name);
   if (raw.startsWith("atlas.") || raw.startsWith("atlas_")) {
@@ -53,7 +44,9 @@ export function requestedToolPolicyName(name, args = {}) {
     return {
       suite: "atlas",
       name: action,
-      nested: nestedAtlasAction(args),
+      // Read exactly as the executor and dispatch read it, so the action
+      // checked here is the action that runs.
+      nested: atlasNestedAction(args),
     };
   }
   return {
@@ -125,8 +118,14 @@ export function toolAllowedByPolicy(policy, toolName, args = {}) {
   if (requested.suite === "atlas") {
     if (!requested.name || isInternalAtlasAction(requested.name)) return false;
     if (!allowed.has(requested.name)) return false;
-    if (ATLAS_NESTED_ACTION_WRAPPERS.has(requested.name) && requested.nested) {
-      return !isInternalAtlasAction(requested.nested) && allowed.has(requested.nested);
+    if (ATLAS_NESTED_ACTION_WRAPPERS.has(requested.name)) {
+      // A wrapper only routes. Its grant admits nothing by itself: a nested
+      // action that is missing, unreadable or another wrapper is denied.
+      const nested = requested.nested;
+      return !!nested
+        && !ATLAS_NESTED_ACTION_WRAPPERS.has(nested)
+        && !isInternalAtlasAction(nested)
+        && allowed.has(nested);
     }
     return true;
   }
@@ -150,21 +149,25 @@ function issuedAtlasActionsForPolicy(policy) {
  * Classify a nested-action denial AFTER the whole-tool policy check failed.
  * Returns null when the denial is about the wrapper tool itself (the existing
  * whole-tool message stays correct there), or when the wrapper is not a
- * nested-action facade. Otherwise distinguishes an action Atlas does not know
- * from a known action absent from (or internal to) this session's signed
- * grant. Both remain denied: this only changes what the model is told.
+ * nested-action facade. Otherwise distinguishes a missing action and an
+ * action Atlas does not know from a known action absent from (or internal
+ * to) this session's signed grant. All remain denied: this only changes what
+ * the model is told.
  */
 export function nestedAtlasActionDenial(policy, toolName, args = {}) {
   const requested = requestedToolPolicyName(toolName, args);
   if (requested.suite !== "atlas" || !ATLAS_NESTED_ACTION_WRAPPERS.has(requested.name)) return null;
   const nested = String(requested.nested || "");
-  if (!nested || nested === "workflow") return null;
+  if (nested === "workflow") return null;
   const allowed = policy?.suites?.atlas || new Set();
   const wrapperReachable = requested.name === "query"
     ? allowed.has("query")
     : allowed.has(requested.name);
   if (!wrapperReachable) return null;
   const issued = issuedAtlasActionsForPolicy(policy);
+  if (!nested) {
+    return { code: "missing_action", wrapper: `atlas.${requested.name}`, action: "", valid: issued, replacement: null };
+  }
   // Internal actions are known to Atlas but never issued to a model; they
   // are reported as unissued rather than unknown so the model does not
   // retry a spelling, and never as available.
@@ -185,7 +188,9 @@ function nestedAtlasActionDenialPayload(denial) {
   const replacementText = denial.replacement
     ? ` Use ${denial.replacement} instead.`
     : "";
-  const text = denial.code === "unknown_action"
+  const text = denial.code === "missing_action"
+    ? `${denial.wrapper} needs an action; the tool itself remains available. Valid actions for this session: ${validText}.`
+    : denial.code === "unknown_action"
     ? `Unknown ${denial.wrapper} action "${denial.action}"; the tool itself remains available.${replacementText} Valid actions for this session: ${validText}.`
     : `${denial.wrapper} action "${denial.action}" is not issued to this session; the tool itself remains available.${replacementText} Valid actions for this session: ${validText}.`;
   return mcpToolErrorPayload(text, {
@@ -204,27 +209,25 @@ export function __testNestedAtlasActionDenial(policy, toolName, args = {}) {
   return nestedAtlasActionDenial(policy, toolName, args);
 }
 
+export function deniedToolCallResult(toolName, policy, args = {}) {
+  const denial = nestedAtlasActionDenial(policy, toolName, args);
+  if (denial) return nestedAtlasActionDenialPayload(denial);
+  return {
+    content: [{
+      type: "text",
+      text: `Tool ${toolName || "(unknown)"} is not allowed for this MCP session (${policy.source} policy).`,
+    }],
+    isError: true,
+  };
+}
+
 export function deniedToolCallMessage(message, toolName, policy, args = {}) {
   const id = message && Object.prototype.hasOwnProperty.call(message, "id") ? message.id : null;
   if (id == null) return null;
-  const denial = nestedAtlasActionDenial(policy, toolName, args);
-  if (denial) {
-    return {
-      jsonrpc: "2.0",
-      id,
-      result: nestedAtlasActionDenialPayload(denial),
-    };
-  }
   return {
     jsonrpc: "2.0",
     id,
-    result: {
-      content: [{
-        type: "text",
-        text: `Tool ${toolName || "(unknown)"} is not allowed for this MCP session (${policy.source} policy).`,
-      }],
-      isError: true,
-    },
+    result: deniedToolCallResult(toolName, policy, args),
   };
 }
 
