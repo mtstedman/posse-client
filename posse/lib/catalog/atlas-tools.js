@@ -960,7 +960,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_lens",
-    description: "Locate identifiers\u2019 uses within a known file or symbol. Returns matching locations and enclosing-symbol context. Submit scattered identifiers together; a file path needs no prior ID lookup.",
+    description: "Locate identifiers\u2019 uses within a known file or symbol. Returns matching locations and enclosing-symbol context; a match inside a declaration of up to 60 lines also returns that declaration\u2019s full source. Submit scattered identifiers together; a file path needs no prior ID lookup.",
     parameters: {
       type: "object",
       properties: {

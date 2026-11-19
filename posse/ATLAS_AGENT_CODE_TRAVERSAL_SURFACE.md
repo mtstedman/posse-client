@@ -271,7 +271,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Locate identifiers’ uses within a known file or symbol. Returns matching locations and enclosing-symbol context. Submit scattered identifiers together; a file path needs no prior ID lookup.
+Locate identifiers’ uses within a known file or symbol. Returns matching locations and enclosing-symbol context; a match inside a declaration of up to 60 lines also returns that declaration’s full source. Submit scattered identifiers together; a file path needs no prior ID lookup.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

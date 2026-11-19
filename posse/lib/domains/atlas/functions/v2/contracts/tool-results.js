@@ -832,6 +832,7 @@
  * @property {SymbolId} [symbolId]
  * @property {string} [repo_rel_path]
  * @property {CodeLensMatch[]} matches
+ * @property {CodeLensDeclaration[]} [declarations]  Short declarations holding matches, returned whole; their matches carry no context lines.
  * @property {string[]} identifiersFound
  * @property {string[]} [identifiersFoundInText]  Identifiers with no AST usage but present inside string/comment text (matchKind "text").
  * @property {string[]} identifiersMissing
@@ -863,6 +864,16 @@
  * @property {"text"} [matchKind]  Absent for AST usage matches; "text" when the identifier was only found inside string/comment text.
  * @property {{ before: string[], after: string[] }} context
  * @property {CodeLensScope} [scope]  Innermost indexed symbol enclosing the match line; absent when the line is outside every indexed symbol.
+ */
+
+/**
+ * @typedef {Object} CodeLensDeclaration
+ * @property {string} name
+ * @property {string} kind
+ * @property {string} [qualifiedName]
+ * @property {number} startLine
+ * @property {number} endLine
+ * @property {string[]} lines  Exact source lines startLine..endLine, redacted and clipped like match lines.
  */
 
 /**

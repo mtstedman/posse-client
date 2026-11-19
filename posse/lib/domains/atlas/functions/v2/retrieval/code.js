@@ -145,6 +145,21 @@ export function lensScopeIndex(symbols, source) {
 }
 
 /**
+ * The file's indexed declarations as the native lens takes them.
+ *
+ * @param {ReturnType<typeof lensScopeIndex>} index
+ */
+export function lensDeclarationSpans(index) {
+  return index.map((entry) => ({
+    name: String(entry.symbol.name || ""),
+    kind: String(entry.symbol.kind || ""),
+    ...(entry.symbol.qualified_name ? { qualifiedName: String(entry.symbol.qualified_name) } : {}),
+    startLine: entry.startLine,
+    endLine: entry.endLine,
+  }));
+}
+
+/**
  * @param {ReturnType<typeof lensScopeIndex>} index
  * @param {number} line
  * @returns {import("../contracts/tool-results.js").CodeLensScope | null}
@@ -568,6 +583,7 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
     }
   }
   const calledFrom = await calledFromBreadcrumbs(view, [...lensTargets.values()], { maxSymbols: 4 });
+  const scopeIndex = lensScopeIndex(fileSymbols, source);
   const resolvedLens = await buildLens({
     repo_rel_path: targetPath,
     source,
@@ -575,6 +591,9 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
     symbolId,
     identifiersToFind: nativeSelection.identifiers,
     contextLines,
+    // A match inside a short declaration is answered with the whole
+    // declaration (native lens); parity with the native runtime.
+    declarations: lensDeclarationSpans(scopeIndex),
   });
   return await finishCodeLens({
     versionId,
@@ -584,7 +603,7 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
     source,
     lens: resolvedLens,
     calledFrom,
-    scopeIndex: lensScopeIndex(fileSymbols, source),
+    scopeIndex,
     identifierAliases: nativeSelection.aliases,
     unresolvedIdentifiers: nativeSelection.unresolved,
     ambiguities: nativeSelection.ambiguities,
@@ -638,6 +657,7 @@ async function finishCodeLens({
     ...(symbolId ? { symbolId } : {}),
     repo_rel_path: targetPath,
     matches: fitted.matches,
+    ...(Array.isArray(lens.declarations) && lens.declarations.length > 0 ? { declarations: lens.declarations } : {}),
     ...(fitted.contextTrimmed
       ? { contextLinesApplied: fitted.contextLinesApplied, contextTrimmed: true }
       : {}),

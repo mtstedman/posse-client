@@ -377,6 +377,23 @@ export function codeLensSourceHunks(data = {}) {
       rows.set(line, text);
     }
   }
+  // A short declaration the lens returned whole is delivered source too.
+  for (const declaration of Array.isArray(data?.declarations) ? data.declarations : []) {
+    const repoRelPath = data?.repo_rel_path || data?.path;
+    const lines = declaration?.lines;
+    if (!repoRelPath || !Number.isSafeInteger(declaration?.startLine) || declaration.startLine < 1
+      || !Array.isArray(lines) || lines.length !== declaration.endLine - declaration.startLine + 1
+      || lines.some((text) => typeof text !== "string" || /[\r\n]/u.test(text))) continue;
+    const rows = files.get(repoRelPath) || new Map();
+    files.set(repoRelPath, rows);
+    for (const [index, text] of lines.entries()) {
+      const line = declaration.startLine + index;
+      const prior = rows.get(line);
+      if (prior === null) continue;
+      if (prior !== undefined && prior !== text) { rows.set(line, null); continue; }
+      rows.set(line, text);
+    }
+  }
   const hunks = [];
   for (const [repoRelPath, rows] of files) {
     let current = null;
