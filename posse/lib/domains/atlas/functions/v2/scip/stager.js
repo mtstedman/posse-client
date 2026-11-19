@@ -30,6 +30,7 @@ import { sanitizeScipOutputFileNative } from "./sanitizer.js";
 import { readScipBatchCoverage, writeScipBatchCoverage } from "./batch-coverage.js";
 import { atlasWarmWalkEntryDisposition } from "../warm-walk.js";
 import { resolveTypeScriptBatchProject, writeTypeScriptBatchProject } from "./typescript-batch-project.js";
+import { importClosureBytes } from "./import-closure.js";
 import {
   buildFailedStagerMeta,
   buildStagerMeta,
@@ -60,6 +61,11 @@ export const DEFAULT_SCIP_BATCH_MAX_FILES = 32;
 const SCIP_UNKNOWN_PROJECT_VERSION = "0.0.0";
 export const DEFAULT_SCIP_BATCH_MAX_SOURCE_BYTES = 12 * 1024 * 1024;
 export const DEFAULT_SCIP_BATCH_IN_FLIGHT = 2;
+// Source a TypeScript document may import before it is staged on its own with
+// imports unresolved. The indexer holds roughly 140 MB of heap per megabyte of
+// source it loads, and a batch already carries up to its own byte limit, so
+// this keeps a full batch plus one document's imports inside a default heap.
+export const SCIP_TYPESCRIPT_IMPORT_CLOSURE_MAX_BYTES = 8 * 1024 * 1024;
 const SCIP_INDEXER_ENV_EXACT = new Set([
   "APPDATA",
   "CARGO_HOME",
@@ -521,7 +527,20 @@ export async function buildScipBatchManifest({
       sourceBytes: sourceBytes.length,
       contentHash: sha256Hex(sourceBytes),
       plan,
+      isolateImports: false,
     });
+  }
+  // Measure what each TypeScript document imports before any indexer starts.
+  const importGraph = new Map();
+  for (const document of documents) {
+    if (document.plan.indexerId !== "typescript") continue;
+    const closureBytes = await importClosureBytes({
+      repoRoot: root,
+      repoRelPath: document.repoRelPath,
+      limit: SCIP_TYPESCRIPT_IMPORT_CLOSURE_MAX_BYTES,
+      cache: importGraph,
+    });
+    document.isolateImports = closureBytes > SCIP_TYPESCRIPT_IMPORT_CLOSURE_MAX_BYTES;
   }
 
   /** @type {Array<{ batchOrdinal: number, firstDocumentOrdinal: number, lastDocumentOrdinal: number, documentsExpected: number, batchHash: string, plan: ScipStagePlan, sourceBytes: number, paths: string[], documents: typeof documents }>} */
@@ -530,11 +549,14 @@ export async function buildScipBatchManifest({
   let current = null;
   for (const document of documents) {
     const planChanged = current && current.plan !== document.plan;
+    // Leaving imports unresolved is a setting of the whole batch view, so
+    // isolated documents batch only with each other.
+    const isolationBoundary = current && current.isolateImports !== document.isolateImports;
     const fileLimitReached = current && current.documents.length >= fileLimit;
     const byteLimitReached = current
       && current.documents.length > 0
       && current.sourceBytes + document.sourceBytes > byteLimit;
-    if (!current || planChanged || fileLimitReached || byteLimitReached) {
+    if (!current || planChanged || isolationBoundary || fileLimitReached || byteLimitReached) {
       current = {
         batchOrdinal: batches.length,
         firstDocumentOrdinal: document.documentOrdinal,
@@ -542,6 +564,7 @@ export async function buildScipBatchManifest({
         documentsExpected: 0,
         batchHash: "",
         plan: document.plan,
+        isolateImports: document.isolateImports,
         sourceBytes: 0,
         paths: [],
         documents: [],
@@ -561,6 +584,9 @@ export async function buildScipBatchManifest({
       path: document.repoRelPath,
       content_hash: document.contentHash,
       source_bytes: document.sourceBytes,
+      // An artifact staged without imports is a different artifact; only
+      // isolated documents carry the field so every other hash is unchanged.
+      ...(document.isolateImports ? { isolate_imports: true } : {}),
     }));
     batch.batchHash = sha256Hex(Buffer.from(JSON.stringify(batchHashPayload)));
   }
@@ -1396,20 +1422,40 @@ async function stageScipBatch({ root, sessionDir, batch, onProgress, projectVers
   }
 }
 
+const SCIP_MEMORY_EXHAUSTION_RE = /heap out of memory|allocation failed|\benomem\b/iu;
+
 async function stageScipBatchWithRecovery({ root, sessionDir, batch, onProgress, projectVersion = null, project = null }) {
-  const attempt = async (candidate) => {
+  const attempt = async (candidate, candidateProject = project) => {
     try {
-      return await stageScipBatch({ root, sessionDir, batch: candidate, onProgress, projectVersion, project });
+      return await stageScipBatch({ root, sessionDir, batch: candidate, onProgress, projectVersion, project: candidateProject });
     } catch (error) {
       return { ok: false, outputPath: null, error: formatAtlasError(error) };
     }
+  };
+  // A lone document that exhausted the indexer's memory fails identically on
+  // an unchanged retry: the cost is its import closure, which a repository
+  // view loads in full. Its second attempt leaves imports unresolved, so the
+  // document is indexed by itself instead of being dropped.
+  const retryDocument = (candidate, failure) => {
+    if (candidate.plan.indexerId !== "typescript" || project?.mode !== "repository"
+      || !SCIP_MEMORY_EXHAUSTION_RE.test(String(failure?.error || ""))) {
+      return attempt(candidate);
+    }
+    emit(onProgress, `indexing ${candidate.paths[0]} without its imports; loading them exhausted the indexer's memory`, {
+      kind: "atlas.scip.batch_document_isolated",
+      batch_ordinal: batch.batchOrdinal,
+      repo_rel_path: candidate.paths[0],
+      language: candidate.plan.indexerId,
+      source_languages: sourceLanguagesForPlan(candidate.plan),
+    });
+    return attempt(candidate, { ...project, isolateImports: true });
   };
   const initial = await attempt(batch);
   if (initial.ok && initial.outputPath) {
     return { ok: true, recovered: false, outputs: [{ batch, staged: initial }], unavailable: [], error: null };
   }
   if (batch.documents.length <= 1) {
-    const retry = await attempt(batch);
+    const retry = await retryDocument(batch, initial);
     if (retry.ok && retry.outputPath) {
       return { ok: true, recovered: true, outputs: [{ batch, staged: retry }], unavailable: [], error: null };
     }
@@ -1440,7 +1486,7 @@ async function stageScipBatchWithRecovery({ root, sessionDir, batch, onProgress,
       return { outputs: [{ batch: candidate, staged }], unavailable: [] };
     }
     if (candidate.documents.length <= 1) {
-      const retry = await attempt(candidate);
+      const retry = await retryDocument(candidate, staged);
       if (retry.ok && retry.outputPath) {
         return { outputs: [{ batch: candidate, staged: retry }], unavailable: [] };
       }
@@ -1520,7 +1566,12 @@ function scipRecoveryBatch(parent, documents, suffix) {
 
 async function writeBatchProjectMetadata(root, viewRoot, batch, project) {
   if (batch.plan.indexerId === "typescript" && project?.mode === "repository") {
-    await writeTypeScriptBatchProject({ repoRoot: root, viewRoot, paths: batch.paths, project });
+    await writeTypeScriptBatchProject({
+      repoRoot: root,
+      viewRoot,
+      paths: batch.paths,
+      project: batch.isolateImports ? { ...project, isolateImports: true } : project,
+    });
     return;
   }
   if (batch.plan.indexerId === "typescript") {

@@ -4,12 +4,19 @@
 // writes and external-symbol persistence; Rust owns the symbol/edge derivation.
 
 import { createHash } from "node:crypto";
+import { ATLAS_NATIVE_WORKER_MAX_REQUEST_BYTES } from "../../../../../catalog/binary.js";
 import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 
 const SCIP_ROLE_DEFINITION = 0x1;
 const SCIP_ROLE_IMPORT = 0x2;
 
 const SCIP_FIRST_FRAME_BATCH_SIZE = 8;
+// Serialized documents one native request may carry. The worker refuses a
+// request above its framed limit, and document count says nothing about size:
+// eight dense generated-table modules serialize to more than the limit. A
+// quarter of the limit leaves room for the request envelope and for the
+// difference between counted characters and encoded bytes.
+const SCIP_NATIVE_FRAME_DOCUMENT_BYTES = Math.floor(ATLAS_NATIVE_WORKER_MAX_REQUEST_BYTES / 4);
 const SCIP_NATIVE_REQUEST_TIMEOUT_MS = 120_000;
 const SCIP_SESSION_OPEN_QUEUE_HEADROOM_MS = 60_000;
 const SCIP_SESSION_OPEN_DOCUMENT_MS = 50;
@@ -42,8 +49,12 @@ export async function scipIndexToRowsBatchedNative({ index, timeoutMs = SCIP_NAT
   const documents = Array.isArray(nativeIndex.documents) ? nativeIndex.documents : [];
   const size = Math.max(1, Math.min(4096, Math.trunc(Number(batchSize) || 32)));
   const firstSize = Math.min(size, SCIP_FIRST_FRAME_BATCH_SIZE);
-  if (documents.length <= firstSize) return scipIndexToRowsNative({ index, timeoutMs });
-  const batches = scipDocumentBatches(documents, size, firstSize);
+  const documentBytes = documents.map(scipDocumentFrameBytes);
+  const totalBytes = documentBytes.reduce((total, bytes) => total + bytes, 0);
+  if (documents.length <= firstSize && totalBytes <= SCIP_NATIVE_FRAME_DOCUMENT_BYTES) {
+    return scipIndexToRowsNative({ index, timeoutMs });
+  }
+  const batches = scipDocumentBatches(documents, size, firstSize, documentBytes, SCIP_NATIVE_FRAME_DOCUMENT_BYTES);
   const filesetHash = scipFilesetHash(documents);
   // Session open performs the whole-index definition prepass and shares the
   // persistent native lane with concurrent Tree-sitter ledger writes. A fixed
@@ -101,12 +112,41 @@ export async function scipIndexToRowsBatchedNative({ index, timeoutMs = SCIP_NAT
   }
 }
 
-function scipDocumentBatches(documents, batchSize, firstBatchSize) {
-  const batches = [documents.slice(0, firstBatchSize)];
-  for (let start = firstBatchSize; start < documents.length; start += batchSize) {
-    batches.push(documents.slice(start, start + batchSize));
+/**
+ * Split documents into native request frames. A frame closes at its document
+ * count or before the document that would take it past the byte budget; a
+ * document larger than the budget travels alone.
+ *
+ * @param {any[]} documents
+ * @param {number} batchSize
+ * @param {number} firstBatchSize
+ * @param {number[] | null} [documentBytes]
+ * @param {number} [maxBytes]
+ */
+function scipDocumentBatches(documents, batchSize, firstBatchSize, documentBytes = null, maxBytes = Infinity) {
+  /** @type {any[][]} */
+  const batches = [];
+  /** @type {any[]} */
+  let current = [];
+  let currentBytes = 0;
+  for (let index = 0; index < documents.length; index++) {
+    const bytes = documentBytes ? documentBytes[index] : 0;
+    const limit = batches.length === 0 ? firstBatchSize : batchSize;
+    if (current.length > 0 && (current.length >= limit || currentBytes + bytes > maxBytes)) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(documents[index]);
+    currentBytes += bytes;
   }
+  if (current.length > 0 || batches.length === 0) batches.push(current);
   return batches;
+}
+
+/** @param {unknown} document */
+function scipDocumentFrameBytes(document) {
+  return JSON.stringify(document).length;
 }
 
 function scipFilesetHash(documents) {
@@ -129,11 +169,12 @@ export function __testScipDefinitionPrepassIndex(index) {
   return scipDefinitionPrepassIndex(scipIndexForNative(index));
 }
 
-export function __testScipBatchSizes({ documentCount, batchSize }) {
+export function __testScipBatchSizes({ documentCount, batchSize, documentBytes = null, maxBytes = Infinity }) {
   const count = Math.max(0, Math.trunc(Number(documentCount) || 0));
   const size = Math.max(1, Math.min(4096, Math.trunc(Number(batchSize) || 32)));
   const first = Math.min(size, SCIP_FIRST_FRAME_BATCH_SIZE);
-  return scipDocumentBatches(Array.from({ length: count }, (_, index) => index), size, first).map((batch) => batch.length);
+  return scipDocumentBatches(Array.from({ length: count }, (_, index) => index), size, first, documentBytes, maxBytes)
+    .map((batch) => batch.length);
 }
 
 /** @param {{ documentCount?: number, occurrenceCount?: number, timeoutMs?: number }} [input] */

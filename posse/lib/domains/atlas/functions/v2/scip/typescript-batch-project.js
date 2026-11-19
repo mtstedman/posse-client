@@ -16,7 +16,7 @@ import path from "node:path";
 
 /**
  * @typedef {{ mode: "isolated" }
- *   | { mode: "repository", extendsPath: string | null, forceCommonjs: boolean }
+ *   | { mode: "repository", extendsPath: string | null, forceCommonjs: boolean, isolateImports?: boolean }
  *   | { mode: "invalid", error: string }} TypeScriptBatchProject
  */
 
@@ -71,7 +71,7 @@ export function resolveTypeScriptBatchProject(repoRoot, plan) {
 /**
  * Write the repository-aware project into a batch view.
  *
- * @param {{ repoRoot: string, viewRoot: string, paths: string[], project: { extendsPath: string | null, forceCommonjs: boolean } }} args
+ * @param {{ repoRoot: string, viewRoot: string, paths: string[], project: { extendsPath: string | null, forceCommonjs: boolean, isolateImports?: boolean } }} args
  */
 export async function writeTypeScriptBatchProject({ repoRoot, viewRoot, paths, project }) {
   const directories = new Set([""]);
@@ -92,6 +92,11 @@ export async function writeTypeScriptBatchProject({ repoRoot, viewRoot, paths, p
       allowJs: true,
       rootDirs: [viewRoot, repoRoot],
       ...(project.forceCommonjs ? { module: "commonjs" } : {}),
+      // Loading a document's imports costs memory in proportion to everything
+      // it transitively imports, not to the document. When that closure alone
+      // exhausts the indexer, the document is indexed on its own: its
+      // definitions and local references are kept, its imports stay unbound.
+      ...(project.isolateImports ? { noResolve: true } : {}),
     },
     include: [],
     files: paths,
