@@ -9,7 +9,7 @@ import { NUDGE_STATES, QUESTION_STATES, REPLACEABLE_NUDGE_STATES } from "./work-
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./tools/interaction.js";
 import { HUMAN_GATE_FEEDBACK_MAX_CHARS } from "./human-input.js";
 
-// @catalog-sync id=posse.agent_conversation.vocabulary role=authority relation=strict compare=names extract=strings
+// @catalog-sync id=posse.agent_conversation.vocabulary role=authority relation=strict compare=names extract=strings projection_source=posse
 // @linked_repos posse:posse/test/fixtures/agent-conversation/protocol/conversation-v1.json posse-remote:rust/catalog/control/conversation.rs posse-bossy:catalog/agent_conversation.go posse-remote-control:src/catalog/conversation.ts
 export const AGENT_CONVERSATION_PROTOCOL = "posse.agent_conversation.v1";
 export const AGENT_CONVERSATION_COMMAND = "work_item.conversation";
