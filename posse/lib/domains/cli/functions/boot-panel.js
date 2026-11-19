@@ -26,15 +26,7 @@ const SECTION_LABELS = {
   workspace: "workspace",
   providers: "providers",
 };
-// A gentle "exploding pulse": a tiny dot / thin cross that blinks, swelling to
-// an open starburst and contracting back — rather than a rotating |/\ wiggle.
-// All open-weight glyphs (no heavy filled ✶/✻/✽) so no single frame "pops"
-// brighter than the rest, and the cycle reads as a smooth breath. ·/✢ are the
-// thin blink; ✺ is the open bloom.
-const SPINNER_FRAMES = ["·", "✢", "✺", "✢"];
-// Advance the spinner on a wall-clock cadence (not per render): boot fires
-// bursts of forced renders during indexing, so a render-counter spinner would
-// stutter/race. Time-based keeps the pulse steady regardless of render rate.
+// Animation cadence for the stale-progress pulse and running check gauges.
 const SPINNER_FRAME_MS = 130;
 
 // Strip ANSI escape sequences so we can measure visible width when ANSI
@@ -252,8 +244,16 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     // a newer one; same-phase counters remain monotonic below.
     const previousRank = langPhaseRank(side, previous.state);
     const nextRank = langPhaseRank(side, patch.state ?? previous.state);
-    if (previousRank != null && nextRank != null && nextRank < previousRank) return;
-    const merged = { ...previous, ...patch };
+    // A language staged in batches is driven by its batch progress, which is
+    // authoritative: a row the startup snapshot's ingest already closed reopens
+    // when that language's batches begin.
+    const { reopen = false, ...fields } = /** @type {Record<string, any>} */ (patch);
+    if (!reopen && previousRank != null && nextRank != null && nextRank < previousRank) return;
+    const merged = { ...previous, ...fields };
+    if (reopen && merged.state !== previous.state) {
+      merged.finishedAt = null;
+      if (nextRank != null && previousRank != null && nextRank < previousRank) merged.percent = fields.percent ?? null;
+    }
     // Monotonic progress WITHIN a state: at phase edges the indexer can emit a
     // late "0/N" event (e.g. an encoding row that already hit 100% gets a fresh
     // 0/total just as the view/zip merge kicks off), which would visibly snap
@@ -369,10 +369,13 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
   //   ╰────────────────────────╯
   // The width is fixed (never bounces as detail streams) and every glyph is
   // colour-guarded so partial `C` maps (tests) render plain instead of "undefined".
+  // Filled bar glyph: one eighth short of a full cell, so bars stacked on
+  // consecutive rows keep a hairline of background between them instead of
+  // fusing into one block.
+  const BAR_FILL = "▇";
   const col = (k) => C[k] || "";
   const clamp = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
   const animFrame = () => Math.floor((Date.now() - startedAt) / SPINNER_FRAME_MS);
-  const spinner = () => `${col("cyan")}${SPINNER_FRAMES[animFrame() % SPINNER_FRAMES.length]}${col("reset")}`;
   const formatElapsed = (ms) => (ms >= 60_000
     ? `${(ms / 60_000).toFixed(1)}m`
     : `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`);
@@ -386,7 +389,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
   const GRID_W = LABEL_INDENT + LANG_LABEL_W + 2 + CELL_W * 3 + COL_GAP * 2;
   const TAIL_BAR = 26;       // wide bar for the global merge / encode rows
   const DOWNLOAD_BAR = 16;   // aggregate native-artifact bytes during boot
-  const PANEL_MIN_INNER = 66;
+  const PANEL_MIN_INNER = 68;
   const ATLAS_OFF = LABEL_INDENT + LANG_LABEL_W + 2;   // grid column offsets…
   const GEN_OFF = ATLAS_OFF + CELL_W + COL_GAP;
   const PARSE_OFF = GEN_OFF + CELL_W + COL_GAP;
@@ -429,13 +432,13 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       let bar = "";
       for (let i = 0; i < width; i++) {
         bar += (i === pos || i === (pos + 1) % width)
-          ? `${col(colorKey)}█${col("reset")}`
+          ? `${col(colorKey)}${BAR_FILL}${col("reset")}`
           : `${col("dim")}░${col("reset")}`;
       }
       return bar;
     }
     const filled = Math.round((clamp(percent) / 100) * width);
-    return `${col(colorKey)}${"█".repeat(filled)}${col("reset")}${col("dim")}${"░".repeat(width - filled)}${col("reset")}`;
+    return `${col(colorKey)}${BAR_FILL.repeat(filled)}${col("reset")}${col("dim")}${"░".repeat(width - filled)}${col("reset")}`;
   };
 
   // A fixed 12-col grid cell: a 7-wide bar + a 4-wide right-justified status
@@ -460,16 +463,16 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
         let pulsed = "";
         for (let i = 0; i < CELL_BAR; i++) {
           const lit = i === idx ? on : i < filled;
-          pulsed += lit ? `${col(colorKey)}█${col("reset")}` : `${col("dim")}░${col("reset")}`;
+          pulsed += lit ? `${col(colorKey)}${BAR_FILL}${col("reset")}` : `${col("dim")}░${col("reset")}`;
         }
         bar = pulsed;
       } else {
-        bar = `${col(colorKey)}${"█".repeat(filled)}${col("reset")}${col("dim")}${"░".repeat(CELL_BAR - filled)}${col("reset")}`;
+        bar = `${col(colorKey)}${BAR_FILL.repeat(filled)}${col("reset")}${col("dim")}${"░".repeat(CELL_BAR - filled)}${col("reset")}`;
       }
       fieldRaw = `${clamp(percent)}%`;
       fieldColored = `${col("bold")}${col(colorKey)}${fieldRaw}${col("reset")}`;
     } else if (kind === "done") {
-      bar = `${col("green")}${"█".repeat(CELL_BAR)}${col("reset")}`;
+      bar = `${col("green")}${BAR_FILL.repeat(CELL_BAR)}${col("reset")}`;
       fieldRaw = "✓";
       fieldColored = `${col("green")}✓${col("reset")}`;
     } else {
@@ -519,6 +522,8 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     if (s.state === "failed") return ["fail", null];
     if (s.state === "done") return ["done", 100];
     if (s.state === "intaking") return ["active", Number.isFinite(s.percent) ? s.percent : 0, activeOpts(s)];
+    // Batches are taken in while later batches are still being generated.
+    if (s.state === "indexing" && Number(s.intakePercent) > 0) return ["active", Number(s.intakePercent), activeOpts(s)];
     return ["wait", null];
   };
 
@@ -549,8 +554,15 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     const hasWarning = groups.some((g) => g.some((s) => s.status === "warning"));
     const ready = groups.filter((g) => g.every(isStepResolved)).length;
     if (ready === groups.length && hasWarning) return `${col("yellow")}warnings${col("reset")}`;
-    if (ready === groups.length) return `${col("green")}ready${col("reset")}`;
+    if (ready === groups.length) {
+      const elapsed = runtimeSettled() ? sectionElapsed(groups.flat()) : "";
+      return `${col("green")}ready${col("reset")}${elapsed ? `${col("dim")} · ${elapsed}${col("reset")}` : ""}`;
+    }
     return `${col("dim")}${ready}/${groups.length}${col("reset")}`;
+  };
+  const runtimeSettled = () => {
+    const groups = runtimeGroups();
+    return groups.length > 0 && groups.every((group) => group.every((step) => step.status === "ok"));
   };
 
   // ---- bands / borders ----
@@ -560,6 +572,24 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     const suffix = ` ${col("dim")}${statText}${col("reset")}  `;
     const dashN = Math.max(1, w - visibleLen(prefix) - visibleLen(suffix));
     return line(`${prefix}${col("dim")}${"─".repeat(dashN)}${col("reset")}${suffix}`);
+  };
+  // A collapsed band (short panes drop the rows beneath it) carries its
+  // progress as a gauge in the rule, so the folded section still shows how
+  // far along it is instead of an empty line. Labels pad to one width so the
+  // runtime and ledger gauges start in the same column.
+  const gaugeBand = (label, percent, statText, spineKey, colorKey) => {
+    const w = innerWidth();
+    const prefix = `  ${col(spineKey)}▌${col("reset")} ${col("bold")}${padVisible(label, 12)}${col("reset")} `;
+    const suffix = ` ${col("dim")}${statText}${col("reset")}  `;
+    const dashN = Math.max(1, w - visibleLen(prefix) - TAIL_BAR - 1 - visibleLen(suffix));
+    return line(`${prefix}${gaugeBar(percent, TAIL_BAR, colorKey)} ${col("dim")}${"─".repeat(dashN)}${col("reset")}${suffix}`);
+  };
+  const runtimeGaugeBand = () => {
+    const all = runtimeGroups().flat();
+    if (all.length === 0) return bandRow("runtime", runtimeStatusText(), "cyan");
+    const resolved = all.filter(isStepResolved).length;
+    const failed = all.some((s) => s.status === "failed");
+    return gaugeBand("runtime", (resolved / all.length) * 100, runtimeStatusText(), "cyan", failed ? "red" : "cyan");
   };
   const topBorder = () => {
     const w = innerWidth();
@@ -571,19 +601,6 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
   const bottomBorder = () => `${col("dim")}╰${"─".repeat(innerWidth())}╯${col("reset")}`;
 
   // ---- boot section: one collapsed row per readiness group ----
-  const sectionGlyph = (stepList) => {
-    if (stepList.some((s) => s.status === "failed")) return `${col("red")}✗${col("reset")}`;
-    if (stepList.some((s) => s.status === "running" || s.status === "pending")) return spinner();
-    if (stepList.some((s) => s.status === "warning")) return `${col("yellow")}!${col("reset")}`;
-    if (stepList.length > 0 && stepList.every((s) => s.status === "ok")) return `${col("green")}✓${col("reset")}`;
-    if (stepList.length > 0 && stepList.every((s) => s.status === "skipped")) return `${col("dim")}⊘${col("reset")}`;
-    if (stepList.some((s) => s.status === "deferred")) return `${col("yellow")}/${col("reset")}`;
-    // A section commonly mixes required successes with optional skips (for
-    // example no worktree cleanup needed). That is terminal readiness, not an
-    // in-flight fallback — render the same check as an all-ok section.
-    if (stepList.length > 0 && stepList.every(isStepResolved)) return `${col("green")}✓${col("reset")}`;
-    return spinner();
-  };
   const chipFor = (label, padTo = 0) => {
     const s = steps.get(label);
     const g = s.status === "ok" ? `${col("green")}✓${col("reset")}`
@@ -657,8 +674,20 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       const labels = sectionOrder.get(section) || [];
       const stepList = labels.map((l) => steps.get(l)).filter(Boolean);
       if (stepList.length === 0) continue;
-      const glyph = sectionGlyph(stepList);
-      const name = padVisible(SECTION_LABELS[section] || section, 10);
+      // Each check group carries the same gauge as the ledger grid, in the
+      // grid's first column: the share of its checks that have resolved. A
+      // finished group keeps its full bar instead of collapsing to a word.
+      const resolvedSteps = stepList.filter(isStepResolved).length;
+      const gauge = stepList.some((s) => s.status === "failed")
+        ? cell("fail", null)
+        : stepList.every((s) => s.status === "skipped")
+          ? cell("skip", null)
+          : resolvedSteps === stepList.length
+            ? cell(stepList.some((s) => s.status === "deferred") ? "defer" : "done", 100)
+            // The fill boundary blinks while the group is in flight: the row
+            // reads as alive between checks without a separate spinner.
+            : cell("active", (resolvedSteps / stepList.length) * 100, { colorKey: "cyan", pulse: true });
+      const rowHead = `${" ".repeat(LABEL_INDENT)}${col("dim")}${padVisible(SECTION_LABELS[section] || section, ATLAS_OFF - LABEL_INDENT - 1)}${col("reset")} ${gauge} `;
       const allOk = stepList.every((s) => s.status === "ok");
       const allResolved = stepList.every(isStepResolved);
       const hasWarning = stepList.some((s) => s.status === "warning");
@@ -687,7 +716,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
             .map(([l]) => chipFor(l))
             .join("   ");
         }
-        out.push(line(`    ${glyph} ${name} ${body}`));
+        out.push(line(`${rowHead}${body}`));
         continue;
       }
       let body;
@@ -706,7 +735,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       } else {
         body = runningSectionBody(labels);
       }
-      out.push(line(`    ${glyph} ${name} ${body}`));
+      out.push(line(`${rowHead}${body}`));
       if (section === "workspace") {
         const downloadRow = nativeDownloadRow();
         if (downloadRow) out.push(downloadRow);
@@ -761,12 +790,21 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
   const codeLedgerPercent = (visibleLangs) => {
     let units = 0;
     let sum = 0;
+    // Languages weigh by their file count: a language of a few files must not
+    // move the band as far as one holding most of the repository.
+    let weightTotal = 0;
+    let weighted = 0;
     for (const lang of visibleLangs) {
       const e = langs.get(lang);
-      sum += fracOf(...effectiveAtlasKind(e.atlas)); units += 1;
-      sum += fracOf(...effectiveScipGenKind(e.scip)); units += 1;
-      sum += fracOf(...effectiveScipParseKind(e.scip)); units += 1;
+      const weight = Math.max(1, Number(e.atlas?.total) || 0, Number(e.scip?.total) || 0);
+      const stages = fracOf(...effectiveAtlasKind(e.atlas))
+        + fracOf(...effectiveScipGenKind(e.scip))
+        + fracOf(...effectiveScipParseKind(e.scip));
+      weighted += weight * stages;
+      weightTotal += weight * 3;
+      units += 3;
     }
+    if (weightTotal > 0) sum += (weighted / weightTotal) * units;
     // A cache-hot boot does not build a view, so it emits no merge events.
     // Count the merge only after it actually starts; reserving an unconditional
     // unit here capped otherwise-complete ledgers at ~80–90% forever.
@@ -786,7 +824,7 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     if (st.state === "done") {
       const el = formatElapsed((st.finishedAt || Date.now()) - st.startedAt);
       const tail = st.detail ? ` ${col("dim")}· ${st.detail}${col("reset")}` : "";
-      return line(`${prefix}${col("green")}${"█".repeat(TAIL_BAR)}${col("reset")}  ${col("green")}✓${col("reset")} ${col("dim")}${el}${col("reset")}${tail}`);
+      return line(`${prefix}${col("green")}${BAR_FILL.repeat(TAIL_BAR)}${col("reset")}  ${col("green")}✓${col("reset")} ${col("dim")}${el}${col("reset")}${tail}`);
     }
     if (st.state === "skipped") {
       return line(`${prefix}${col("dim")}${"░".repeat(TAIL_BAR)}${col("reset")}  ${col("dim")}⊘ ${st.detail || "skipped"}${col("reset")}`);
@@ -844,10 +882,10 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
     const body = [];
     const add = (row, priority) => body.push({ row, priority });
 
-    add(bandRow("runtime", runtimeStatusText(), "cyan"), 90);
+    add(visibleLangs.length > 0 ? runtimeGaugeBand() : bandRow("runtime", runtimeStatusText(), "cyan"), 90);
     for (const row of renderNotes()) add(row, 100);
     if (visibleLangs.length > 0) {
-      add(bandRow("atlas ledger", `${ledgerPercent}%`, "magenta"), 100);
+      add(gaugeBand("atlas ledger", ledgerPercent, `${ledgerPercent}%`, "magenta", "magenta"), 100);
       add(line(`${col("dim")}${placeCols([["atlas parse", ATLAS_OFF], ["scip gen", GEN_OFF], ["scip intake", PARSE_OFF]])}${col("reset")}`), 90);
       for (const lang of visibleLangs) {
         const entry = langs.get(lang);

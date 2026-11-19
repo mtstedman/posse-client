@@ -39,7 +39,7 @@ import { RunHumanAnswerRelay } from "./RunHumanAnswerRelay.js";
 import { RunSchedulerLoopCallbacks } from "./RunSchedulerLoopCallbacks.js";
 import { RunSharedSession } from "./RunSharedSession.js";
 import { RunShutdownController } from "./RunShutdownController.js";
-import { PROVIDER_AUTH_WARMUP_TIMEOUT_MS, PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS, closeRuntimeStateForExit, deployReadyLineAtExit, describeOpenGatesAtExit, firstLine, handleWrapUpSignal, listOpenHumanGatesAtExit, openParkingGateForWorkItem, operationalRunJobs, summarizeRunCompletion, bootScipLangPatchFromEvent, scopeScipEventToSourceLanguage } from "../functions/run-session.js";
+import { PROVIDER_AUTH_WARMUP_TIMEOUT_MS, PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS, closeRuntimeStateForExit, deployReadyLineAtExit, describeOpenGatesAtExit, firstLine, handleWrapUpSignal, listOpenHumanGatesAtExit, openParkingGateForWorkItem, operationalRunJobs, summarizeRunCompletion, bootScipBatchLangPatch, bootScipLangPatchFromEvent, scopeScipEventToSourceLanguage } from "../functions/run-session.js";
 import { checkPosseUpdateAvailabilityCached, formatPosseUpdateAvailableWarning } from "../functions/update-command.js";
 import { BossyLocalStream } from "../../bridge/classes/BossyLocalStream.js";
 import { readHumanGateResnoozeSec } from "../../scheduler/functions/config.js";
@@ -1684,6 +1684,7 @@ export class RunSession {
       // zip (layer merge) actually ran this boot. Gates whether we paint a
       // terminal state on the zip indicator (warm-cache skips build no view).
       let atlasZipStarted = false;
+      const scipBatchProgress = new Map();
       let atlasEncodeStarted = false;
       let atlasEncodeStartedAt = null;
       let bootEncodeProgress = null;
@@ -2000,7 +2001,7 @@ export class RunSession {
             // ATLAS encoding → stage="encoding"
             for (const lang of eventLanguages) {
               const scipEvent = scopeScipEventToSourceLanguage(event, lang);
-              const scipPatch = bootScipLangPatchFromEvent(scipEvent);
+              const scipPatch = bootScipBatchLangPatch(scipEvent, bootScipLangPatchFromEvent(scipEvent), scipBatchProgress);
               if (kind === "atlas.scip.restage_completed") {
                 // NON-terminal: restage (the .scip generation) finished, but the
                 // ingest/intake phase still follows. Keep the row in the blue

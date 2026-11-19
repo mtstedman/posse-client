@@ -528,6 +528,105 @@ export function bootScipLangPatchFromEvent(event = {}) {
   return null;
 }
 
+/**
+ * Batch staging produces and ingests a language's index one batch at a time,
+ * so the per-artifact ingest events complete once per batch and say nothing
+ * about the language as a whole. For a language staged in batches the row is
+ * driven by the batch events instead: generate is the share of its documents
+ * whose artifact is staged, intake the share whose ledger outcome is known,
+ * and the row is done only when every document is resolved.
+ *
+ * @param {Record<string, any>} event SCIP event scoped to one source language.
+ * @param {Record<string, any> | null} patch Row patch the event maps to on its own.
+ * @param {Map<string, Record<string, any>>} progress Per-language batch progress, updated in place.
+ */
+export function bootScipBatchLangPatch(event = {}, patch = null, progress = new Map()) {
+  const lang = String(event.language || "").trim().toLowerCase();
+  if (!lang) return patch;
+  const kind = String(event.kind || "");
+  const ordinal = Number(event.language_batch_ordinal);
+  const count = Number(event.language_batch_count);
+  const batchEvent = /^atlas\.scip\.batch_(?:staging_started|staged|reused|acknowledged)$/u.test(kind)
+    && Number.isInteger(ordinal) && Number.isInteger(count) && count > 0;
+  if (batchEvent) {
+    const entry = progress.get(lang)
+      || { completed: 0, total: count, staged: 0, resolved: 0, documentsTotal: null, batchBefore: 0, batchDocuments: 0, inBatch: 0 };
+    const documentsTotal = Number(event.language_documents_total);
+    const before = Number(event.language_documents_before);
+    const expected = Number(event.documents_expected) || 0;
+    entry.total = count;
+    if (Number.isFinite(documentsTotal) && documentsTotal > 0 && Number.isFinite(before)) {
+      entry.documentsTotal = documentsTotal;
+      if (kind === "atlas.scip.batch_staging_started") {
+        entry.batchBefore = before;
+        entry.batchDocuments = expected;
+        entry.inBatch = 0;
+        entry.staged = Math.max(entry.staged, before);
+      } else if (kind !== "atlas.scip.batch_acknowledged") {
+        entry.staged = Math.max(entry.staged, Math.min(before + expected, documentsTotal));
+      }
+      const resolved = Number(event.language_documents_resolved);
+      if (Number.isFinite(resolved)) entry.resolved = Math.max(entry.resolved, Math.min(resolved, documentsTotal));
+    }
+    if (kind === "atlas.scip.batch_staging_started") entry.completed = Math.max(entry.completed, ordinal);
+    else if (kind !== "atlas.scip.batch_acknowledged") entry.completed = Math.max(entry.completed, Math.min(ordinal + 1, count));
+    progress.set(lang, entry);
+  }
+  const entry = progress.get(lang);
+  if (!entry || (!patch && !batchEvent)) return patch;
+  if (patch && ["failed", "skipped", "deferred"].includes(patch.state)) return patch;
+  if (entry.documentsTotal === null) {
+    // Batch events without document counts: hold the row in the indexing
+    // phase by batch count; the last batch's ingest events finish it.
+    if (entry.completed >= entry.total) {
+      return patch?.state === "indexing"
+        ? { state: "intaking", percent: 100, detail: `${entry.total} batches staged`, reopen: true }
+        : patch;
+    }
+    return {
+      state: "indexing",
+      current: entry.completed,
+      total: entry.total,
+      percent: (entry.completed / entry.total) * 100,
+      detail: `batch ${Math.min(entry.completed + 1, entry.total)}/${entry.total}`,
+      reopen: true,
+    };
+  }
+  // The indexer's own progress inside the batch it is producing.
+  const inBatchCurrent = Number(event.current ?? event.progress_current);
+  const inBatchTotal = Number(event.total ?? event.progress_total);
+  if (!batchEvent && String(event.stage || "") === "scip.indexing"
+      && Number.isFinite(inBatchCurrent) && inBatchTotal === entry.batchDocuments && inBatchTotal > 0) {
+    entry.inBatch = Math.max(entry.inBatch, Math.min(inBatchCurrent, inBatchTotal));
+  }
+  const total = entry.documentsTotal;
+  const generated = Math.min(total, Math.max(entry.staged, entry.batchBefore + entry.inBatch));
+  const intakePercent = (entry.resolved / total) * 100;
+  if (entry.resolved >= total) {
+    return { state: "done", current: total, total, percent: 100, intakePercent: 100, detail: `${total} docs`, reopen: true };
+  }
+  if (entry.completed >= entry.total) {
+    return {
+      state: "intaking",
+      current: entry.resolved,
+      total,
+      percent: intakePercent,
+      intakePercent,
+      detail: `intake ${entry.resolved}/${total} docs`,
+      reopen: true,
+    };
+  }
+  return {
+    state: "indexing",
+    current: generated,
+    total,
+    percent: (generated / total) * 100,
+    intakePercent,
+    detail: `batch ${Math.min(entry.completed + 1, entry.total)}/${entry.total} · ${generated}/${total} docs`,
+    reopen: true,
+  };
+}
+
 export function scopeScipEventToSourceLanguage(event = {}, lang = "") {
   const key = String(lang || "").trim().toLowerCase();
   if (!key) return event;

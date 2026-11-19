@@ -923,7 +923,6 @@ export async function stageScipBatches({
 
   const files = [...fallbackFiles];
   const results = (fallback.results || []).map((row) => ({ ...row, fallbackWholeProject: true }));
-  const inFlight = [];
   // Documents whose staged artifact was TAKEN IN by the ledger. A bisected
   // batch can acknowledge some documents while others fail permanently, so the
   // coverage receipt is built from this set rather than from the manifest: an
@@ -955,7 +954,48 @@ export async function stageScipBatches({
       error: document.error || document.reason,
     }));
   };
-  const acknowledgeOldest = async () => {
+  // A language's batches interleave with other languages' in path order, so
+  // the session-wide ordinal says nothing about one language being finished.
+  const languageBatchCounts = new Map();
+  const languageDocumentCounts = new Map();
+  const languageBatchPositions = new Map();
+  for (const batch of manifest.batches) {
+    const language = batch.plan.indexerId;
+    languageBatchPositions.set(batch, {
+      ordinal: languageBatchCounts.get(language) || 0,
+      documentsBefore: languageDocumentCounts.get(language) || 0,
+    });
+    languageBatchCounts.set(language, (languageBatchCounts.get(language) || 0) + 1);
+    languageDocumentCounts.set(language, (languageDocumentCounts.get(language) || 0) + batch.documents.length);
+  }
+  const languageBatchFields = (batch) => ({
+    language_batch_ordinal: languageBatchPositions.get(batch).ordinal,
+    language_batch_count: languageBatchCounts.get(batch.plan.indexerId),
+    language_documents_before: languageBatchPositions.get(batch).documentsBefore,
+    language_documents_total: languageDocumentCounts.get(batch.plan.indexerId),
+  });
+  // Documents of each language whose intake outcome is known: acknowledged by
+  // the ledger or recorded as unavailable. This is the language's real intake
+  // progress; staging a batch only says its artifact was produced.
+  const languageDocumentsResolved = new Map();
+  const reportBatchResolved = (/** @type {any} */ batch, /** @type {number} */ acknowledged, /** @type {number} */ unavailable) => {
+    const language = batch.plan.indexerId;
+    const resolved = (languageDocumentsResolved.get(language) || 0) + batch.documents.length;
+    languageDocumentsResolved.set(language, resolved);
+    emit(onProgress, `acknowledged SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount}`, {
+      kind: "atlas.scip.batch_acknowledged",
+      batch_ordinal: batch.batchOrdinal,
+      batch_count: manifest.batchCount,
+      documents_expected: batch.documentsExpected,
+      documents_acknowledged: acknowledged,
+      documents_unavailable: unavailable,
+      language,
+      source_languages: sourceLanguagesForPlan(batch.plan),
+      ...languageBatchFields(batch),
+      language_documents_resolved: resolved,
+    });
+  };
+  const acknowledgeOldest = async (/** @type {any[]} */ inFlight) => {
     const pending = inFlight.shift();
     if (!pending) return;
     // Each staged artifact of this batch is resolved against the documents it
@@ -983,7 +1023,7 @@ export async function stageScipBatches({
       // durable downstream acknowledgement to inherit.
       state.completedBatches.push(pending.batch.batchOrdinal);
       if (pending.resumedFromSession) state.resumedBatches.push(pending.batch.batchOrdinal);
-      state.committedDocumentOrdinal = pending.batch.lastDocumentOrdinal;
+      state.committedDocumentOrdinal = Math.max(state.committedDocumentOrdinal, pending.batch.lastDocumentOrdinal);
     } else {
       state.unacknowledgedBatches.push(pending.batch.batchOrdinal);
     }
@@ -996,6 +1036,7 @@ export async function stageScipBatches({
         error: entry.error || "SCIP intake did not acknowledge the document",
       });
     }
+    reportBatchResolved(pending.batch, outcome.acknowledged.length, outcome.unavailable.length);
   };
 
   try {
@@ -1012,8 +1053,12 @@ export async function stageScipBatches({
         fallback_whole_project: true,
       }) : undefined);
     }
-    for (const batch of manifest.batches) {
-      while (inFlight.length >= maxInFlight) await acknowledgeOldest();
+    // Each language's batches form an independent lane with its own intake
+    // window. Lanes run concurrently, so a language finishes when its own
+    // batches do instead of queueing behind every other language's in path
+    // order; within a lane the batches stay sequential.
+    const stageBatch = async (/** @type {any} */ batch, /** @type {any[]} */ inFlight) => {
+      while (inFlight.length >= maxInFlight) await acknowledgeOldest(inFlight);
       const reusable = reusableBatches.get(batch.batchOrdinal);
       if (reusable) {
         const batchSha256 = sha256Hex(await fs.promises.readFile(reusable.outputPath));
@@ -1063,9 +1108,11 @@ export async function stageScipBatches({
           batch_count: manifest.batchCount,
           documents_expected: batch.documentsExpected,
           language: batch.plan.indexerId,
+          source_languages: sourceLanguagesForPlan(batch.plan),
+          ...languageBatchFields(batch),
           resumed_from_session_id: reusable.sessionId,
         });
-        continue;
+        return;
       }
       emit(onProgress, `staging SCIP batch ${batch.batchOrdinal + 1}/${manifest.batchCount} (${batch.documentsExpected} documents)`, {
         kind: "atlas.scip.batch_staging_started",
@@ -1076,6 +1123,7 @@ export async function stageScipBatches({
         source_bytes: batch.sourceBytes,
         language: batch.plan.indexerId,
         source_languages: sourceLanguagesForPlan(batch.plan),
+        ...languageBatchFields(batch),
       });
       const project = batchProjects.get(batch.plan) || null;
       // An unloadable repository tsconfig fails every document identically;
@@ -1134,7 +1182,8 @@ export async function stageScipBatches({
             error: unavailable.error || recovered.error || "SCIP batch staging failed",
           });
         }
-        continue;
+        reportBatchResolved(batch, 0, batch.documents.length);
+        return;
       }
       if (recovered.recovered) state.recoveredBatches.push(batch.batchOrdinal);
       for (const unavailable of recovered.unavailable) {
@@ -1189,9 +1238,37 @@ export async function stageScipBatches({
         documents_unavailable: result.documentsUnavailable,
         language: batch.plan.indexerId,
         source_languages: sourceLanguagesForPlan(batch.plan),
+        ...languageBatchFields(batch),
       });
+    };
+    /** @type {Map<string, any[]>} */
+    const lanes = new Map();
+    for (const batch of manifest.batches) {
+      const language = String(batch.plan.indexerId);
+      if (!lanes.has(language)) lanes.set(language, []);
+      /** @type {any[]} */ (lanes.get(language)).push(batch);
     }
-    while (inFlight.length > 0) await acknowledgeOldest();
+    // Every lane settles before a failure propagates, so no lane's indexer is
+    // left running against a session already recorded as failed.
+    const laneOutcomes = await Promise.allSettled([...lanes.values()].map(async (batches) => {
+      /** @type {any[]} */
+      const inFlight = [];
+      try {
+        for (const batch of batches) await stageBatch(batch, inFlight);
+      } finally {
+        while (inFlight.length > 0) await acknowledgeOldest(inFlight);
+      }
+    }));
+    const laneFailure = laneOutcomes.find((outcome) => outcome.status === "rejected");
+    if (laneFailure) throw /** @type {PromiseRejectedResult} */ (laneFailure).reason;
+    // Lanes interleave; the session record stays in manifest order.
+    const byOrdinal = (/** @type {number} */ left, /** @type {number} */ right) => left - right;
+    for (const key of ["completedBatches", "failedBatches", "unacknowledgedBatches", "recoveredBatches", "resumedBatches"]) {
+      /** @type {any} */ (state)[key].sort(byOrdinal);
+    }
+    results.sort((left, right) => (
+      (Number.isInteger(left.batchOrdinal) ? left.batchOrdinal : -1) - (Number.isInteger(right.batchOrdinal) ? right.batchOrdinal : -1)
+    ));
     state.status = state.failedBatches.length > 0 ? "partial" : "complete";
     await writeBatchSessionManifest(sessionManifestPath, state);
     let batchCoverage = null;

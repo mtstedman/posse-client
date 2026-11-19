@@ -29,7 +29,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { ViewBuilder, viewFingerprintForOptions, prepareCanonicalViewForReplacement } from "./ViewBuilder.js";
 import { View } from "./View.js";
-import { OrderedDocumentIntake } from "./OrderedDocumentIntake.js";
+import { LanguageLaneDocumentIntake } from "./LanguageLaneDocumentIntake.js";
 import {
   exportTreeCompressionMlSnapshot,
   importTreeCompressionMlSnapshot,
@@ -3117,7 +3117,7 @@ export class ParseEngine {
    * `commitSource` maps paths to committed copies under `commitSource.root`
    * (null: absent from the commit); those are read instead of `sourceRoot`.
    *
-   * @param {{ paths: string[], branch: string, base: AtlasWarmJobResult, sourceRoot?: string, documentIntake?: OrderedDocumentIntake | null, stageScipPaths?: ((paths: string[]) => Promise<unknown>) | null, commitSource?: { root: string, paths: Map<string, string | null> } | null }} args
+   * @param {{ paths: string[], branch: string, base: AtlasWarmJobResult, sourceRoot?: string, documentIntake?: LanguageLaneDocumentIntake | null, stageScipPaths?: ((paths: string[]) => Promise<unknown>) | null, commitSource?: { root: string, paths: Map<string, string | null> } | null }} args
    */
   async #indexPaths({ paths, branch, base, sourceRoot = this.#repoRoot, documentIntake = null, stageScipPaths = null, commitSource = null }) {
     if (!this.#parser) return;
@@ -3249,7 +3249,11 @@ export class ParseEngine {
       snapshot.delete(repoRelPath);
     };
 
-    for (const rawPath of paths) {
+    // Each language is an independent lane: its files are indexed in path
+    // order while the other languages' lanes run alongside, so a language is
+    // finished when its own files are instead of when the whole walk reaches
+    // its last file. Files with no language tag share one lane.
+    const indexPath = async (/** @type {unknown} */ rawPath) => {
       const repo_rel_path = String(rawPath || "");
       considered++;
       const ordinal = considered;
@@ -3273,7 +3277,7 @@ export class ParseEngine {
             reason: "unsupported_lang",
             message: "Non-canonical repo path; expected forward-slash repo-relative form",
           }, { ordinal, language: pathLanguage });
-          continue;
+          return;
         }
 
         if (isGeneratedSourceArtifactPath(repo_rel_path)) {
@@ -3305,7 +3309,7 @@ export class ParseEngine {
             : [];
           if (samples.length < 50) samples.push(repo_rel_path);
           /** @type {any} */ (base).generated_artifact_samples = samples;
-          continue;
+          return;
         }
 
         const fromCommit = commitSource?.paths.has(repo_rel_path) === true;
@@ -3339,7 +3343,7 @@ export class ParseEngine {
             base.ledger_entries_appended++;
             snapshot.delete(repo_rel_path);
           }
-          continue;
+          return;
         }
 
         const ext = path.extname(repo_rel_path).toLowerCase();
@@ -3357,10 +3361,10 @@ export class ParseEngine {
           // go — which is also what a shrinking parser language set produces.
           if (await this.#retainsCoverageWithoutParser(snapshot.get(repo_rel_path), absPath)) {
             base.skipped.push(unsupported);
-            continue;
+            return;
           }
           await recordAccountedExclusion(unsupported, { ordinal, language: pathLanguage });
-          continue;
+          return;
         }
 
         /** @type {Buffer | null} */
@@ -3387,7 +3391,7 @@ export class ParseEngine {
               reason: /** @type {any} */ (entryDisposition.skip.reason),
               message: entryDisposition.skip.message,
             }, { ordinal, language: pathLanguage });
-            continue;
+            return;
           }
           if (isOversizedForParsing(fileStat.size)) {
             await recordAccountedExclusion({
@@ -3395,7 +3399,7 @@ export class ParseEngine {
               reason: "size_exceeded",
               message: `File is ${fileStat.size} bytes; max parse size is ${MAX_PARSE_FILE_BYTES} bytes`,
             }, { ordinal, language: pathLanguage });
-            continue;
+            return;
           }
           // Minification is a resource guard, not a classification of tiny
           // files. Long TypeScript declarations and JavaScript fixtures can
@@ -3408,7 +3412,7 @@ export class ParseEngine {
               reason: "minified_skip",
               message: "Path matches minified/bundled pattern",
             }, { ordinal, language: pathLanguage });
-            continue;
+            return;
           }
           fileBytes = await fs.promises.readFile(absPath);
           contentHash = sha256Hex(fileBytes);
@@ -3421,7 +3425,7 @@ export class ParseEngine {
                 reason: "minified_skip",
                 message: `Content looks minified (maxLine=${Math.round(inspection.maxLineLen)} meanLine=${Math.round(inspection.meanLineLen)})`,
               }, { ordinal, language: pathLanguage });
-              continue;
+              return;
             }
           }
         } catch {
@@ -3444,7 +3448,7 @@ export class ParseEngine {
           await recordPathSourceStat(repo_rel_path, contentHash, fileStat);
           await documentIntake?.markTreeSitter({ repo_rel_path, content_hash: contentHash });
           documentPublished = true;
-          continue;
+          return;
         }
         if (currentParsedBlob && this.#viewLayerMerge && !mergeExistingScipRows) {
           // Content-addressed layers are shared across branches. A WI joining
@@ -3466,7 +3470,7 @@ export class ParseEngine {
           snapshot.set(repo_rel_path, contentHash);
           await documentIntake?.markTreeSitter({ repo_rel_path, content_hash: contentHash });
           documentPublished = true;
-          continue;
+          return;
         }
 
         /** @type {ParseResult | null} */
@@ -3491,7 +3495,7 @@ export class ParseEngine {
             reason: "parse_error",
             message: formatAtlasError(err),
           });
-          if (!this.#viewLayerMerge || !contentHash || !pathLanguage) continue;
+          if (!this.#viewLayerMerge || !contentHash || !pathLanguage) return;
           parsed = {
             repo_rel_path,
             content_hash: contentHash,
@@ -3532,7 +3536,7 @@ export class ParseEngine {
             reason: "unsupported_syntax_skip",
             message: formatAtlasError(err),
           });
-          if (!this.#viewLayerMerge || !contentHash || !pathLanguage) continue;
+          if (!this.#viewLayerMerge || !contentHash || !pathLanguage) return;
           parsed = {
             repo_rel_path,
             content_hash: contentHash,
@@ -3586,7 +3590,7 @@ export class ParseEngine {
             await recordPathSourceStat(repo_rel_path, parsed.content_hash, fileStat);
             await documentIntake?.markTreeSitter({ repo_rel_path, content_hash: parsed.content_hash });
             documentPublished = true;
-            continue;
+            return;
           }
           // A shared blob is not proof that THIS branch points at it.
           // Fall through to append the branch-local path delta below.
@@ -3609,7 +3613,7 @@ export class ParseEngine {
         if (before === parsed.content_hash && ledgerHasCurrentParsedBlob(this.#ledger, parsed.content_hash, { layerMerge: this.#viewLayerMerge })) {
           // Same bytes already on this branch with current parsed rows.
           await recordPathSourceStat(repo_rel_path, parsed.content_hash, fileStat);
-          continue;
+          return;
         }
 
         if (ledgerHasCurrentParsedBlob(this.#ledger, parsed.content_hash, { layerMerge: this.#viewLayerMerge })) {
@@ -3645,7 +3649,7 @@ export class ParseEngine {
           await recordPathSourceStat(repo_rel_path, parsed.content_hash, fileStat);
           await documentIntake?.markTreeSitter({ repo_rel_path, content_hash: parsed.content_hash });
           documentPublished = true;
-          continue;
+          return;
         }
 
         await reportIndexProgress(repo_rel_path, {
@@ -3673,7 +3677,21 @@ export class ParseEngine {
         if (!documentPublished) documentIntake?.skip(repo_rel_path);
         await reportIndexProgress(repo_rel_path, { force: considered === total, language: pathLanguage });
       }
+    };
+    /** @type {Map<string, unknown[]>} */
+    const lanes = new Map();
+    for (const rawPath of paths) {
+      const lane = languageTagForExtension(path.extname(String(rawPath || "")).toLowerCase()) || "";
+      if (!lanes.has(lane)) lanes.set(lane, []);
+      /** @type {unknown[]} */ (lanes.get(lane)).push(rawPath);
     }
+    // Every lane settles before a failure propagates so no lane keeps
+    // appending to the ledger behind a warm that already reported failure.
+    const laneOutcomes = await Promise.allSettled([...lanes.values()].map(async (lanePaths) => {
+      for (const rawPath of lanePaths) await indexPath(rawPath);
+    }));
+    const laneFailure = laneOutcomes.find((outcome) => outcome.status === "rejected");
+    if (laneFailure) throw /** @type {PromiseRejectedResult} */ (laneFailure).reason;
     } finally {
       documentIntake?.finishTreeSitter();
       if (scipWork) await scipWork;
@@ -3743,7 +3761,7 @@ export class ParseEngine {
         ?? /** @type {any} */ (this.#runtimeConfig).atlas_embedding_document_window,
       8,
     );
-    const documents = new OrderedDocumentIntake({
+    const documents = new LanguageLaneDocumentIntake({
       readAhead: documentWindow,
       producerBackpressure: false,
     });
@@ -3832,7 +3850,7 @@ export class ParseEngine {
   }
 
   /**
-   * @param {{ documents: OrderedDocumentIntake, resources: any, runner: any, closed: boolean } | null} intake
+   * @param {{ documents: LanguageLaneDocumentIntake, resources: any, runner: any, closed: boolean } | null} intake
    * @param {AtlasWarmJobResult} base
    */
   async #finishDocumentEmbeddingIntake(intake, base) {
