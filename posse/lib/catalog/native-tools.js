@@ -107,13 +107,14 @@ export const TOOL_EDIT_FILE = {
   type: "function",
   name: "edit_file",
   description:
-    "Edit an existing file within the allowed scope. Provide exactly one mode: exact find/replace, " +
+    "Edit a file, or create one, within the allowed scope. To create a file that does not exist, send find \"\" and the whole content as replace. " +
+    "To edit, provide exactly one mode: exact find/replace, " +
     "replaceLines, edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. " +
-    "For several edits to one file, send edits[] once: every item resolves against the original file. Valid non-overlapping edits apply; failures are reported by index. Retry only failed items after rereading the changed file.",
+    "For several edits to one file, send edits[] once: every item resolves against the original file. Valid non-overlapping edits apply; failures are reported by index. A successful edit is saved as sent and reports its current line numbers; no read is needed to confirm it. Retry only failed items.",
   parameters: {
     type: "object",
     properties: {
-      path: { type: "string", description: "File path to edit" },
+      path: { type: "string", description: "File path to edit or create" },
       find: { type: "string", description: "Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged." },
       replace: { type: "string", description: "Replacement text" },
       replaceLines: {
@@ -2652,7 +2653,7 @@ export const TOOL_CHAIN_READ = {
   description:
     "Read exact missing file context through the deterministic fallback. When ATLAS is active, " +
     "successful ATLAS source retrieval already counts as file-content evidence. This reader covers " +
-    "remaining ATLAS evidence gaps, exact mutated or non-indexed state, an " +
+    "remaining ATLAS evidence gaps, an " +
     "unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you " +
     "classify that file as relevant or irrelevant. Large files may be paged with " +
     "offset/limit; after the file is tagged relevant, later continuation pages inherit " +

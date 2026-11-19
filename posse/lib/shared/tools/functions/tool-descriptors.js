@@ -726,7 +726,12 @@ export function getDeterministicMcpToolNames(role, {
   // always read-only). The MCP gateway's runtimeToolAvailable() hides the tool
   // unless this repo's admin config enables it with a usable grant.
   if (["planner", "dev", "assessor"].includes(role)) tools.push("project_db_query");
-  if (role === "researcher" && !atlasAvailable) {
+  // The audited read (chain_read then chain_verdict) is the evidence trail of a
+  // researcher working alone without ATLAS. A researcher a planner dispatched
+  // for a bounded investigation reports to that planner, which judges the
+  // findings itself: it reads with the plain reader, and the verdict call no
+  // longer doubles every file it opens.
+  if (role === "researcher" && !atlasAvailable && !researchInvestigation) {
     const readIdx = tools.indexOf("read_file");
     if (readIdx !== -1) tools.splice(readIdx, 1);
     tools.push("chain_read", "chain_verdict");

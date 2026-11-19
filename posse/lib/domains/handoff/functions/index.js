@@ -1651,7 +1651,7 @@ export async function handoff(input, { providerName = null, reviewerChildIdentit
   // prefetch instead of queueing behind it. The result is reused only when the
   // lookup's inputs are unchanged once the prefetch finishes.
   let earlyMemorySurface = null;
-  if (recipient === "assessor" && atlasHandoffPrefetchPolicy.allowed) {
+  if (recipient === "assessor" && atlasHandoffPrefetchPolicy.allowed && !packet.atlas_disabled) {
     try {
       const earlyKey = memorySurfaceInputKey(packet);
       const earlyKaizenTelemetry = {};
@@ -1877,6 +1877,9 @@ export async function handoff(input, { providerName = null, reviewerChildIdentit
     () => _loadRelevantInsightsAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry })));
   const reuseEarlySurface = earlyMemorySurface && earlyMemorySurface.key === memorySurfaceInputKey(packet);
   packet.memory_surface = await timeHandoffStep(packet, "memory.surface", async () => {
+    // Memory lives in the ATLAS engine. With ATLAS off for this job the lookup
+    // can only wait out its timeout against an index that is not serving.
+    if (packet.atlas_disabled) return { symbols: [], files: [] };
     if (reuseEarlySurface) {
       const early = await earlyMemorySurface.promise;
       if (early) {

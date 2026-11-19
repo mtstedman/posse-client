@@ -56,7 +56,7 @@ import { resetAtlasRebuildableData } from "../../atlas/functions/v2/data-schema-
 import { warmReadinessProgress, warmReadinessSeed, warmReadinessStarted } from "../../atlas/functions/v2/warm-progress.js";
 import { formatAtlasError, isVerboseAtlasErrors, logAtlasError } from "../../atlas/functions/v2/verbose-errors.js";
 import { isAuthoritativeAtlasV2Mode, normalizeAtlasScipMode, shouldRunScipPhase, shouldUseAtlasV2 } from "./atlas-v2-mode.js";
-import { ATLAS_ROLE_ORDER, applyAtlasBootEnv, buildAtlasBootEnv, __resetAtlasRuntimeDisabledForTests, disableAtlasForRun, getAtlasIntegrationConfig, getAtlasProviderSupport as getConfiguredAtlasProviderSupport, getAtlasRouteForRole, getAtlasRuntimeDisabledReason, invalidateAtlasIntegrationConfigCache, isAtlasRuntimeDisabled, loadAdaptiveSplitTarget, normalizeAtlasRuntimeDisableRepoKey, resolveAtlasAssignmentUnit, resolveSplitAssignment, withAtlasConfigOverrides } from "./atlas/config.js";
+import { ATLAS_ROLE_ORDER, applyAtlasBootEnv, buildAtlasBootEnv, __resetAtlasRuntimeDisabledForTests, disableAtlasForRun, noteAtlasIndexFailureForRun, getAtlasIntegrationConfig, getAtlasProviderSupport as getConfiguredAtlasProviderSupport, getAtlasRouteForRole, getAtlasRuntimeDisabledReason, invalidateAtlasIntegrationConfigCache, isAtlasRuntimeDisabled, loadAdaptiveSplitTarget, normalizeAtlasRuntimeDisableRepoKey, resolveAtlasAssignmentUnit, resolveSplitAssignment, withAtlasConfigOverrides } from "./atlas/config.js";
 import {
   emitMainAdvanced as emitAtlasV2MainAdvanced,
   emitWiCleanup as emitAtlasV2WiCleanup,
@@ -74,6 +74,7 @@ export {
   buildAtlasBootEnv,
   __resetAtlasRuntimeDisabledForTests,
   disableAtlasForRun,
+  noteAtlasIndexFailureForRun,
   getAtlasIntegrationConfig,
   getAtlasRouteForRole,
   getAtlasRuntimeDisabledReason,

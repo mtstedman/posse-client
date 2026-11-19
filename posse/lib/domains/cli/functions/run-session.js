@@ -458,6 +458,9 @@ export function bootScipLangPatchFromEvent(event = {}) {
       detail: "indexed",
     };
   }
+  if (kind === "atlas.scip.language_current") {
+    return { state: "done", percent: 100, detail: "up-to-date" };
+  }
   if (kind === "atlas.scip.ingest.skipped") {
     return { state: "done", percent: 100, detail: "already ingested" };
   }

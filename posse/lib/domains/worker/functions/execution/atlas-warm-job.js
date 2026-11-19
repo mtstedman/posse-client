@@ -33,7 +33,7 @@ import { branchViewPath, ledgerDbPath } from "../../../atlas/functions/v2/runtim
 import { getSharedConductor } from "../../../atlas/functions/v2/parse/conductor.js";
 import { emitEmbeddingsResume, emitScipStaged } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { warmReadinessStarted, warmReadinessProgress, warmReadinessDone } from "../../../atlas/functions/v2/warm-progress.js";
-import { getAtlasIntegrationConfig, getAtlasRuntimeDisabledReason } from "../../../integrations/functions/atlas/config.js";
+import { getAtlasIntegrationConfig, getAtlasRuntimeDisabledReason, noteAtlasIndexFailureForRun, noteAtlasIndexSuccessForRun } from "../../../integrations/functions/atlas/config.js";
 import {
   formatAtlasError,
   isVerboseAtlasErrors,
@@ -257,6 +257,17 @@ export function atlasRuntimeDisabledReasonForRepo(repoRoot) {
     || getAtlasRuntimeDisabledReason(repoRoot)
     || getAtlasRuntimeDisabledReason(path.basename(String(repoRoot || "")))
     || getAtlasRuntimeDisabledReason(ledgerDbPath(repoRoot));
+}
+
+/** A warm that builds or repairs the repository's main index, not one work item's view. */
+function atlasWarmBuildsMainIndex(purpose) {
+  return !(purpose === "wi" || purpose === "wi-live" || purpose === "wi-cleanup" || WAITING_LANE_PURPOSE_SET.has(purpose));
+}
+
+function noteMainIndexFailure(worker, job, repoRoot, reason) {
+  const breaker = noteAtlasIndexFailureForRun(repoRoot, reason);
+  if (!breaker.disabled) return;
+  worker.emit(job.id, `${C.yellow}[atlas] the main index failed to build ${breaker.failures} times in this run; ATLAS is off for this repository until the next start, and jobs continue with the plain file tools${C.reset}`);
 }
 
 function atlasWarmSkippedResult({ payload, purpose, paths, reason, message }) {
@@ -549,6 +560,10 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
     }
 
     const completionStatus = atlasWarmCompletionStatus(result);
+    if (atlasWarmBuildsMainIndex(purpose)) {
+      if (completionStatus === "failed") noteMainIndexFailure(worker, job, repoRoot, result.generation_proof_reason || "main index publication failed");
+      else noteAtlasIndexSuccessForRun(repoRoot);
+    }
     const publicationError = completionStatus === "failed"
       ? result.intake?.status === "failed"
         ? `ATLAS main intake failed: ${result.skipped?.find((row) => row.reason === "parse_error")?.message || result.generation_proof_reason}`
@@ -598,6 +613,10 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
       error_text: verbose ? formatAtlasError(err) : msg,
     });
     try { await wrappedJob?.setError?.(msg); } catch { /* best effort */ }
+    try {
+      const failedPurpose = String((parseJobPayload(job) || {}).purpose || "wi");
+      if (atlasWarmBuildsMainIndex(failedPurpose)) noteMainIndexFailure(worker, job, resolveAtlasRepoRoot(worker), msg);
+    } catch { /* the breaker is best effort; the warm still fails below */ }
     // ATLAS_WARM_JOB_POLICY.maxAttempts is 1 — _retryOrFail dead-letters this.
     worker._retryOrFail(job, leaseToken, msg, { attemptId: attempt.attempt.id });
   }

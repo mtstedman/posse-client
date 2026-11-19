@@ -1,4 +1,3 @@
-import { isTestCollateralPath } from "../../../../shared/policies/functions/scope-auto-approval.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -93,12 +92,12 @@ function existingMaterialization(jobId, generation, relPath) {
   `).get(jobId, generation, relPath);
 }
 
-// A deferred test create leaves no placeholder and no provenance row (a row
-// would make the write-lock guard restore the empty file the deferral avoids),
-// so on a resumed attempt the job's own test looks like a foreign untracked
-// collision. It is this job's work when the job has already run an
-// implementation attempt, or a resume/recovery receipt names the path.
-function ownsDeferredTestCreate(packet, relPath) {
+// A planned new file is not written before the job runs: the job keeps exact
+// creation authority and edit_file creates the file. So on a resumed attempt
+// the job's own new file looks like a foreign untracked collision. It is this
+// job's work when the job has already run an implementation attempt, or a
+// resume/recovery receipt names the path.
+function ownsDeferredCreate(packet, relPath) {
   const raw = packet?._raw_payload && typeof packet._raw_payload === "object" ? packet._raw_payload : {};
   for (const key of [PRESERVED_WORK_RESUME_KEY, DIRTY_WORKTREE_RECOVERY_KEY]) {
     if (uniquePaths(raw[key]?.paths).includes(relPath)) return true;
@@ -124,48 +123,6 @@ export function materializedPathsForJob(jobId, generation = 1) {
   `).all(numericJobId, numericGeneration)
     .map((row) => normalizeRepoRelativePath(row.path))
     .filter(Boolean);
-}
-
-function recordMaterialization(packet, generation, relPath, createdParentDirs) {
-  const operationKey = `materialize:${Number(packet.job_id)}:${generation}:${relPath}`;
-  getDb().prepare(`
-    INSERT INTO file_materializations (
-      job_id, work_item_id, generation, path, operation_key,
-      created_parent_dirs_json
-    ) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(operation_key) DO NOTHING
-  `).run(
-    Number(packet.job_id),
-    packet.work_item_id == null ? null : Number(packet.work_item_id),
-    generation,
-    relPath,
-    operationKey,
-    JSON.stringify(createdParentDirs),
-  );
-}
-
-function createParentDirectories(cwd, absPath) {
-  const created = [];
-  const missing = [];
-  let cursor = path.dirname(absPath);
-  while (cursor !== cwd && cursor.startsWith(`${cwd}${path.sep}`) && !fs.existsSync(cursor)) {
-    missing.push(cursor);
-    cursor = path.dirname(cursor);
-  }
-  for (const dir of missing.reverse()) {
-    fs.mkdirSync(dir);
-    created.push(path.relative(cwd, dir).replace(/\\/g, "/"));
-  }
-  return created;
-}
-
-function rollbackCreated(cwd, files, dirs) {
-  for (const file of [...files].reverse()) {
-    try { fs.unlinkSync(file); } catch { /* best effort */ }
-  }
-  for (const relDir of [...dirs].reverse()) {
-    try { fs.rmdirSync(path.resolve(cwd, relDir)); } catch { /* retain non-empty/operator-owned */ }
-  }
 }
 
 async function rollbackStagedGreenfieldFiles(cwd, relPaths) {
@@ -352,12 +309,10 @@ export async function materializeWritingScope(packet) {
     Number.isFinite(rawGeneration) && rawGeneration >= 1
       ? Math.floor(rawGeneration)
       : 1;
-  const createdFiles = [];
-  const createdDirs = [];
   const materialized = [];
   const greenfieldFiles = [];
   const convertedToModify = [];
-  const deferredTestCreates = [];
+  const deferredCreates = [];
   try {
     for (const relPath of create) {
       const absPath = assertSafeRelativePath(cwd, relPath, "files_to_create");
@@ -379,9 +334,8 @@ export async function materializeWritingScope(packet) {
           // to modify instead of failing the attempt. Untracked collisions
           // stay hard errors — they may hold unsaved content this job's
           // scoped commit could silently swallow — except this job's own
-          // deferred test file, which a resumed attempt must keep editing.
-          if (await isTrackedPath(cwd, relPath)
-            || (isTestCollateralPath(relPath) && ownsDeferredTestCreate(packet, relPath))) {
+          // new file, which a resumed attempt must keep editing.
+          if (await isTrackedPath(cwd, relPath) || ownsDeferredCreate(packet, relPath)) {
             convertedToModify.push(relPath);
             modify.push(relPath);
             continue;
@@ -397,58 +351,32 @@ export async function materializeWritingScope(packet) {
         materialized.push(relPath);
         continue;
       }
-      // A discoverable empty test is a failing suite. Keep its exact creation
-      // authority, but do not publish a placeholder into the shared checkout.
-      if (isTestCollateralPath(relPath)) {
-        deferredTestCreates.push(relPath);
-        continue;
-      }
-      const greenfield = !(await isTrackedPath(cwd, relPath));
-      const parents = createParentDirectories(cwd, absPath);
-      createdDirs.push(...parents);
-      try {
-        fs.writeFileSync(absPath, "", { flag: "wx", mode: 0o600 });
-      } catch (error) {
-        throw materializationError(
-          `Could not exclusively materialize ${relPath}: ${error.message}`,
-          { path: relPath, cause: error },
-        );
-      }
-      createdFiles.push(absPath);
-      if (greenfield) greenfieldFiles.push(relPath);
-      recordMaterialization(packet, generation, relPath, parents);
-      materialized.push(relPath);
+      // Nothing is written for a planned new file. An empty placeholder is a
+      // committed file the job did not write: it fails a discoverable test
+      // suite, trips content checks, and stays behind when the job never
+      // fills it. The job keeps exact creation authority and edit_file
+      // creates the file with its first content.
+      deferredCreates.push(relPath);
     }
     await stageGreenfieldFiles(cwd, greenfieldFiles);
   } catch (error) {
     await rollbackStagedGreenfieldFiles(cwd, greenfieldFiles);
-    rollbackCreated(cwd, createdFiles, createdDirs);
-    if (createdFiles.length > 0) {
-      const rolledBackPaths = createdFiles.map((file) => (
-        path.relative(cwd, file).replace(/\\/g, "/")
-      ));
-      const placeholders = rolledBackPaths.map(() => "?").join(",");
-      getDb().prepare(`
-        DELETE FROM file_materializations
-        WHERE job_id = ? AND generation = ? AND path IN (${placeholders})
-      `).run(Number(packet.job_id), generation, ...rolledBackPaths);
-    }
     throw error;
   }
 
-  const editable = uniquePaths([...modify, ...create.filter((file) => !deferredTestCreates.includes(file))]);
+  const editable = uniquePaths([...modify, ...create.filter((file) => !deferredCreates.includes(file))]);
   packet.files_to_modify = editable;
-  packet.files_to_create = deferredTestCreates;
+  packet.files_to_create = deferredCreates;
   packet.create_roots = [];
   packet.creatable_files = {};
   packet.materialized_files = materialized;
   packet.promoted_modify_targets = promotedToCreate;
   packet._materialization_generation = generation;
   if (packet._raw_payload && typeof packet._raw_payload === "object") {
-    packet._raw_payload = { ...packet._raw_payload, files_to_modify: editable, files_to_create: deferredTestCreates };
-    // Only deferred test creates keep creation authority; with none, the key
-    // is absent exactly as in the no-creation branch above.
-    if (deferredTestCreates.length === 0) delete packet._raw_payload.files_to_create;
+    packet._raw_payload = { ...packet._raw_payload, files_to_modify: editable, files_to_create: deferredCreates };
+    // Only files that do not exist yet keep creation authority; with none, the
+    // key is absent exactly as in the no-creation branch above.
+    if (deferredCreates.length === 0) delete packet._raw_payload.files_to_create;
     delete packet._raw_payload.create_roots;
   }
   return { applied: true, materialized, convertedToModify, promotedToCreate };

@@ -1,6 +1,4 @@
 import { markScopeGrantUsed } from "../../../queue/functions/scope-grant-usage.js";
-import { materializeScopeCreates } from "../../../queue/functions/scope-create-grant.js";
-import { installScopeCreateMaterializer } from "../../../queue/functions/scope-create-materializer.js";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -15,7 +13,6 @@ import { toRepoRelativePath } from "../../../../shared/format/functions/display-
 // The executable supplies live boot/session fields through getters. This owner
 // keeps the scope decision, path guard, and mutation transaction together.
 export function createScopedMutationTools(ctx) {
-  installScopeCreateMaterializer(materializeScopeCreates);
   // Both the spelling and the symlink-resolved landing path must be mutable.
   function protectedMutationError(toolName, displayPath, absolutePath, targetPath = absolutePath) {
     for (const candidate of new Set([absolutePath, targetPath])) {
@@ -154,9 +151,30 @@ export function createScopedMutationTools(ctx) {
     if (protectedErr) return protectedErr;
     const missing = !fs.existsSync(resolved.path);
     const emptyCreate = !missing && args.find === "" && fs.statSync(resolved.path).isFile() && fs.statSync(resolved.path).size === 0;
-    if ((missing || emptyCreate) && ctx.effectiveScopePredicates.canCreate(resolved.target)) {
-      if (args.find !== "" || typeof args.replace !== "string") return "Error: Missing file: use write_file to create it, or edit_file with empty find and replacement text.";
-      if (Object.keys(args).some((key) => !["path", "find", "replace"].includes(key))) return "Error: Creation edit accepts only path, find and replace; use write_file.";
+    if (missing || emptyCreate) {
+      // edit_file is also how a file is created: an empty find and the whole
+      // content as the replacement. Code roles carry no write_file tool.
+      if (args.find !== "" || typeof args.replace !== "string") {
+        return `Error: ${args.path} does not exist. To create it, call edit_file with find "" and the whole file content as replace.`;
+      }
+      if (Object.keys(args).some((key) => !["path", "find", "replace"].includes(key))) {
+        return "Error: Creating a file with edit_file accepts only path, find and replace.";
+      }
+      if (!ctx.effectiveScopePredicates.canCreate(resolved.target)) {
+        if (!ctx.mcpJobId) return `Error: edit_file blocked - ${args.path} is outside the allowed creation scope.`;
+        const scopeResult = await requestScopeExpansionWithinJob({
+          path: toRepoRelativePath(ctx.workspaceCwd, resolved.target) ?? "",
+          access: "create",
+          operation: "edit_file",
+          reason: "edit_file requires this new file to complete the active job",
+          source: "deterministic_mcp_write_boundary",
+        });
+        if (isPendingLiveScopeResult(scopeResult)) {
+          return { [LIVE_SCOPE_WAIT]: true, request: scopeResult, operation: "edit_file", args };
+        }
+        if (scopeResult?.approved !== true) return JSON.stringify(scopeResult, null, 2);
+        // Approved: create the file in the same call.
+      }
       return recordMutationUse(ctx.execWriteFile({ path: args.path, content: args.replace }, ctx.workspaceCwd, ctx.effectiveScopePredicates), resolved.target);
     }
     if (!ctx.effectiveScopePredicates.canEdit(resolved.target)) {

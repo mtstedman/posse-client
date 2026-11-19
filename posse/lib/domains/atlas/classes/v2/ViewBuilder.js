@@ -631,6 +631,10 @@ function populatePathToBlob(db, pathToBlob) {
 // autoincrement rowids assigned in pathToBlob iteration order, which chunk
 // boundaries don't change.
 const VIEW_BUILD_CHUNK = 64;
+// Symbol and edge rows of merged blobs a view build keeps at once (see
+// createLedgerRowReader): a few thousand ordinary files, or a handful of very
+// large ones.
+const LAYER_MERGE_CACHE_ROWS = 500_000;
 
 /**
  * @param {import("better-sqlite3").Database} viewDb
@@ -886,10 +890,32 @@ function createLedgerRowReader(ledgerDb, useLayerMerge, opts = {}) {
   }
 
   // Order-independent layer source: merge the per-blob tree-sitter+SCIP layers
-  // into the same flat row shape the legacy read returns, cached per blob so
-  // the symbol and edge passes share one merge.
+  // into the same flat row shape the legacy read returns.
+  //
+  // Only the most recently used merges are kept, within a row budget. A merge holds every symbol
+  // and edge row of its blob as objects, so a cache of every blob kept the
+  // whole repository's rows in memory from the symbol pass until the edge pass
+  // finished: on a repository of large table modules that is tens of millions
+  // of rows, and the build ran out of heap before it wrote one edge. A build
+  // visits blobs in the same order in both passes and resolves edge targets
+  // among neighbouring files, so a short window serves the repeats; a blob
+  // that falls out of it is merged again from the ledger.
   /** @type {Map<string, { symbols: any[], edges: any[], sources?: string[], sourceLocalToMerged?: Map<string, number> }>} */
   const mergeCache = new Map();
+  let cachedRows = 0;
+  const mergeRows = (merged) => merged.symbols.length + merged.edges.length;
+  const rememberMerge = (cacheKey, merged) => {
+    if (mergeCache.delete(cacheKey)) cachedRows -= mergeRows(merged);
+    mergeCache.set(cacheKey, merged);
+    cachedRows += mergeRows(merged);
+    // The blob just used always stays, however large it is by itself.
+    while (cachedRows > LAYER_MERGE_CACHE_ROWS && mergeCache.size > 1) {
+      const [oldestKey, oldest] = mergeCache.entries().next().value;
+      mergeCache.delete(oldestKey);
+      cachedRows -= mergeRows(oldest);
+    }
+    return merged;
+  };
 
   // Rollout safety net: the per-source layer tables are backfilled lazily (only
   // a (re)parsed blob writes its layer; a SCIP index ingested before the layer
@@ -909,7 +935,7 @@ function createLedgerRowReader(ledgerDb, useLayerMerge, opts = {}) {
     const foreignCopy = scipTargets?.foreignCopy(repo_rel_path) === true;
     const cacheKey = `${content_hash}\0${lang || ""}\0${foreignCopy ? "foreign" : ""}`;
     let m = mergeCache.get(cacheKey);
-    if (m) return m;
+    if (m) return rememberMerge(cacheKey, m);
     const merged = mergeLayerRows(ledgerDb, content_hash, lang, {
       scipTargets: scipTargets?.forPath(repo_rel_path) ?? null,
     });
@@ -920,8 +946,7 @@ function createLedgerRowReader(ledgerDb, useLayerMerge, opts = {}) {
     m = merged.symbols.length > 0 && layersCoverLegacy
       ? merged
       : legacyRowsFor(content_hash);
-    mergeCache.set(cacheKey, m);
-    return m;
+    return rememberMerge(cacheKey, m);
   };
 
   return {

@@ -2,7 +2,6 @@ import { unfinishedTestOwners } from "./job-test-scope.js";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { effectiveGatePolicy } from "../../../catalog/approval-policies.js";
-import { materializeScopeCreates } from "./scope-create-materializer.js";
 import { protectedMutablePathReason, isSensitiveEnvRepoPath } from "../../runtime/functions/protected-paths.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -117,29 +116,6 @@ export function createScopeExpansionOperations({
         ? `The current file operation is waiting for a human to approve or deny writable scope for ${request?.path || "the requested path"}${batchSize > 1 ? ` (+${batchSize - 1} batched path(s))` : ""}; the active agent session will continue after the decision.`
         : `The current job is paused until a human approves or denies writable scope for ${request?.path || "the requested path"}${batchSize > 1 ? ` (+${batchSize - 1} batched path(s))` : ""}.`,
     };
-  }
-
-  // Placeholder commits run after the decision transaction: git and the
-  // worktree lock must never run under the queue's write lock, and a failed
-  // commit leaves the grant in force (the agent can still write_file the path)
-  // with an event the operator can see.
-  function materializeApprovedCreates({ jobId, gateId = null, workspaceCwd, entries, actorType = EVENT_ACTORS.SYSTEM }) {
-    const creates = (entries || []).filter((entry) => entry?.access === "create");
-    if (!creates.length || !workspaceCwd) return { created: [], error: null };
-    try {
-      return { created: materializeScopeCreates(workspaceCwd, creates, { jobId, gateId }), error: null };
-    } catch (error) {
-      const message = String(error?.message || error);
-      logEvent({
-        work_item_id: getJob(jobId)?.work_item_id ?? null,
-        job_id: jobId,
-        event_type: EVENT_TYPES.JOB_SCOPE_CREATE_FAILED,
-        actor_type: actorType,
-        message: `Create scope was granted but the placeholder commit failed for ${creates.map((entry) => entry.path).join(", ")}: ${message}`,
-        event_json: JSON.stringify({ approval_job_id: gateId, paths: creates.map((entry) => entry.path), error: message.slice(0, 500) }),
-      });
-      return { created: [], error: message };
-    }
   }
 
   /**
@@ -507,13 +483,11 @@ export function createScopeExpansionOperations({
       });
       return scopeRequestResult({ request, humanJobId: humanJob.id });
     });
+    // A create grant writes nothing: the agent creates the file with its
+    // first content, so no empty file is committed on its behalf.
     if (result?.code === "scope_auto_approved" && result.access === "create") {
-      const outcome = materializeApprovedCreates({
-        jobId: normalizedJobId, workspaceCwd, entries: [{ path: normalizedPath, access: "create" }],
-      });
-      result.created_files = outcome.created;
-      if (outcome.created.length) result.message = `${result.message} File now exists and is committed.`;
-      else if (outcome.error) result.message = `${result.message} The empty placeholder was not committed (${outcome.error.slice(0, 160)}); create the file with write_file.`;
+      result.created_files = [];
+      result.message = `${result.message} The file does not exist yet; create it with edit_file (empty find, full content as replace).`;
     }
     return result;
   }
@@ -686,9 +660,6 @@ export function createScopeExpansionOperations({
           job: getJob(original.id),
           request: pending,
           created_files: [],
-          materialize: original.status === "succeeded" || !pending.workspace_cwd
-            ? null
-            : { workspaceCwd: pending.workspace_cwd, entries },
         };
       }
 
@@ -728,24 +699,6 @@ export function createScopeExpansionOperations({
         error,
       };
     });
-    if (resolved?.ok && resolved.approved && resolved.materialize) {
-      const { workspaceCwd, entries } = resolved.materialize;
-      const outcome = materializeApprovedCreates({
-        jobId: resolved.job.id, gateId: humanJob.id, workspaceCwd, entries, actorType,
-      });
-      if (outcome.created.length) {
-        runInTransaction(() => {
-          const fresh = getJob(resolved.job.id);
-          const data = parseJobPayloadObject(fresh);
-          if (data._pending_scope_request?.id !== resolved.request.id) return;
-          data._pending_scope_request.created_files = outcome.created;
-          updateJobPayload(fresh.id, JSON.stringify(data));
-        });
-      }
-      resolved.created_files = outcome.created;
-      resolved.job = getJob(resolved.job.id);
-    }
-    if (resolved && typeof resolved === "object") delete resolved.materialize;
     return resolved;
   }
 

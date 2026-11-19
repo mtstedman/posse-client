@@ -88,10 +88,10 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       // write capability comes from the projectDbWrite override, not the
       // file-write grant. No file mutation tools on this lane.
       read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "project_db_query", "inspect_environment"],
-      // Exact files_to_create are materialized as empty files before a code
-      // dev/fix provider starts, then moved into files_to_modify. write_file
-      // remains registered for compatibility/artificer output but must not be
-      // issued on this surface; edit_file can populate the empty file.
+      // Exact files_to_create are not written ahead of a code dev/fix
+      // provider: edit_file creates each one (empty find, whole content as
+      // replace). write_file remains registered for artificer output but is
+      // not issued on this surface.
       write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "request_scope", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_unit_test", "project_db_query", "inspect_environment", "install_dependencies", "setup_database"],
     }),
     artificer: Object.freeze({

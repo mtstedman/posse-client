@@ -404,7 +404,7 @@ function renderPacketContextString(packet, {
     if (includeDynamic) {
       const atlasLabel = atlasBackendLabel(packet.atlas);
       const atlasExactAccess = packet.atlas?.active && !packet.atlas?.prefetchFailed
-        ? `Use ${atlasLabel} code retrieval first for scoped source files when possible; use the issued exact-file read/search tools for remaining exact content or current worktree state.`
+        ? `Use ${atlasLabel} code retrieval for scoped files, including stylesheets, data and other files outside its symbol index; it reads the current worktree and reflects your edits as you make them. The issued exact-file read/search tools are for content ${atlasLabel} cannot return.`
         : "Use the issued exact-file read/search tools to inspect exact content before editing.";
       const accessNote = [
         "EDITABLE FILE CONTENT ACCESS:",

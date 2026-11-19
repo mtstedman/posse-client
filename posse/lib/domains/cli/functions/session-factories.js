@@ -340,6 +340,7 @@ export async function createRunSessionDeps(bootDeps) {
     ensureAtlasRepoIndexedOnBoot: atlasModule.ensureAtlasRepoIndexedOnBoot,
     prewarmAtlasV2BootDeps: atlasModule.prewarmAtlasV2BootDeps,
     disableAtlasForRun: atlasModule.disableAtlasForRun,
+    noteAtlasIndexFailureForRun: atlasModule.noteAtlasIndexFailureForRun,
     isAtlasRuntimeDisabled: atlasModule.isAtlasRuntimeDisabled,
     getAtlasRuntimeDisabledReason: atlasModule.getAtlasRuntimeDisabledReason,
     // Worker-backed variant: the readiness sqlite scans run off the main

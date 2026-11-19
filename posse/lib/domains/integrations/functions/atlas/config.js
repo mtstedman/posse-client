@@ -140,6 +140,31 @@ export function disableAtlasForRun(reason = "unspecified", repoKey = null) {
   invalidateAtlasIntegrationConfigCache();
 }
 
+// Two index builds in a row that fail for one repository (the boot index
+// counts as the first) mean this run cannot produce a usable index. Every
+// further repair attempt only repeats the failure while jobs wait behind it,
+// so the second failure turns ATLAS off for that repository until the next
+// boot: jobs bind to the plain file tools at once and repair warms park.
+export const ATLAS_INDEX_FAILURES_BEFORE_RUN_DISABLE = 2;
+let _atlasIndexFailuresByRepo = new Map();
+
+export function noteAtlasIndexFailureForRun(repoKey, reason = "index failed") {
+  const key = normalizeAtlasRuntimeDisableRepoKey(repoKey);
+  if (!key) return { failures: 0, disabled: false };
+  const failures = (_atlasIndexFailuresByRepo.get(key) || 0) + 1;
+  _atlasIndexFailuresByRepo.set(key, failures);
+  if (failures < ATLAS_INDEX_FAILURES_BEFORE_RUN_DISABLE || isAtlasRuntimeDisabled(repoKey)) {
+    return { failures, disabled: false };
+  }
+  disableAtlasForRun(`index failed ${failures} times in this run: ${String(reason || "index failed").split("\n")[0].slice(0, 200)}`, repoKey);
+  return { failures, disabled: true };
+}
+
+export function noteAtlasIndexSuccessForRun(repoKey) {
+  const key = normalizeAtlasRuntimeDisableRepoKey(repoKey);
+  if (key) _atlasIndexFailuresByRepo.delete(key);
+}
+
 export function isAtlasRuntimeDisabled(repoKey = null) {
   const normalizedRepoKey = normalizeAtlasRuntimeDisableRepoKey(repoKey);
   return _atlasRuntimeDisabled != null || (normalizedRepoKey ? _atlasRuntimeDisabledByRepo.has(normalizedRepoKey) : false);
@@ -153,6 +178,7 @@ export function getAtlasRuntimeDisabledReason(repoKey = null) {
 export function __resetAtlasRuntimeDisabledForTests() {
   _atlasRuntimeDisabled = null;
   _atlasRuntimeDisabledByRepo = new Map();
+  _atlasIndexFailuresByRepo = new Map();
   invalidateAtlasIntegrationConfigCache();
 }
 

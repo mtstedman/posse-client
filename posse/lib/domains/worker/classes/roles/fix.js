@@ -30,6 +30,7 @@ import {
   maxTurnsOverrideFromPayload,
   shortJobTitle as defaultShortJobTitle,
   uniqueScopeFiles as defaultUniqueScopeFiles,
+  writableScopeFiles,
 } from "../../../../shared/policies/functions/role-utils.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import {
@@ -401,7 +402,7 @@ export class FixRole extends BaseRole {
     return {
       role: this.getRole(),
       allowWrite: true,
-      scopedFiles: ctx.fixEditableScope.length > 0 ? ctx.fixEditableScope : null,
+      scopedFiles: writableScopeFiles(ctx.fixEditableScope, ctx.fixCreateFiles),
       deleteFiles: ctx.fixDeleteFiles.length > 0 ? ctx.fixDeleteFiles : null,
       stableContext: ctx.packet.stable_context || null,
       remoteSystemPrompt: ctx.packet.remote_system_prompt || null,

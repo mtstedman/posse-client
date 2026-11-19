@@ -192,7 +192,7 @@ export class BaseRole {
         && ((providerOpts.createFiles?.length || 0) > 0 || (providerOpts.createRoots?.length || 0) > 0)
       ) {
         throw new Error(
-          "Writing-provider contract rejected creation authority: handoff must materialize exact files and pass them as scopedFiles.",
+          "Writing-provider contract rejected creation authority: pass exact new files in scopedFiles.",
         );
       }
       const { output, stats = {} } = await timeRolePhase(

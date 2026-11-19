@@ -181,6 +181,7 @@ export class RunSession {
       ensureAtlasRepoIndexedOnBoot,
       prewarmAtlasV2BootDeps,
       disableAtlasForRun,
+      noteAtlasIndexFailureForRun,
       isAtlasRuntimeDisabled,
       getAtlasRuntimeDisabledReason,
       enqueueAtlasSelfRepair,
@@ -2367,6 +2368,10 @@ export class RunSession {
         // disable here: it would no-op the repair warms just queued and turn
         // off tools this message promises stay up. (The engine is alive —
         // only the index work failed.)
+        // The failed boot index is the first strike: a repair warm that fails
+        // as well turns ATLAS off for this repository instead of leaving jobs
+        // to wait behind one repair after another.
+        try { noteAtlasIndexFailureForRun?.(PROJECT_DIR, detail); } catch { /* best effort */ }
         let repair = { actions: [], summary: "self-repair unavailable" };
         try {
           if (typeof enqueueAtlasSelfRepair === "function") {

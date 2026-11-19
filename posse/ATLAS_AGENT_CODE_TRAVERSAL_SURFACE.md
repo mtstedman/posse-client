@@ -191,7 +191,7 @@ Remote roles: `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Read exact missing file context through the deterministic fallback. When ATLAS is active, successful ATLAS source retrieval already counts as file-content evidence. This reader covers remaining ATLAS evidence gaps, exact mutated or non-indexed state, an unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you classify that file as relevant or irrelevant. Large files may be paged with offset/limit; after the file is tagged relevant, later continuation pages inherit that verdict. Use issued ATLAS retrieval for indexed evidence and withheld ranges when available. A previously relevant file restored from the audit ledger retains its verdict. Optional search/jsonPath/maxBytes uses the same structured extraction as the issued exact-file reader.
+Read exact missing file context through the deterministic fallback. When ATLAS is active, successful ATLAS source retrieval already counts as file-content evidence. This reader covers remaining ATLAS evidence gaps, an unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you classify that file as relevant or irrelevant. Large files may be paged with offset/limit; after the file is tagged relevant, later continuation pages inherit that verdict. Use issued ATLAS retrieval for indexed evidence and withheld ranges when available. A previously relevant file restored from the audit ledger retains its verdict. Optional search/jsonPath/maxBytes uses the same structured extraction as the issued exact-file reader.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -363,15 +363,15 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Read a coherent source region around known declarations, including intervening control flow. Known names in a file need no prior ID lookup. Use granularity to select declaration regions, blocks, or a broader anchored file window within the issued limits.
+Read a coherent source region around known declarations, including intervening control flow. Known names in a file need no prior ID lookup. Use granularity to select declaration regions, blocks, or a broader anchored file window within the issued limits. It also reads text files outside the symbol index (stylesheets, JSON, Markdown, SQL, configuration): give the file, granularity fileWindow, and text that appears in the wanted region as identifiersToFind.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `autoFill` | `boolean` | Optional |  | Default true: keep partially new windows contiguous. False omits already-visible lines. |
 | `expectedLines` | `integer | string` | Optional | min 1; max 20000; max length 20 | Desired line count for the requested file-window slice, not the total file length. Symbol and block reads use their definition bounds. |
-| `file` | `string` | Conditional | min length 1 | Existing repository-relative file path already surfaced by Atlas when no symbolId is available. Use a surfaced dependency path. |
+| `file` | `string` | Conditional | min length 1 | Existing repository-relative file path already surfaced by Atlas when no symbolId is available. Use a surfaced dependency path. The file need not be indexed source. |
 | `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | symbol: named declarations (default); block: enclosing control flow; fileWindow: broader anchored source region. |
-| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | Exact declaration names in the selected file; include the names needed together. |
+| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | Exact declaration names in the selected file; include the names needed together. In a file outside the symbol index, exact text from the wanted region, such as a key, selector or heading. |
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Inline token cap, clamped to the repository limit shown in the runtime contract. |
 | `reason` | `string` | Required | max length 20000 | Why exact source is needed for this known symbol or anchored file region. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
@@ -487,7 +487,7 @@ Remote roles: `artificer`, `dev`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Edit an existing file within the allowed scope. Provide exactly one mode: exact find/replace, replaceLines, edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. For several edits to one file, send edits[] once: every item resolves against the original file. Valid non-overlapping edits apply; failures are reported by index. Retry only failed items after rereading the changed file.
+Edit a file, or create one, within the allowed scope. To create a file that does not exist, send find "" and the whole content as replace. To edit, provide exactly one mode: exact find/replace, replaceLines, edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. For several edits to one file, send edits[] once: every item resolves against the original file. Valid non-overlapping edits apply; failures are reported by index. A successful edit is saved as sent and reports its current line numbers; no read is needed to confirm it. Retry only failed items.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -498,7 +498,7 @@ Edit an existing file within the allowed scope. Provide exactly one mode: exact 
 | `insertAt` | `object` | Conditional |  | Insert content before a 1-based line number. Use line_count + 1 to insert after the last line. |
 | `jsonPath` | `string` | Conditional |  | Dot-separated JSON path to update. |
 | `jsonValue` | `any` | Conditional |  | Value to write when jsonPath is used. |
-| `path` | `string` | Required |  | File path to edit |
+| `path` | `string` | Required |  | File path to edit or create |
 | `replace` | `string` | Conditional |  | Replacement text |
 | `replaceLines` | `object` | Conditional |  | Replace a 1-based inclusive line range [start, end] with content. Line numbers use the numbered-file output convention. |
 | `replacePattern` | `object` | Conditional |  | Replace a regex match. Patterns are case-sensitive; global=false requires a unique match. Patterns longer than 500 characters or with unsafe nested quantifiers are rejected. Replacement uses JavaScript replacement syntax ($1, $$). |

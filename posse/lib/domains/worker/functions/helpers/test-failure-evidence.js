@@ -322,10 +322,60 @@ export function attributedDebtCoverageEstablished(post) {
   });
 }
 
+/**
+ * The failing node:test cases, read for display only. Unlike the strict report
+ * behind failure identities, any thrown error counts, so a test that fails
+ * with a plain Error is still listed by name.
+ * @returns {Array<{ location: string, name: string, diagnostic: string }>}
+ */
+export function nodeSpecFailingTests(output) {
+  const text = String(output || "").replace(/\x1b\[[0-9;]*m/g, "").replace(/\r\n?/g, "\n");
+  const marker = "\n✖ failing tests:\n";
+  const at = text.lastIndexOf(marker);
+  if (at < 0) return [];
+  const details = text.slice(at + marker.length);
+  const headers = [...details.matchAll(/^test at ([^\n]+)\n✖ ([^\n]+?) \(\d+(?:\.\d+)?ms\)\n/gm)];
+  return headers.map((header, index) => {
+    const body = details.slice(header.index + header[0].length, headers[index + 1]?.index);
+    const diagnostic = body.split("\n").map((line) => line.trim()).find(Boolean) || "";
+    return { location: header[1].trim(), name: header[2], diagnostic: diagnostic.slice(0, 300) };
+  });
+}
+
+/** Names of the tests that already failed in the pre-change run, from either attribution shape. */
+function baselineFailingTestNames(receipt) {
+  const attribution = receipt?.baseline_attribution || null;
+  const names = new Set(Array.isArray(attribution?.baseline_failing_tests) ? attribution.baseline_failing_tests : []);
+  for (const file of Array.isArray(attribution?.files) ? attribution.files : []) {
+    for (const name of Array.isArray(file?.baseline_failing_tests) ? file.baseline_failing_tests : []) names.add(name);
+  }
+  return names;
+}
+
 export function renderTestFailureSummary(receipt) {
   if (!receipt || receipt.stdout_truncated || receipt.stderr_truncated) return "";
   const report = structuredFailureReport(receipt.stdout);
-  if (!report) return "";
+  const before = baselineFailingTestNames(receipt);
+  const marked = (name) => (before.has(name) ? " [already failing before this change]" : "");
+  const preexisting = (failures) => {
+    const count = failures.filter((failure) => before.has(failure.name)).length;
+    return before.size === 0 ? null
+      : count === 0 ? "None of these failed before this change: every failure below is new."
+        : `${count} of ${failures.length} failed before this change too (marked); the rest are new.`;
+  };
+  if (!report) {
+    const failing = nodeSpecFailingTests(receipt.stdout);
+    if (failing.length === 0) return "";
+    const lines = [`failing tests: ${failing.length}`, preexisting(failing)].filter(Boolean);
+    let omitted = 0;
+    for (const failure of failing) {
+      const line = `- ${failure.name} (${failure.location})${marked(failure.name)}: ${failure.diagnostic}`;
+      if (lines.join("\n").length + line.length > 3000) { omitted += 1; continue; }
+      lines.push(line);
+    }
+    if (omitted) lines.push(`[${omitted} failure detail(s) omitted; full output remains in the test artifact]`);
+    return lines.join("\n");
+  }
   const { counts, failures } = report;
   const phpUnit = report.framework === "phpunit";
   const failed = phpUnit ? counts.errors + counts.failures : counts.fail;
@@ -335,12 +385,14 @@ export function renderTestFailureSummary(receipt) {
   const lines = [phpUnit
     ? `tests: ${counts.tests}; passed: ${passed}; errors: ${counts.errors}; failures: ${counts.failures}; skipped: ${counts.skipped || 0}`
     : `tests: ${counts.tests}; passed: ${passed}; failed: ${failed}; skipped: ${counts.skipped}; todo: ${counts.todo}`];
+  const preexistingLine = preexisting(failures);
+  if (preexistingLine) lines.push(preexistingLine);
   let omitted = 0;
   for (const failure of failures) {
     const diagnostic = failure.diagnostic.split("\n")[0];
     const line = phpUnit
       ? `- ${failure.name} [${failure.kind}]: ${diagnostic}`
-      : `- ${failure.name} (${failure.location}): ${diagnostic}`;
+      : `- ${failure.name} (${failure.location})${marked(failure.name)}: ${diagnostic}`;
     // Reserve space for an explicit omission notice, never silently lose a
     // failure behind the bounded source dump at the end of the runner output.
     if (lines.join("\n").length + line.length > 3000) { omitted += 1; continue; }
@@ -374,10 +426,12 @@ export function testRunDiagnostics(run) {
 
 export function repairInstructions(verdict, instructions = null) {
   const evidence = verdict?._deterministic_evidence;
-  return [...new Set([
-    instructions,
-    ...(verdict?.reasons || []),
-    evidence?.failure_summary,
-    evidence?.output_tail,
-  ].filter(Boolean))].join("\n\n");
+  // The instructions often already carry the reasons joined together; a
+  // reason contained in an earlier part is not repeated.
+  const parts = [];
+  for (const part of [instructions, ...(verdict?.reasons || []), evidence?.failure_summary, evidence?.output_tail]) {
+    const text = String(part || "").trim();
+    if (text && !parts.some((kept) => kept.includes(text))) parts.push(text);
+  }
+  return parts.join("\n\n");
 }

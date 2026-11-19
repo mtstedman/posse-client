@@ -23,6 +23,7 @@ import { createObservationWrapper } from "./factory.js";
 import { boundedSearchRows, renderSearchContentRows } from "./search-results.js";
 import { createTextMutationHelpers } from "./edits-mutations.js";
 import { applyBatchEdits, ambiguousExactMatchMessage, EMPTY_FIND_ERROR, resolveLineSpan } from "./edit-spans.js";
+import { batchEditSummary, editSummary } from "./edit-summary.js";
 import { buildStructuredReadResult as buildStructuredReadResultFromModule, formatNumberedLines as formatNumberedLinesFromModule, hasStructuredReadOptions as hasStructuredReadOptionsFromModule, looksReDosProne as looksReDosProneFromModule, splitEditableLines as splitEditableLinesFromModule } from "./structured-read.js";
 import "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
@@ -418,6 +419,12 @@ export function createDeterministicToolkit({
     const originalBytes = fs.readFileSync(filePath);
     const originalContent = originalBytes.toString("utf-8");
     let content = originalContent;
+    // The result says where the edit was saved, so the edit does not have to
+    // be followed by a read of the same file to confirm it.
+    const edited = (summary) => {
+      const saved = editSummary(originalContent, content);
+      return saved ? `${summary} — ${saved}` : summary;
+    };
 
     const exactRequested = args.find !== undefined || args.replace !== undefined;
     const replaceLines = args.replaceLines;
@@ -469,13 +476,15 @@ export function createDeterministicToolkit({
       const applied = applyBatchEdits(originalContent, items);
       if (!applied.results) return `Error: ${applied.error}.`;
       if (applied.editCount > 0 && applied.content !== originalContent) writeTextFileAtomic(filePath, applied.content);
+      const saved = applied.editCount > 0 ? batchEditSummary(originalContent, applied.content, applied.changed) : "";
       return JSON.stringify({
         ok: applied.editCount > 0,
         path: displayPath,
         applied: applied.editCount,
         failed: applied.failed,
         results: applied.results,
-        ...(applied.failed > 0 ? { retry: "Only retry failed indexes. Successful edits are already applied; reread affected ranges before retrying because line numbers may have changed." } : {}),
+        ...(saved ? { saved } : {}),
+        ...(applied.failed > 0 ? { retry: "Retry only the failed indexes; the others are saved at the lines in `saved`." } : {}),
       }, null, 2);
     }
 
@@ -497,7 +506,7 @@ export function createDeterministicToolkit({
       content = content.slice(0, span.start) + span.replacement + content.slice(span.end);
       if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${displayPath} (replaceLines ${start}:${end}${insertIntoEmptyFile ? ", inserted into empty file" : ""})`;
+      return edited(`File edited: ${displayPath}`);
     }
 
     if (modes[0] === "replacePattern") {
@@ -531,7 +540,7 @@ export function createDeterministicToolkit({
       content = replaced.content;
       if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${displayPath} (replacePattern ${matchCount} match${matchCount === 1 ? "" : "es"})`;
+      return edited(`File edited: ${displayPath} (replacePattern ${matchCount} match${matchCount === 1 ? "" : "es"})`);
     }
 
     if (modes[0] === "insertAt") {
@@ -543,14 +552,14 @@ export function createDeterministicToolkit({
       content = insertEditableLines(content, line, lines.length, hadFinalEol, splitReplacementLines(source.content), insertedTextEol(content));
       if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${displayPath} (insertAt ${line})`;
+      return edited(`File edited: ${displayPath}`);
     }
 
     if (modes[0] === "append") {
       content += withLineEnding(String(append ?? ""), insertedTextEol(content));
       if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${displayPath} (append)`;
+      return edited(`File edited: ${displayPath}`);
     }
 
     if (modes[0] === "jsonPath/jsonValue") {
@@ -575,7 +584,7 @@ export function createDeterministicToolkit({
       content = spliced.content;
       if (content === originalContent) return `Error: edit_file made no changes in ${displayPath}.`;
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${displayPath} (jsonPath ${String(jsonPath)})`;
+      return edited(`File edited: ${displayPath} (jsonPath ${String(jsonPath)})`);
     }
 
     if (typeof args.find !== "string" || typeof args.replace !== "string") {
@@ -593,7 +602,7 @@ export function createDeterministicToolkit({
         return `Error: edit_file made no changes in ${displayPath}. find/replace resolved to identical content.`;
       }
       writeTextFileAtomic(filePath, content);
-      return `File edited: ${displayPath}`;
+      return edited(`File edited: ${displayPath}`);
     }
 
     const fileEol = content.includes("\r\n") ? "\r\n" : "\n";
@@ -613,7 +622,7 @@ export function createDeterministicToolkit({
       return `Error: edit_file made no changes in ${displayPath}. find/replace resolved to identical content after line-ending normalization.`;
     }
     writeTextFileAtomic(filePath, content);
-    return `File edited: ${displayPath}`;
+    return edited(`File edited: ${displayPath}`);
   }
 
   function execListFiles(args, cwd, scopePredicates) {

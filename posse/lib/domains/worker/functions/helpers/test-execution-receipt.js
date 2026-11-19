@@ -41,7 +41,7 @@ import { describeToolchain, toolchainFingerprint } from "../../../settings/funct
 import { verificationOutcome } from "./verification-outcome.js";
 import { withLineagePathsRestored } from "../../../verification/functions/lineage-tree.js";
 import { TEST_EXECUTION_RECEIPT_KIND, TEST_EXECUTION_RECEIPT_MIME_TYPE, TEST_EXECUTION_REUSE_KIND, REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID, UNESTABLISHED_COVERAGE_STATUSES, VERIFICATION_DEPENDENCY_LOCK_INVALID } from "../../../../catalog/verification.js";
-import { checkRunsFailureFingerprint, comparableTestFailureFingerprint, testFailureFingerprint, testFailureInventory } from "./test-failure-evidence.js";
+import { checkRunsFailureFingerprint, comparableTestFailureFingerprint, nodeSpecFailingTests, testFailureFingerprint, testFailureInventory } from "./test-failure-evidence.js";
 import { discoverUnitTestCapability } from "../../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { testExecutionCounts } from "../../../../shared/tools/functions/toolkit/test-output-counts.js";
 export { normalizeFailureFingerprintText } from "./test-failure-evidence.js";
@@ -567,6 +567,7 @@ async function attributeChangedTestFailures(fileResults, { base = null, scopePat
       delta: baseResult ? testExecutionDelta(baseResult, result) : "post_only",
       test_counts: result.test_counts || null,
       baseline_test_counts: baseResult?.test_counts || null,
+      baseline_failing_tests: baselineFailingTests(baseResult),
     };
   });
   const introduced = files.filter((file) => file.delta !== "persistent_failure").map((file) => file.path);
@@ -582,6 +583,13 @@ async function attributeChangedTestFailures(fileResults, { base = null, scopePat
 // Compare the declared suite on today's sibling tree with this job's scoped
 // changes removed. An old frozen baseline cannot attribute a later sibling
 // failure; unchanged tests can also regress because production code changed.
+// The names of the tests that failed in a pre-change run, so a repair can be
+// told which of the current failures were already there.
+function baselineFailingTests(run) {
+  if (!run || run.status !== "failed") return [];
+  return [...new Set(nodeSpecFailingTests(run.stdout).map((test) => test.name))].slice(0, 50);
+}
+
 async function attributeDeclaredTestFailure(result, plan, { base, scopePaths, policy, cleanupOptions, signal = null, slotKey = null }) {
   if (result.status !== "failed" || !base || !scopePaths?.length
     || plan.verification_eligible === false || plan.source === "operator_approved_operation") return null;
@@ -611,6 +619,7 @@ async function attributeDeclaredTestFailure(result, plan, { base, scopePaths, po
     baseline_test_counts: baseline.test_counts || null,
     baseline_failure_fingerprint: comparableTestFailureFingerprint(comparableBaseline),
     baseline_failure_inventory: testFailureInventory(comparableBaseline),
+    baseline_failing_tests: baselineFailingTests(baseline),
     ...(Array.isArray(baseline.check_runs) ? { baseline_check_runs: baseline.check_runs.map((check) => ({
       check_id: check.check_id, intent: check.intent, status: check.status,
       test_counts: check.test_counts || null, failure_fingerprint: check.failure_fingerprint ?? null,

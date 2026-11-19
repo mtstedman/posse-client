@@ -37,6 +37,7 @@ import { bindAgentAttachmentToSignedContract, narrowBootConfigToSignedClaims } f
 import { PersistentMcpSession } from "./PersistentMcpSession.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { flushSharedAtlasToolExecutorDeferredRefreshes, getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
+import { addSearchSymbolHints } from "../functions/mcp-owner-search-hints.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
 import { ContextMeter } from "../../classes/ContextMeter.js";
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
@@ -2836,6 +2837,22 @@ export class PersistentMcpOwner {
               }),
             };
           }
+        }
+        // A search hit inside a declaration names it, and a repository-wide
+        // search for one defined name says where it is defined and how many
+        // indexed callers it has, so the next step can go through the index.
+        if (requested.suite === "tools" && requested.name === "search_files" && mcpToolCallSuccess(response)) {
+          const policy = sessionToolPolicy(session);
+          response = {
+            ...response,
+            result: await addSearchSymbolHints(response.result, {
+              executor: getSharedAtlasToolExecutor(),
+              sessionContext: atlasExecutorSessionContext(session),
+              bootConfig: session?.bootConfig || {},
+              args: message?.params?.arguments || {},
+              callersIssued: toolAllowedByPolicy(policy, "atlas.symbol.callers"),
+            }),
+          };
         }
         const physicalCallCeiling = researchSynthesisPolicyFor(session).maxPhysicalCalls;
         if (gatewayAdmission.tracked && response?.result && !resolveAtlasResearchRuntimeGuidance()) {

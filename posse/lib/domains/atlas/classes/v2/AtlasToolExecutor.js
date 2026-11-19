@@ -1099,15 +1099,19 @@ export class AtlasToolExecutor {
           || "",
         )
       : ledgerDbPath(repoRoot);
+    // A work item's refresh writes its own branch, so it may only ever write
+    // the view mounted in its worktree. Without a read context (ATLAS reads
+    // never ran, or ran against another root) the session's configured view is
+    // not evidence of where that is: it can be the repository's main view, and
+    // building the WI branch there replaces the main view with the few
+    // symbols the work item touched.
+    const mainRepoRoot = repoRootFromLedgerPath(refreshLedgerPath, repoRoot);
     const refreshViewPath = workItemKey
-      ? String(
-          (readContextMatchesCwd ? readContext?.viewPath : "")
-          || config.graphDbPath
-          || config.requestedGraphDbPath
-          || "",
-        )
+      ? String((readContextMatchesCwd ? readContext?.viewPath : "") || worktreeViewPath(cwd))
       : mainViewPath(repoRoot);
     if (!refreshLedgerPath || !refreshViewPath) return null;
+    if (workItemKey && [mainViewPath(mainRepoRoot), mainViewPath(repoRoot)]
+      .some((mainPath) => normalizeRepoKey(mainPath) === normalizeRepoKey(refreshViewPath))) return null;
     const paths = [...new Set(pathFields.map((field) =>
       path.relative(refreshRoot, path.resolve(cwd, args[field])).replace(/\\/g, "/"),
     ))];
@@ -1718,6 +1722,20 @@ export class AtlasToolExecutor {
       || request.args?.cwd
       || "global",
     );
+  }
+
+  /**
+   * The view a session's Atlas reads resolve to, without running a tool: no
+   * observation, cache entry, coverage or refresh is recorded. Null when the
+   * request has no Atlas read context.
+   *
+   * @param {Pick<AtlasToolRequest, "session" | "config" | "source">} request
+   * @returns {Promise<{ viewPath: string, readRoot: string | null } | null>}
+   */
+  async readViewFor(request = {}) {
+    const internal = { ...request, toolName: "symbol.search", action: "symbol.search", args: {} };
+    const context = await this.#readContextFor({ ...internal, repoKey: this.#repoKeyFor(internal) }, this.#conductorFactory());
+    return context?.viewPath ? { viewPath: context.viewPath, readRoot: context.readRoot || null } : null;
   }
 
   async #readPayloadFor(request, conductor = null) {

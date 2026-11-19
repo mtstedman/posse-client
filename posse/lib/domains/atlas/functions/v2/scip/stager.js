@@ -835,6 +835,7 @@ export async function stageScipBatches({
   onProgress = null,
   onBatchReady = null,
   onFileUnavailable = null,
+  catchUpPaths = [],
 } = {}) {
   const normalizedMode = normalizeAtlasScipMode(mode ?? config?.scipMode);
   const root = path.resolve(String(repoRoot || process.cwd()));
@@ -875,8 +876,26 @@ export async function stageScipBatches({
     scipDir: dir,
     plans: batchPlans,
   });
-  const stagedPaths = identityStalePaths.length > 0
-    ? uniqueBytewiseRepoPaths([...paths, ...identityStalePaths])
+  // Documents the caller found without a SCIP layer for their current
+  // content. An interrupted session leaves them behind, and nothing about an
+  // unchanged source file would ever bring them back into a later warm.
+  const batchExtensions = new Set(batchPlans
+    .flatMap((plan) => (Array.isArray(plan.sourceExtensions) ? plan.sourceExtensions : []))
+    .map((extension) => String(extension || "").toLowerCase()));
+  const requestedPaths = new Set(paths);
+  const catchUp = (Array.isArray(catchUpPaths) ? catchUpPaths : [])
+    .map((repoRelPath) => String(repoRelPath || ""))
+    .filter((repoRelPath) => repoRelPath
+      && !requestedPaths.has(repoRelPath)
+      && batchExtensions.has(path.extname(repoRelPath).toLowerCase()));
+  if (catchUp.length > 0) {
+    emit(onProgress, `staging SCIP for ${catchUp.length} document${catchUp.length === 1 ? "" : "s"} an earlier session left without it`, {
+      kind: "atlas.scip.coverage_catch_up",
+      documents: catchUp.length,
+    });
+  }
+  const stagedPaths = identityStalePaths.length > 0 || catchUp.length > 0
+    ? uniqueBytewiseRepoPaths([...paths, ...identityStalePaths, ...catchUp])
     : paths;
   if (identityStalePaths.length > 0) {
     emit(onProgress, `restaging ${identityStalePaths.length} SCIP document${identityStalePaths.length === 1 ? "" : "s"} indexed by a replaced indexer`, {
@@ -891,6 +910,18 @@ export async function stageScipBatches({
     maxFiles: config?.atlasScipBatchMaxFiles ?? config?.atlas_scip_batch_max_files,
     maxSourceBytes: config?.atlasScipBatchMaxSourceBytes ?? config?.atlas_scip_batch_max_source_bytes,
   });
+  // A language with an indexer and nothing to stage this session is current,
+  // not waiting: say so, or its row sits at zero for the whole boot.
+  const stagedLanguages = new Set(manifest.batches.map((batch) => batch.plan.indexerId));
+  for (const plan of batchPlans) {
+    if (stagedLanguages.has(plan.indexerId)) continue;
+    emit(onProgress, `SCIP for ${plan.indexerId} is current`, {
+      kind: "atlas.scip.language_current",
+      language: plan.indexerId,
+      indexer: plan.label,
+      source_languages: sourceLanguagesForPlan(plan),
+    });
+  }
   // Resolved once per stage: every batch view is cut from this HEAD, and the
   // isolated views have no `.git` for the indexer to read it from itself.
   const batchProjectVersion = await resolveCurrentHead(root);

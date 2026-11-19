@@ -23,6 +23,22 @@ import { callSiteOffset, treesitterCallsAtScipSites } from "./call-site-dedupe.j
 
 const SOURCE_ORDER = ["treesitter", "scip"];
 
+// The parser mints a symbol for every anonymous callback so a call made inside
+// one has an exact owner, and ordinary source keeps all of them: measured
+// repositories top out near two hundred in one file. A module that is a table
+// of thousands of anonymous functions is a different thing. Its entries are
+// data: none can be named in a query, nothing references one, and together
+// they repeat the same few calls tens of thousands of times. One such
+// repository minted 1.5 million of these symbols from 227 files, 99.6% of its
+// index. Above this many in one blob, the anonymous functions are not
+// materialized: what they call is recorded once each against the module.
+export const DENSE_ANONYMOUS_FUNCTION_LIMIT = 500;
+const POSITIONED_ANONYMOUS_RE = /^<anonymous@[1-9][0-9]*:[1-9][0-9]*>$/u;
+
+function isPositionedAnonymousFunction(row) {
+  return row?.kind === "function" && POSITIONED_ANONYMOUS_RE.test(String(row?.name || ""));
+}
+
 function parseJson(value) {
   try { return value ? JSON.parse(value) : null; } catch { return null; }
 }
@@ -234,9 +250,25 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null, opts = {}) {
   const byMerged = new Map();
   let nextLocalId = 0;
 
+  const baseRows = readLayerSymbols(ledgerDb, baseLayer.id);
+  // Dense table module (see DENSE_ANONYMOUS_FUNCTION_LIMIT): its anonymous
+  // functions fold into the module symbol, which must exist to own their calls.
+  const moduleRow = baseRows.find((row) => row.kind === "module") || null;
+  const foldAnonymous = !!moduleRow
+    && baseRows.filter(isPositionedAnonymousFunction).length > DENSE_ANONYMOUS_FUNCTION_LIMIT;
+  /** Base local ids of the anonymous functions folded into the module. */
+  const foldedLocalIds = [];
+  /** Merged local id that owns folded calls, set once the module is placed. */
+  let foldOwner = null;
+
   // Base: keep every symbol (no intra-source collapse).
-  for (const row of readLayerSymbols(ledgerDb, baseLayer.id)) {
+  for (const row of baseRows) {
+    if (foldAnonymous && isPositionedAnonymousFunction(row)) {
+      foldedLocalIds.push(row.local_id);
+      continue;
+    }
     const mergedId = nextLocalId++;
+    if (row === moduleRow) foldOwner = mergedId;
     const sym = symbolRowFrom(contentHash, resolvedLang, mergedId, baseLayer.id, row);
     symbols.push(sym);
     byMerged.set(mergedId, sym);
@@ -249,6 +281,12 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null, opts = {}) {
     locationCandidates.push(mergedId);
     locationToMerged.set(locKey, locationCandidates);
   }
+
+  for (const localId of foldedLocalIds) {
+    remap.set(`${baseLayer.id}:${localId}`, foldOwner);
+    sourceLocalToMerged.set(sourceLocalKey(baseLayer.source, localId), foldOwner);
+  }
+  const foldedBaseIds = new Set(foldedLocalIds);
 
   // Overlay: enrich matching base symbol, else add as new.
   if (overlayLayer) {
@@ -318,6 +356,7 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null, opts = {}) {
       const range = parseJson(row.range_json) || {};
       const fromLocal = remap.get(`${layer.id}:${row.from_local_id}`);
       if (fromLocal == null) continue; // from-symbol didn't materialize
+      const folded = layer.id === baseLayer.id && foldedBaseIds.has(row.from_local_id);
       const source = detail.source || layer.source;
       let toContentHash = detail.to_content_hash ?? null;
       let toLocalId = detail.to_local_id ?? null;
@@ -368,6 +407,9 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null, opts = {}) {
         source,
         to_repo_rel_path: toRepoRelPath,
       };
+      // Thousands of folded functions make the same calls; the module keeps
+      // one edge per distinct target instead of one per call site.
+      if (folded) edge._foldedTarget = true;
       const site = {
         start: callSiteOffset(range.range_start ?? detail.range_start),
         end: callSiteOffset(range.range_end ?? detail.range_end),
@@ -386,7 +428,11 @@ export function mergeLayerRows(ledgerDb, contentHash, lang = null, opts = {}) {
   const edgeIndexByKey = new Map();
   for (const [index, { edge }] of candidates.entries()) {
     if (dropped[index]) continue;
-    const key = edgeDedupKey(edge);
+    const foldedTarget = edge._foldedTarget === true;
+    delete edge._foldedTarget;
+    const key = foldedTarget
+      ? ["folded", edge.kind, edge.to_content_hash ?? "", edge.to_local_id ?? "", edge.to_external_id ?? "", edge.to_name ?? "", edge.to_module ?? ""].join("\0")
+      : edgeDedupKey(edge);
     const existingIndex = edgeIndexByKey.get(key);
     if (existingIndex != null) {
       if (edge.kind === "calls" && confidenceScore(edge.confidence) > confidenceScore(edges[existingIndex].confidence)) {

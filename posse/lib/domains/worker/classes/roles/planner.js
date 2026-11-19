@@ -1,4 +1,5 @@
 import { buildFollowUpEvidence } from "../../../planning/functions/follow-up-context.js";
+import { repositoryTestInventory } from "../../../verification/functions/test-command-inventory.js";
 import { effectiveGatePolicy } from "../../../../catalog/approval-policies.js";
 import { getSetting } from "../../../settings/functions/repository-settings.js";
 import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
@@ -163,6 +164,21 @@ export async function resolvePlannerReadRoot(projectDir, workItemId, jobWorktree
       return false;
     }
   }) || projectRoot;
+}
+
+
+// The checkout's declared test entry points, so choosing a test_command does
+// not start with searching the repository for them.
+function plannerTestInventoryLines(readRoot) {
+  try {
+    const manager = detectNodePackageManager(readRoot, { allowUnversioned: true }).manager;
+    const lines = repositoryTestInventory(readRoot, { nodePackageManager: manager });
+    return lines.length > 0
+      ? ["- Declared in this checkout:", ...lines.map((line) => `  - ${line}`)]
+      : ["- This checkout declares no test scripts, runner configs, test wrapper scripts or test files."];
+  } catch {
+    return [];
+  }
 }
 
 export class PlannerRole extends BaseRole {
@@ -642,6 +658,7 @@ export class PlannerRole extends BaseRole {
       availableSkillsBlock,
       `Node package manager: ${detectNodePackageManager(plannerReadRoot, { allowUnversioned: true }).manager}. Installer tools enforce the Admin selection for new Node packages, including explicit manager arguments. Existing packageManager declarations and lockfiles in each package directory take precedence; do not migrate an existing project just to match the account preference. To choose a different manager for a new package, the user must change Node package manager in Admin before setup.`,
       "One-time test intake for code tasks:",
+      ...plannerTestInventoryLines(plannerReadRoot),
       "- Identify one narrow existing repository-declared test command per dev/fix task and set test_command on that task.",
       // A skipped research phase leaves no brief to supply verification_targets.
       ...(researchSkipped

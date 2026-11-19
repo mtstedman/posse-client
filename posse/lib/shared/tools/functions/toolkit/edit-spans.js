@@ -129,13 +129,20 @@ export function applyBatchEdits(original, edits) {
     spans.push({ ...merged, index: run[0].index, line: null });
   }
   const ascending = [...spans].sort((a, b) => a.start - b.start || a.end - b.end);
+  // Where each applied edit landed in the result, for the caller's excerpt.
+  const changed = [];
+  let shift = 0;
+  for (const span of ascending) {
+    changed.push({ start: span.start + shift, end: span.start + shift + span.replacement.length });
+    shift += span.replacement.length - (span.end - span.start);
+  }
   let result = content;
-  for (const span of ascending.reverse()) {
+  for (const span of [...ascending].reverse()) {
     result = result.slice(0, span.start) + span.replacement + result.slice(span.end);
   }
   const editCount = results.filter((item) => item.ok).length;
   return {
-    ...(editCount ? { content: result } : { error: results.map((item) => item.error).join("; ") }),
+    ...(editCount ? { content: result, changed } : { error: results.map((item) => item.error).join("; ") }),
     editCount, failed: edits.length - editCount, results,
   };
 }

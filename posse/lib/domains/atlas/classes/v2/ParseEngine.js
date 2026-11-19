@@ -105,6 +105,7 @@ import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
 import { startEmbeddingRefresh } from "../../functions/v2/parse/embedding-intake-runner.js";
 import { hasLanguageSemantics } from "../../functions/v2/resolver/adapters/registry.js";
 import { ensureScipStaged, formatScipStageFailure, stageScipBatches } from "../../functions/v2/scip/stager.js";
+import { readScipBatchCoverage } from "../../functions/v2/scip/batch-coverage.js";
 import { reclaimSupersededScipState } from "../../functions/v2/scip/session-reclaim.js";
 import {
   scipCoverageForIntake,
@@ -809,6 +810,7 @@ export class ParseEngine {
         onProgress: (event) => this.#emitProgress(event),
         onBatchReady,
         onFileUnavailable: opts.onFileUnavailable || null,
+        catchUpPaths: opts.catchUpCoverage === true ? await this.#scipUncoveredPaths(stagePaths) : [],
       });
       for (const row of staged.results || []) {
         if (row?.ok !== false) continue;
@@ -845,6 +847,41 @@ export class ParseEngine {
       });
       return [];
     }
+  }
+
+  /**
+   * Paths on the default branch that have no SCIP layer for their current
+   * content and no receipt saying an indexer examined it. The freshness scan
+   * only compares source against the parser's layer, so a document whose SCIP
+   * staging was interrupted is otherwise never staged again until it is edited.
+   *
+   * @param {string[]} requested Paths this warm already stages.
+   * @returns {Promise<string[]>}
+   */
+  async #scipUncoveredPaths(requested) {
+    const branch = this.#defaultBranch;
+    if (!this.#ledger.getBranch(branch)) return [];
+    const snapshot = this.#ledger.pathSnapshotAt(branch, this.#ledger.headSeq(branch));
+    const receipt = await readScipBatchCoverage(this.#scipDir).catch(() => null);
+    // Settled without a layer: the indexer examined the document and omitted
+    // it, or rejected its syntax the same way twice.
+    const settled = new Map();
+    for (const document of receipt?.documents || []) {
+      settled.set(String(document?.repo_rel_path || ""), String(document?.content_hash || "").toLowerCase());
+    }
+    for (const document of receipt?.unavailable_documents || []) {
+      if (String(document?.reason || "") !== "batch_document_unsupported_syntax") continue;
+      settled.set(String(document?.repo_rel_path || ""), String(document?.content_hash || "").toLowerCase());
+    }
+    const skip = new Set(requested);
+    const uncovered = [];
+    for (const [repoRelPath, contentHash] of snapshot) {
+      if (skip.has(repoRelPath) || settled.get(repoRelPath) === contentHash) continue;
+      const layered = this.#ledger.listBlobLayers(contentHash)
+        .some((layer) => layer?.source === "scip" && layer?.status === "indexed");
+      if (!layered) uncovered.push(repoRelPath);
+    }
+    return uncovered;
   }
 
   /**
@@ -1426,6 +1463,9 @@ export class ParseEngine {
                 if (useBatchedScipStaging()) {
                   await this.#stageScipBatches(base, "main-incremental", paths, {
                     reclaim: "incremental",
+                    // A boot settles what earlier sessions left unfinished; a
+                    // warm for a few edited paths stays that small.
+                    catchUpCoverage: String(payload?.trigger_event || "") === "boot",
                     onBatchReady: (file, info) => scipQueue.add(file, info),
                     onFileUnavailable: (info) => embeddingIntake?.documents.declareScipCoverage({
                       documents: [], source_languages: [],

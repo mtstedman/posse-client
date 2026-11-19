@@ -982,14 +982,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_window",
-    description: "Read a coherent source region around known declarations, including intervening control flow. Known names in a file need no prior ID lookup. Use granularity to select declaration regions, blocks, or a broader anchored file window within the issued limits.",
+    description: "Read a coherent source region around known declarations, including intervening control flow. Known names in a file need no prior ID lookup. Use granularity to select declaration regions, blocks, or a broader anchored file window within the issued limits. It also reads text files outside the symbol index (stylesheets, JSON, Markdown, SQL, configuration): give the file, granularity fileWindow, and text that appears in the wanted region as identifiersToFind.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
-        file: { type: "string", description: "Existing repository-relative file path already surfaced by Atlas when no symbolId is available. Use a surfaced dependency path." },
+        file: { type: "string", description: "Existing repository-relative file path already surfaced by Atlas when no symbolId is available. Use a surfaced dependency path. The file need not be indexed source." },
         reason: { type: "string", description: "Why exact source is needed for this known symbol or anchored file region." },
-        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "Exact declaration names in the selected file; include the names needed together." },
+        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "Exact declaration names in the selected file; include the names needed together. In a file outside the symbol index, exact text from the wanted region, such as a key, selector or heading." },
         expectedLines: { type: "integer", description: "Desired line count for the requested file-window slice, not the total file length. Symbol and block reads use their definition bounds." },
         autoFill: { type: "boolean", description: "Default true: keep partially new windows contiguous. False omits already-visible lines." },
         granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "symbol: named declarations (default); block: enclosing control flow; fileWindow: broader anchored source region." },

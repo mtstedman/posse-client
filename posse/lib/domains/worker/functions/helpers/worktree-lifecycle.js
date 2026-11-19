@@ -32,6 +32,7 @@ const setupDeferNoticeLastSeen = new Map();
 import { WORKTREE_JOB_TYPES } from "../../../../catalog/job.js";
 import { jobNeedsGitWorktreeAsync } from "../../../git/functions/policy.js";
 import { disposeWorkItemAtlasGraph, ensureWorkItemAtlasJoinAsync, getAtlasIntegrationConfig } from "../../../integrations/functions/atlas.js";
+import { atlasRuntimeDisabledReasonForRepo } from "../execution/atlas-warm-job.js";
 import { emitDevLeased as emitAtlasV2DevLeased, emitWiCleanup as emitAtlasV2WiCleanup, isAtlasV2EmissionEnabled } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { classifyDirtyWorktreeAsync, configureWorktreeScopeAsync, gitWorktreeAddAsync, isMergeInProgressAsync, mergeTargetIntoWorktreeAsync, resolveTargetBranchAsync, safeSnapshotAndRemoveWorktreeAsync, snapshotAndResetDirtyWorktreeAsync, withWorktreeLockAsync, worktreePathAsync } from "../../../git/functions/worktree.js";
 import { gitCurrentHashAsync, gitExecAsync } from "../../../git/functions/utils.js";
@@ -1206,7 +1207,15 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       // Prepared views may predate the rebase or cross-WI sync above. Always
       // reconcile from this checkout before allowing agent reads.
       try {
-        if (await isMergeInProgressAsync(wtPath, { signal })) {
+        // The evidence gate or the run already turned ATLAS off for this job:
+        // joining a graph that will not be used only waits on a failing index.
+        const atlasOffReason = job._atlasDisabledForWorkItem
+          ? "ATLAS is off for this job"
+          : atlasRuntimeDisabledReasonForRepo(worker.projectDir);
+        if (atlasOffReason) {
+          disableWorkItemAtlas(job);
+          emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} join skipped: ${atlasOffReason}${C.reset}`);
+        } else if (await isMergeInProgressAsync(wtPath, { signal })) {
           disableWorkItemAtlas(job);
           emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} join check skipped while merge is in progress${C.reset}`);
         } else {

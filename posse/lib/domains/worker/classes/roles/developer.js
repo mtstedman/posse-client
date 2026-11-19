@@ -14,7 +14,7 @@ import { pruneBlockedFileRequirements } from "../../../runtime/functions/blocked
 import { BaseRole, projectPromptPacketForProvider } from "../BaseRole.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import { extractCheckpointFromOutput as defaultExtractCheckpointFromOutput, loadCheckpoint as defaultLoadCheckpoint, parseAgentCompletionLog as defaultParseAgentCompletionLog, scopedDeleteTargets as defaultScopedDeleteTargets } from "../../functions/helpers/mutation-guards.js";
-import { CHECKPOINT_TOKEN_THRESHOLD, maxTurnsOverrideFromPayload, shortJobTitle as defaultShortJobTitle, uniqueScopeFiles as defaultUniqueScopeFiles } from "../../../../shared/policies/functions/role-utils.js";
+import { CHECKPOINT_TOKEN_THRESHOLD, maxTurnsOverrideFromPayload, shortJobTitle as defaultShortJobTitle, uniqueScopeFiles as defaultUniqueScopeFiles, writableScopeFiles } from "../../../../shared/policies/functions/role-utils.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import { spawnFailureForRole, spawnSuccessForRole } from "../../../../shared/policies/functions/spawn-policy.js";
 import { projectDbEffectivePermissions } from "../../../../shared/tools/functions/toolkit/project-db/config.js";
@@ -301,7 +301,9 @@ export class DeveloperRole extends BaseRole {
       // surface is project_db_query, granted via projectDbWrite below.
       allowWrite: !ctx.dbOnlyTask,
       projectDbWrite: !!ctx.dbOnlyTask,
-      scopedFiles: ctx.editableScope.length > 0 ? ctx.editableScope : null,
+      // Planned new files are not written ahead of the job. They ride in the
+      // editable scope so the write tools let the agent create them.
+      scopedFiles: writableScopeFiles(ctx.editableScope, ctx.createFiles),
       deleteFiles: ctx.deleteFiles.length > 0 ? ctx.deleteFiles : null,
       stableContext: ctx.packet.stable_context || null,
       remoteSystemPrompt: ctx.packet.remote_system_prompt || null,

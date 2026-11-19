@@ -19,7 +19,11 @@ const MIN_CHECK_OUTPUT_CHARS = 120;
 function failureOutputExcerpt(value, budget) {
   const text = String(value).replace(/\x1b\[[0-9;]*m/g, "");
   if (text.length <= budget) return text;
-  const diagnostic = /^(?:\w*Error(?:\s*\[[^\]]+\])?:|(?:locator|page|expect)\.[^\n]*:|[^\n]*\berror TS\d+:|FAIL\b|[✖✗])/m.exec(text);
+  // node:test lists every failure again in one section at the end, after the
+  // passing lines; that section is the failure evidence.
+  const failingSection = text.lastIndexOf("\n✖ failing tests:\n");
+  const diagnostic = failingSection >= 0 ? { index: failingSection + 1 }
+    : /^(?:\w*Error(?:\s*\[[^\]]+\])?:|(?:locator|page|expect)\.[^\n]*:|[^\n]*\berror TS\d+:|FAIL\b|[✖✗])/m.exec(text);
   const relevant = diagnostic ? text.slice(diagnostic.index) : text;
   if (relevant.length <= budget) return relevant;
   const marker = "\n… output omitted …\n";
@@ -54,8 +58,10 @@ export function compactTestFailureOutput(receipt) {
   });
   // Preserve the start of failures before spending the remaining budget on
   // successful output. Separate checks retain their diagnostic and invocation.
-  return (blocks.length ? blocks.join("\n\n") : [receipt.stderr, receipt.stdout]
-    .filter(Boolean).map(String).join("\n")).slice(0, MAX_EVIDENCE_OUTPUT_CHARS);
+  // A single run without per-check results keeps its failures too, not the
+  // passing lines that precede them.
+  return (blocks.length ? blocks.join("\n\n") : failureOutputExcerpt([receipt.stderr, receipt.stdout]
+    .filter(Boolean).map(String).join("\n"), MAX_EVIDENCE_OUTPUT_CHARS)).slice(0, MAX_EVIDENCE_OUTPUT_CHARS);
 }
 
 // Carry compiler locations with the command directory that gives them meaning.

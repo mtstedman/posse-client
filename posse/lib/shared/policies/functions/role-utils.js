@@ -168,6 +168,12 @@ export function uniqueScopeFiles(...groups) {
   return [...new Set(groups.flat().filter(Boolean))];
 }
 
+/** The files a writing agent may edit or create, or null when there are none. */
+export function writableScopeFiles(editable, create) {
+  const files = uniqueScopeFiles(editable || [], create || []);
+  return files.length > 0 ? files : null;
+}
+
 export function classifyPlannerOutput(output, parsed) {
   const text = String(output || "").trim();
   if (!text) return "empty";
