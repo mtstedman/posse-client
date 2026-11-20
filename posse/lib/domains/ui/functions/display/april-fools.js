@@ -1,5 +1,6 @@
 // Late April Fools: a rotating NSFW tagline under the POSSE masthead and a
-// theme song looping while a run is live. Off unless POSSE_APRIL_FOOLS=on.
+// theme song looping while a run is live. On by default; POSSE_APRIL_FOOLS=off
+// turns both off.
 //
 // The song is never shipped or downloaded. It plays only when a file the
 // operator supplied exists at POSSE_THEME_SONG or ~/.posse/pedro.<ext>, and
@@ -59,7 +60,10 @@ const PLAYERS = Object.freeze([
 const PLAYED_AT_LEAST_MS = 2000;
 
 export function aprilFoolsEnabled(env = process.env) {
-  return ["on", "1", "true", "yes"].includes(String(env.POSSE_APRIL_FOOLS || "").trim().toLowerCase());
+  const setting = String(env.POSSE_APRIL_FOOLS || "").trim().toLowerCase();
+  // Test runs render exact dashboards and must never start a player.
+  if (!setting && (env.POSSE_TEST_RUN === "1" || env.NODE_TEST_CONTEXT)) return false;
+  return !["off", "0", "false", "no"].includes(setting);
 }
 
 let chosenTagline = null;
