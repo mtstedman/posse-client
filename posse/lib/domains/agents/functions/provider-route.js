@@ -82,7 +82,7 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
     skipRolePrompt: true,
     silent: true,
     onActivity: options.onActivity,
-    onLine: () => options.onActivity?.(),
+    onLine: (line) => { options.onActivity?.(); options.onOutputLine?.(line); },
     onAgentCommentary: () => options.onActivity?.(),
     onUsageProgress: () => options.onActivity?.(),
     stallTimeout: options.idleSeconds || 1800, wallTimeoutMs: 0,

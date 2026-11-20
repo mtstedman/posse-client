@@ -359,7 +359,7 @@ export class AgentRuntime {
         const parsed = parseAgentToolTurn(content);
         calls = [];
         malformed = parsed.malformed || parsed.calls.length > 0;
-      } else ({ calls, malformed, afterCommentary = false } = parseAgentToolTurn(content));
+      } else ({ calls, malformed, afterCommentary = false } = parseAgentToolTurn(content, { tools: state.tools }));
       calls = calls.map((call, index) => ({ ...call, id: toolCallId(call, state.usage.turns, index) }));
       // Commentary-then-call is a live request, but a reply that ends by
       // quoting a call this turn already executed ("Saved. The request I

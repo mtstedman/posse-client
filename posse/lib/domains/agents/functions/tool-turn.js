@@ -67,6 +67,61 @@ function exactToolCalls(text) {
   return calls.every(Boolean) ? calls : null;
 }
 
+// Claude models trained on native tool use sometimes write a request in that
+// markup instead of the issued JSON, most often when an argument is a large
+// block of code:
+//   <invoke name="tool"><parameter name="key">value</parameter></invoke>
+// The reply is a request only when complete requests are the entire text, so
+// prose or a simulated result keeps it malformed. Three slips seen in real
+// replies are forgiven because they leave every argument unambiguous: one
+// stray word or tiny tag after a closing tag (where native markup would have
+// stopped generation), one redundant "}" ending a JSON parameter, and JSON
+// requests following the markup, which join the same batch.
+// A parameter the tool declares as a string is taken verbatim; any other is
+// read as JSON when it parses and kept as text when it does not. Identical
+// consecutive requests are one request. Naming and argument checks stay with
+// the caller, exactly as for a JSON request.
+const INVOKE_BLOCK = /^<invoke name="([^"<>]+)">\s*((?:<parameter name="[^"<>]+">[\s\S]*?<\/parameter>\s*)*)<\/invoke>(?:\s*(?:<\/?(?!invoke|function)[a-z]{1,8}>|[\w.-]{1,16})(?=\s|$))?\s*/;
+const INVOKE_PARAMETER = /<parameter name="([^"<>]+)">([\s\S]*?)<\/parameter>/g;
+
+function declaredString(tools, name, key) {
+  const schema = plainObject(tools?.find(tool => tool?.name === name)?.parameters?.properties?.[key]);
+  return schema?.type === "string";
+}
+
+function invokeParameterValue(value) {
+  try { return JSON.parse(value); } catch { /* text, or the slip below */ }
+  const trimmed = value.trimEnd();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}}")) try { return JSON.parse(trimmed.slice(0, -1)); } catch { /* text */ }
+  return value;
+}
+
+function invokeToolCalls(text, tools) {
+  if (!text.startsWith("<")) return null;
+  let rest = (text.match(/^<function_calls>\s*([\s\S]*?)\s*<\/function_calls>$/)?.[1] ?? text).trim();
+  const calls = [];
+  const add = call => { if (calls.at(-1)?.raw !== call.raw) calls.push(call); };
+  while (rest) {
+    const block = INVOKE_BLOCK.exec(rest);
+    if (!block) {
+      const trailing = calls.length ? exactToolCalls(rest) : null;
+      if (!trailing) return null;
+      for (const call of trailing) add({ name: call.name, arguments: call.arguments, raw: JSON.stringify({ name: call.name, arguments: call.arguments }) });
+      break;
+    }
+    const name = block[1].trim(), args = {};
+    if (!name) return null;
+    for (const [, key, raw] of block[2].matchAll(INVOKE_PARAMETER)) {
+      if (Object.hasOwn(args, key)) return null;
+      const value = raw.replace(/^\r?\n/, "").replace(/\r?\n$/, "");
+      args[key] = declaredString(tools, name, key) ? value : invokeParameterValue(value);
+    }
+    add({ name, arguments: args, raw: JSON.stringify({ name, arguments: args }) });
+    rest = rest.slice(block[0].length);
+  }
+  return calls.length ? calls : null;
+}
+
 // Recover only a missing root-object terminator. Strict JSON parsing must
 // succeed after that one byte, so argument strings and nested values must
 // already be complete. Never fill in argument values or nested delimiters.
@@ -184,12 +239,14 @@ export function toolCallFingerprint(name, args) {
  * Accept one or more exact tool calls, or salvage a call before fabricated
  * results. `afterCommentary` marks calls that trailed prose: a live request
  * under the commentary-then-call rule, which the caller may still refuse to
- * run when it only repeats an executed call.
+ * run when it only repeats an executed call. `tools` are the issued tool
+ * descriptors; they only decide how markup-form parameters are typed.
  */
-export function parseAgentToolTurn(output) {
+export function parseAgentToolTurn(output, { tools = [] } = {}) {
   const text = String(output || "").trim();
   if (transcriptToolCalls(text)?.length === 0) return { calls: [], malformed: true };
-  const exact = exactToolCalls(text) || missingRootTerminator(text) || redundantBatchTerminator(text) || batchEnvelopeSlip(text);
+  const exact = exactToolCalls(text) || missingRootTerminator(text) || redundantBatchTerminator(text) || batchEnvelopeSlip(text)
+    || invokeToolCalls(text, tools);
   if (exact) return { calls: exact, malformed: false };
   const afterCommentary = callsAfterCommentary(text);
   if (afterCommentary) return { calls: afterCommentary, malformed: false, afterCommentary: true };
@@ -201,7 +258,8 @@ export function parseAgentToolTurn(output) {
   if (firstCall && leading.rest === "}") return { calls: [firstCall], malformed: false };
   // Some CLI streams repeat the same decision in their final summary. One
   // identical retransmission is one request, never two executions.
-  if (firstCall && leading.rest === leading.body) return { calls: [firstCall], malformed: false };
+  // A stray code fence between the two copies does not make them differ.
+  if (firstCall && leading.rest.replace(/^(?:`{3}\w*\s*)+/, "") === leading.body) return { calls: [firstCall], malformed: false };
   if (firstCall && SIMULATED_RESULT.test(leading.rest)) return { calls: [firstCall], malformed: true };
   return { calls: [], malformed: Boolean(firstCall || REQUEST_ENVELOPE.test(text) || SIMULATED_RESULT_ANYWHERE.test(text) || SIMULATED_REQUEST_ANYWHERE.test(text) || embeddedToolCall(text)) };
 }

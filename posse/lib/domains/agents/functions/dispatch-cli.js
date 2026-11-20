@@ -6,6 +6,10 @@ import { parseAgentToolTurn } from "./tool-turn.js";
 import { estimateCallCost } from "../../billing/functions/pricing.js";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
+// A CLI model can fall into repeating one request until its output cap, which
+// took nine minutes and ~245,000 characters in the reply that prompted this.
+// No real decision repeats a long line this often, so the turn is cut there.
+const RUNAWAY_LINE_CHARS = 24, RUNAWAY_LINE_REPEATS = 30, RUNAWAY_TOTAL_CHARS = 1024 * 1024;
 function demand(ok, message) {
   if (!ok) throw Object.assign(new Error(message), { code: "invalid_request" });
 }
@@ -39,23 +43,53 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
     : native
     ? `Use only the provider-issued tools.${batching ? ` Issue up to ${TOOL_BATCH_MAX_CALLS} independent, ready tool calls in one response when useful; wait for results before making dependent calls.` : ""} Never invent tool results or print tool-call JSON as prose. After real results arrive, answer in plain language.`
     : buildAgentToolInstructions(request.tools, { autonomy: { write_tools: "confirm" }, limits: { calls: 1 } }, { callerOwned: true, callerBatching: batching });
-  const generated = await (dependencies.call || callAgentProvider)(route.provider, renderConversation(request.messages), {
-    modelName: route.modelName, reasoningEffort: request.reasoning_effort || undefined, idleSeconds: request.idle_seconds || 1800,
-    systemPrompt: [request.system_prompt, toolInstructions].filter(Boolean).join("\n\n"),
-    tools: request.tools, allowToolBatching: batching, promptCache: true,
-    cwd: dependencies.cwd || process.cwd(), signal: dependencies.signal,
-    maxOutputTokens: 8192,
-    ...(native ? { transcript: dispatchTranscript(request.messages) } : {}),
-  });
+  const priceUsage = (stats = {}) => {
+    const priced = estimateCallCost({ provider: route.provider, modelName: stats.modelName || route.modelName,
+      modelTier: "standard", inputTokens: stats.inputTokens, outputTokens: stats.outputTokens,
+      cachedInputTokens: stats.cachedInputTokens, cacheCreationInputTokens: stats.cacheCreationInputTokens,
+      knownCostUsd: stats.costUsd, longContextInputTokens: stats.longContextInputTokens });
+    return { ...stats, costUsd: priced.source === "none" ? null : priced.costUsd };
+  };
+  const stop = new AbortController();
+  const stopWithCaller = () => stop.abort(dependencies.signal.reason);
+  if (dependencies.signal?.aborted) stopWithCaller();
+  else dependencies.signal?.addEventListener("abort", stopWithCaller, { once: true });
+  const repeats = new Map();
+  let streamed = 0, runaway = false;
+  let generated;
+  try {
+    generated = await (dependencies.call || callAgentProvider)(route.provider, renderConversation(request.messages), {
+      modelName: route.modelName, reasoningEffort: request.reasoning_effort || undefined, idleSeconds: request.idle_seconds || 1800,
+      systemPrompt: [request.system_prompt, toolInstructions].filter(Boolean).join("\n\n"),
+      tools: request.tools, allowToolBatching: batching, promptCache: true,
+      cwd: dependencies.cwd || process.cwd(), signal: stop.signal,
+      maxOutputTokens: 8192,
+      onOutputLine: (line) => {
+        if (runaway) return;
+        const text = String(line ?? "");
+        streamed += text.length + 1;
+        const seen = text.length >= RUNAWAY_LINE_CHARS ? (repeats.get(text) || 0) + 1 : 0;
+        if (seen) repeats.set(text, seen);
+        if (seen < RUNAWAY_LINE_REPEATS && streamed <= RUNAWAY_TOTAL_CHARS) return;
+        runaway = true;
+        stop.abort();
+      },
+      ...(native ? { transcript: dispatchTranscript(request.messages) } : {}),
+    });
+  } catch (error) {
+    if (!runaway || dependencies.signal?.aborted) throw error;
+    // A correctable reply, not a provider outage: the caller asks again and
+    // charges whatever usage the provider reported before it was stopped.
+    throw Object.assign(new Error("Provider repeated the same output until it was stopped; no tool executed"), {
+      code: AGENT_DISPATCH_PROTOCOL_ERROR, stats: priceUsage(error?.stats || error?.details?.stats || {}),
+    });
+  } finally {
+    dependencies.signal?.removeEventListener("abort", stopWithCaller);
+  }
   const content = String(generated?.output || "").trim();
   const nativeCalls = generated?.toolCalls || (generated?.toolCall ? [generated.toolCall] : null);
-  const parsed = parseAgentToolTurn(content);
-  const stats = generated?.stats || {};
-  const priced = estimateCallCost({ provider: route.provider, modelName: stats.modelName || route.modelName,
-    modelTier: "standard", inputTokens: stats.inputTokens, outputTokens: stats.outputTokens,
-    cachedInputTokens: stats.cachedInputTokens, cacheCreationInputTokens: stats.cacheCreationInputTokens,
-    knownCostUsd: stats.costUsd, longContextInputTokens: stats.longContextInputTokens });
-  const usage = { ...stats, costUsd: priced.source === "none" ? null : priced.costUsd };
+  const parsed = parseAgentToolTurn(content, { tools: request.tools });
+  const usage = priceUsage(generated?.stats || {});
   if (nativeCalls ? (!nativeCalls.length && (parsed.malformed || parsed.calls.length)) : parsed.malformed) {
     // The caller owns correction attempts and must charge this failed response
     // against its normal turn/spend budget before asking the provider again.
@@ -96,7 +130,28 @@ export async function runAgentDispatchCli(argv, io = {}) {
     return 0;
   } catch (error) {
     stdout.write(`${JSON.stringify({ protocol: AGENT_DISPATCH_PROTOCOL, ...(error?.stats ? { stats: error.stats } : {}),
-      error: { code: error?.code || "dispatch_failed", message: error?.message || String(error) } })}\n`);
+      error: { code: error?.code || "dispatch_failed", message: dispatchFailureMessage(error) } })}\n`);
     return 1;
   }
+}
+
+// The native host keeps its public failure text generic and puts what
+// actually happened (already bounded and redacted there) beside it. The
+// caller shows only the message, so "Codex reported a failed turn" hid a
+// usage limit and "tool surface is incompatible" hid a reply Claude Code cut
+// short. Carry the reason, and say what the commonest one means.
+const INTERRUPTED_REPLY = /unsupported user content|unknown system event/i;
+export function dispatchFailureMessage(error) {
+  const message = error?.message || String(error);
+  const raw = error?.providerDiagnostic || error?.details?.diagnostic?.reason;
+  if (typeof raw !== "string" || !raw.trim()) return message;
+  let reason = raw.trim();
+  try {
+    const parsed = JSON.parse(reason);
+    reason = [parsed?.message, parsed?.code].find(part => typeof part === "string" && part.trim()) || reason;
+  } catch { /* plain text */ }
+  reason = reason.replace(/\s+/g, " ").slice(0, 300);
+  return INTERRUPTED_REPLY.test(reason)
+    ? `${message}: ${reason}. Claude Code interrupted its own reply, usually because it reached its output limit or a safeguard stopped the response; rewording or a smaller request can get through`
+    : `${message}: ${reason}`;
 }
