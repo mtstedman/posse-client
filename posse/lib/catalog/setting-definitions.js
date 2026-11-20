@@ -59,6 +59,7 @@ export const SETTING_DEFINITIONS = [
   { key: "artifact_image_provider", default: "", description: "Provider used for image artifacts (openai, grok, or posse-local once a local image model is installed)" },
 
   // ── Remote model catalog (fetched from posse-remote /v1/catalog/models) ──
+  { key: "provider_capacity_fallback", default: "on", options: ["on", "off"], label: "Borrow a provider at a usage limit", description: "When every provider configured for a role is paused for a usage limit, run the job on a ready provider configured for another role instead of waiting or asking. off keeps each role on its own providers." },
   { key: "model_catalog_cache_ms", default: "86400000", numeric: { integer: true, min: 60000 }, description: "Milliseconds to cache the remote model catalog before refreshing (default 24h)" },
   { key: "model_catalog_enforcement", default: "warn_and_fallback", options: MODEL_CATALOG_ENFORCEMENT_VALUES, description: "Stale configured-model handling: warn_and_fallback substitutes the tier default at runtime, warn_only keeps the configured model, off disables validation" },
   { key: "model_catalog_json", default: "", adminVisible: false, description: "Cached remote model/pricing catalog payload (auto-updated)" },

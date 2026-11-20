@@ -271,6 +271,36 @@ export function getAvailableProviders(role = "dev") {
   return getRoleProviderList(role);
 }
 
+// Roles whose providers run text agents. The artificer's provider can be an
+// image-only one, so it never lends a provider to another role.
+const CAPACITY_FALLBACK_SOURCE_ROLES = Object.freeze(PROVIDER_ROLE_NAMES.filter((role) => role !== "artificer"));
+
+/**
+ * Providers a role may borrow when every provider configured for it is paused
+ * for a usage limit or out of capacity. Only providers the operator already
+ * configured for another agent role qualify, and only while they are ready
+ * with credentials; the role's own providers are not repeated. Setting
+ * provider_capacity_fallback=off keeps each role inside its own list.
+ *
+ * @param {string} [role]
+ * @returns {string[]}
+ */
+export function getCapacityFallbackProviders(role = "dev") {
+  if (String(readDbSetting("provider_capacity_fallback") || "on").trim().toLowerCase() === "off") return [];
+  const own = new Set(getRoleProviderList(role).map((name) => canonicalProviderName(name)));
+  const borrowed = [];
+  for (const sourceRole of CAPACITY_FALLBACK_SOURCE_ROLES) {
+    for (const provider of getRoleProviderList(sourceRole)) {
+      const canonical = canonicalProviderName(provider);
+      if (own.has(canonical) || borrowed.includes(provider)) continue;
+      let selectable = false;
+      try { selectable = isProviderSelectable(provider); } catch { selectable = false; }
+      if (selectable) borrowed.push(provider);
+    }
+  }
+  return borrowed;
+}
+
 /**
  * Check whether a role has multiple providers configured.
  * When true, plan-time provider assignment runs for that role's jobs.

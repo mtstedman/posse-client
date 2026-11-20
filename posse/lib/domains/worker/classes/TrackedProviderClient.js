@@ -29,6 +29,7 @@ import {
 } from "../../queue/functions/index.js";
 import {
   getAvailableProviders,
+  getCapacityFallbackProviders,
   getProvider,
   getProviderRateLimitState,
   pauseProviderForQuota,
@@ -422,6 +423,7 @@ const DEFAULT_DEPS = {
   updateJobProvider,
   setAttemptSession,
   getAvailableProviders,
+  getCapacityFallbackProviders,
   getProvider,
   getProviderRateLimitState,
   pauseProviderForQuota,
@@ -2835,6 +2837,7 @@ export class TrackedProviderClient {
   } = {}) {
     const {
       getAvailableProviders,
+      getCapacityFallbackProviders,
       getObservationContext,
       getProvider,
       getProviderRateLimitState,
@@ -2893,6 +2896,18 @@ export class TrackedProviderClient {
           : (typeof dispatcher?.providersForRole === "function"
               ? dispatcher.providersForRole(opts.role)
               : getAvailableProviders(opts.role))));
+    // A role whose own providers are all at a usage limit borrows a provider
+    // the operator configured for another role. An explicit allow-list and the
+    // artificer's pinned provider stay authoritative.
+    const borrowsOnCapacity = !(Array.isArray(opts.allowedProviders) && opts.allowedProviders.length > 0)
+      && opts.role !== "artificer"
+      && typeof getCapacityFallbackProviders === "function";
+    const capacityPool = () => {
+      if (!borrowsOnCapacity) return configuredPool;
+      let borrowed = [];
+      try { borrowed = getCapacityFallbackProviders(opts.role) || []; } catch { borrowed = []; }
+      return [...new Set([...configuredPool, ...borrowed.filter(Boolean)])];
+    };
     const attemptedProviders = normalizeAttemptedProviders(opts._fallbackAttemptedProviders);
     if (opts._fallbackAttempted) recordAttemptedProvider(attemptedProviders, providerName);
     let preflightFallback = null;
@@ -2908,7 +2923,7 @@ export class TrackedProviderClient {
       recordAttemptedProvider(attemptedProviders, providerName);
       if (buildFallbackPrompt && !opts._fallbackAttempted) {
         const fallbackName = this._selectFallbackCandidate({
-          configuredPool,
+          configuredPool: capacityPool(),
           currentProvider: providerName,
           attemptedProviders,
           needsImageGeneration: !!opts.needsImageGeneration,
@@ -3287,9 +3302,11 @@ export class TrackedProviderClient {
       }
       if (this.isProviderError(activeErr) || isRuntimeModelError(activeErr)) {
         recordAttemptedProvider(attemptedProviders, providerName);
-        if (this.isProviderError(activeErr)) this._noteProviderQuotaFailure(providerName, activeErr, job_id);
+        const quotaFailure = this.isProviderError(activeErr)
+          ? this._noteProviderQuotaFailure(providerName, activeErr, job_id)
+          : null;
         const fallbackName = this._selectFallbackCandidate({
-          configuredPool,
+          configuredPool: quotaFailure ? capacityPool() : configuredPool,
           currentProvider: providerName,
           attemptedProviders,
           needsImageGeneration: !!opts.needsImageGeneration,
