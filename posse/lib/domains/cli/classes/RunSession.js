@@ -1,4 +1,5 @@
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
+import { startThemeSong } from "../../ui/functions/display/april-fools.js";
 import { formatNativeDownloadMiB, summarizeNativeArtifactResults } from "../functions/native-artifact-summary.js";
 // Runtime session orchestration for the run command.
 // Keeps the CLI entry point thin while preserving the existing command behavior.
@@ -70,9 +71,11 @@ export class RunSession {
   }
 
   async run() {
+    const stopThemeSong = startThemeSong();
     try {
       return await this.#run();
     } finally {
+      stopThemeSong();
       await this.#disposeRunResources();
     }
   }

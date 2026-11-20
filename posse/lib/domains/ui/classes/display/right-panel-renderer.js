@@ -4,6 +4,7 @@ import { fit, stripAnsi, visiblePad, _sanitizeDisplayLine } from "../../function
 import { brandRule, posseWordmark, roleBrandColor, roleBrandIcon } from "../../functions/display/helpers/brand.js";
 import { jobLabel, jobDisplayStatus } from "../../functions/display/helpers/job-status.js";
 import { renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
+import { aprilFoolsTagline } from "../../functions/display/april-fools.js";
 import { _buildQueueProviderUsageLines, getProviderUsageSummaryCache } from "../../functions/display/helpers/provider-usage.js";
 import { peerWorkSummary, sessionSyncLabel, sessionPairingDashboardLines, unpairedPipelineLines } from "../../functions/display/session-presentation.js";
 import {
@@ -186,6 +187,8 @@ export class DisplayRightPanelRenderer {
     // so the banner still shows on its own down to ~28 cols.
     if (width >= 28) {
       lines.push(...this._withPosseMascot(posseMastheadRows(), width));
+      const tagline = aprilFoolsTagline();
+      if (tagline) lines.push(` ${C.dim}${fit(tagline, width - 2)}${C.reset}`);
       const clock = this._buildRunClockLine(width);
       if (clock) lines.push(clock);
       lines.push(` ${C.dim}${"\u2500".repeat(Math.min(width - 2, 44))}${C.reset}`);
