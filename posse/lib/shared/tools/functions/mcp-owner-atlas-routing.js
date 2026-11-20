@@ -1,8 +1,9 @@
 import { normalizeResearcherTypedActionArgs, researcherWorkflowActions } from "../../../domains/integrations/functions/deterministic-mcp/researcher-dispatcher.js";
 import { fetchHashRefEvidenceForContext, issueHashRefTraversalForContext } from "../../../domains/queue/functions/hash-refs.js";
 import { atlasDescriptorSchemaForAction } from "../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
+import { foldAtlasUnifiedSelectors } from "../../../domains/atlas/functions/v2/contracts/unified-selectors.js";
 import { usesResearcherAtlasReadSurface, sessionToolPolicy, requestedToolPolicyName, toolAllowedByPolicy } from "./mcp-owner-tool-policy.js";
-import { resolveAtlasSymbolHandle, atlasSymbolSourcePath } from "./mcp-owner-symbol-handles.js";
+import { resolveAtlasSymbolHandle, resolveAtlasSymbolHandleArgs, atlasSymbolSourcePath } from "./mcp-owner-symbol-handles.js";
 import { firstStructuredJsonValue } from "./mcp-owner-source-transport.js";
 import { normalizeTypedSymbolBodyRoute, normalizeTypedFilenameWindowAnchor, normalizeTypedFileWindowOrientation, normalizeTypedAnchoredFileWindowBudget } from "./mcp-owner-atlas-window-args.js";
 import { hashRefToolContext } from "./mcp-owner-session-support.js";
@@ -90,12 +91,51 @@ function grantedActionRoute(policy, action, supplied, route) {
   return { action, supplied, transforms: [] };
 }
 
+// Every role names source the same way: `names` and `symbols`. Session handles
+// in `symbols` become canonical IDs, then both fields fold onto the action's
+// execution selectors, so everything downstream sees the execution contract.
+function unifiedSelectorArgs(session, action, args, { symbolsOnly = false } = {}) {
+  const transforms = [];
+  let resolvedArgs = args;
+  if (session) {
+    const handles = resolveAtlasSymbolHandleArgs(session, args, { action, symbolsOnly });
+    if (handles.error) return { args, transforms, error: handles.error };
+    if (handles.resolved > 0) {
+      transforms.push({ kind: "atlas_symbol_handle_resolution", resolved: handles.resolved });
+    }
+    resolvedArgs = handles.args;
+  }
+  const unified = foldAtlasUnifiedSelectors(action, resolvedArgs);
+  if (unified.error) return { args, transforms, error: unified.error };
+  if (unified.folded) {
+    transforms.push({
+      kind: "atlas_unified_selectors",
+      ...(unified.repairedNames > 0 ? { names_moved_from_symbols: unified.repairedNames } : {}),
+    });
+  }
+  return { args: unified.args, transforms, ...(unified.note ? { note: unified.note } : {}) };
+}
+
 export function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, session = null) {
   const transforms = [];
   const requested = requestedToolPolicyName(toolName, toolArgs);
   const direct = policy?.atlasResearcherDirect === true
     && requested.suite === "atlas" && ATLAS_RESEARCHER_WORKFLOW_ACTIONS.has(requested.name);
-  if (!direct) return { toolName, toolArgs, transforms };
+  if (!direct) {
+    // Every role reads short symbol handles in Atlas results; turn them back
+    // into canonical IDs here. The typed researcher facade below does the same
+    // inside its own argument normalization.
+    if (requested.suite !== "atlas") return { toolName, toolArgs, transforms };
+    const unified = unifiedSelectorArgs(session, requested.name, toolArgs);
+    transforms.push(...unified.transforms);
+    if (unified.error) return { toolName, toolArgs, transforms, routingError: unified.error };
+    return {
+      toolName,
+      toolArgs: unified.args,
+      transforms,
+      ...(unified.note ? { selectorNote: unified.note } : {}),
+    };
+  }
   const action = requested.name;
   let supplied = toolArgs;
   const fieldAliases = normalizeResearcherTypedActionArgs(action, supplied);
@@ -109,6 +149,14 @@ export function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, s
       aliases: fieldAliases.aliases,
     });
   }
+  // Fold before the typed cleanups below: they read the execution selectors.
+  const unified = unifiedSelectorArgs(session, action, supplied, { symbolsOnly: true });
+  transforms.push(...unified.transforms);
+  if (unified.error) {
+    return { toolName: `atlas.${action}`, toolArgs, transforms, routingError: unified.error };
+  }
+  supplied = unified.args;
+  const selectorNote = unified.note || null;
   const symbolBodyRoute = usesResearcherAtlasReadSurface(policy)
     ? grantedActionRoute(policy, action, supplied, normalizeTypedSymbolBodyRoute(action, supplied))
     : { action, supplied, transforms: [] };
@@ -216,6 +264,7 @@ export function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, s
     toolName: `atlas.${routedAction}`,
     toolArgs: routedArgs,
     transforms,
+    ...(selectorNote ? { selectorNote } : {}),
   };
 }
 

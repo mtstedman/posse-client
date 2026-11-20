@@ -1,4 +1,4 @@
-import { COMPACT_RELATIONSHIP_PROJECTION, COMPACT_STRUCTURE_PROJECTION } from "../../../catalog/atlas-presentation.js";
+import { COMPACT_RELATIONSHIP_PROJECTION } from "../../../catalog/atlas-presentation.js";
 
 
 import { recordObservation } from "../../../domains/observability/functions/observations.js";
@@ -8,7 +8,7 @@ import crypto from "node:crypto";
 import { getTraversalCompletionSnapshotForCall } from "../../../domains/handoff/functions/agent-handoff.js";
 import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { usesResearcherAtlasReadSurface, sessionToolPolicy, toolAllowedByPolicy } from "./mcp-owner-tool-policy.js";
-import { researcherStructureProjection } from "./mcp-owner-atlas-presentation.js";
+import { structureProjection } from "./mcp-owner-atlas-presentation.js";
 
 export function filterToolsListMessage(message, policy) {
   const tools = message?.result?.tools;
@@ -106,7 +106,7 @@ export function recordProviderIssuedToolSurface(session, message, researchSynthe
       limits: { ...researchSynthesisPolicyFor(session) },
       projections: {
         ...(usesResearcherAtlasReadSurface(policy) ? { "symbol.callers": COMPACT_RELATIONSHIP_PROJECTION } : {}),
-        ...(researcherStructureProjection(session) ? { "code.structure": COMPACT_STRUCTURE_PROJECTION } : {}),
+        "code.structure": structureProjection(),
       },
       instructions_sha256: null,
       role: boot.role || null,

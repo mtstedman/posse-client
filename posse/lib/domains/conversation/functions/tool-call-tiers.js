@@ -160,15 +160,20 @@ function atlasRemoteHint(args, cwd) {
   const fileLabel = file ? repoRelativePath(file, cwd) : null;
   const refs = Array.isArray(args.symbolRefs) ? args.symbolRefs : args.symbolRef ? [args.symbolRef] : [];
   const symbol = refs.map(symbolLabel).find(Boolean) || null;
-  const identifiers = Array.isArray(args.identifiersToFind)
-    ? args.identifiersToFind.filter((entry) => typeof entry === "string" && /^[A-Za-z_$][\w$.:]*$/u.test(entry.trim()))
+  // A provider's own tool-use record carries the agent-facing `names`; an
+  // owner observation carries the execution field they fold onto.
+  const named = Array.isArray(args.identifiersToFind) ? args.identifiersToFind : args.names;
+  const identifiers = Array.isArray(named)
+    ? named.filter((entry) => typeof entry === "string" && /^[A-Za-z_$][\w$.:]*$/u.test(entry.trim()))
     : [];
   const symbolText = symbol
     ? `${symbol}${refs.length > 1 ? ` +${refs.length - 1}` : ""}`
     : identifiers.length > 0
       ? `${identifiers.slice(0, 3).join(", ")}${identifiers.length > 3 ? ` +${identifiers.length - 3}` : ""}`
       : null;
-  const ids = Array.isArray(args.symbolIds) ? args.symbolIds.length : args.symbolId ? 1 : 0;
+  const ids = Array.isArray(args.symbolIds) ? args.symbolIds.length
+    : args.symbolId ? 1
+      : Array.isArray(args.symbols) && !fileLabel ? args.symbols.length : 0;
   const parts = [symbolText, fileLabel].filter(Boolean);
   if (parts.length > 0) return parts.join(" @ ");
   return ids > 0 ? `${ids} symbol target${ids === 1 ? "" : "s"}` : null;

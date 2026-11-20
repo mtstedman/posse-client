@@ -1,7 +1,5 @@
 import { COMPACT_STRUCTURE_DEFAULT_MAX_CHARS, COMPACT_STRUCTURE_DEFAULT_MAX_FILES, COMPACT_STRUCTURE_PROJECTION } from "../../../catalog/atlas-presentation.js";
-import { ATLAS_COMPACT_STRUCTURE_GATED_MAX_CHARS, ATLAS_COMPACT_STRUCTURE_GATED_ROLES, ATLAS_COMPACT_STRUCTURE_ROLES } from "../../../catalog/atlas.js";
-import { getAccountSetting } from "../../../domains/settings/functions/account-settings.js";
-import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { ATLAS_COMPACT_STRUCTURE_MAX_CHARS, ATLAS_COMPACT_STRUCTURE_SMALL_PAGE_ROLES } from "../../../catalog/atlas.js";
 import { compactSkeletonSymbolHandles, compactResearcherTypedAtlasText, normalizeResearcherTypedAtlasFieldNames } from "./researcher-typed-result-compaction.js";
 import { usesResearcherAtlasReadSurface, sessionToolPolicy, requestedToolPolicyName } from "./mcp-owner-tool-policy.js";
 import { atlasSymbolHandleForId, rememberAtlasSymbolSourcePaths } from "./mcp-owner-symbol-handles.js";
@@ -19,33 +17,60 @@ export function researcherStructureExecutorArgs(session, requestedName, args = {
   return { ...args, maxFiles: COMPACT_STRUCTURE_DEFAULT_MAX_FILES };
 }
 
-/** @param {any} session */
-export function researcherStructureProjection(session) {
-  const role = String(session?.bootConfig?.role || "");
-  if (ATLAS_COMPACT_STRUCTURE_ROLES.includes(role)) return COMPACT_STRUCTURE_PROJECTION;
-  if (!ATLAS_COMPACT_STRUCTURE_GATED_ROLES.includes(role)) return null;
-  try {
-    return getAccountSetting(SETTING_KEYS.ATLAS_COMPACT_STRUCTURE_DEV_ASSESSOR) === "on"
-      ? COMPACT_STRUCTURE_PROJECTION : null;
-  } catch { return null; }
+// code.structure is compact for every role: the native inventory is several
+// times any inline budget, and an unprojected result is cut by position.
+export function structureProjection() {
+  return COMPACT_STRUCTURE_PROJECTION;
 }
 
+/** @param {any} session */
 export function structureMaxChars(session) {
-  return ATLAS_COMPACT_STRUCTURE_ROLES.includes(String(session?.bootConfig?.role || ""))
-    ? COMPACT_STRUCTURE_DEFAULT_MAX_CHARS : ATLAS_COMPACT_STRUCTURE_GATED_MAX_CHARS;
+  return ATLAS_COMPACT_STRUCTURE_SMALL_PAGE_ROLES.includes(String(session?.bootConfig?.role || ""))
+    ? COMPACT_STRUCTURE_DEFAULT_MAX_CHARS : ATLAS_COMPACT_STRUCTURE_MAX_CHARS;
 }
 
 export const __testResearcherStructureExecutorArgs = researcherStructureExecutorArgs;
 
-export const __testResearcherStructureProjection = researcherStructureProjection;
+export const __testStructureProjection = structureProjection;
 
 export const __testStructureMaxChars = structureMaxChars;
-export function appendResearcherSymbolHandles(result, session, action) {
-  if (!usesResearcherAtlasReadSurface(sessionToolPolicy(session)) || result?.isError === true) {
-    return result;
-  }
+// Every role reads a short session handle (s1, s2, ...) wherever an Atlas
+// result names a symbol; the 64-hex canonical ID never reaches a model. The
+// typed researcher surface keeps the canonical ID beside the handle because
+// its own compaction renames the pair afterwards; every other role gets the
+// handle in place of the ID.
+function replaceCanonicalSymbolIds(text, session) {
+  let issued = 0;
+  const replaced = text.replace(/"([0-9a-f]{64}:[0-9]+)"/gu, (match, symbolId) => {
+    const handle = atlasSymbolHandleForId(session, symbolId);
+    if (!handle) return match;
+    issued += 1;
+    return `"${handle}"`;
+  });
+  return { text: replaced, issued };
+}
+
+export function appendSymbolHandles(result, session, action, { atlasCall = true } = {}) {
+  if (!session || result?.isError === true) return result;
   const first = result?.content?.[0];
   if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+  if (!usesResearcherAtlasReadSurface(sessionToolPolicy(session))) {
+    // Only an Atlas result names symbols; a file read may legitimately quote
+    // text that merely looks like an ID.
+    if (!atlasCall) return result;
+    const replaced = replaceCanonicalSymbolIds(first.text, session);
+    if (replaced.issued === 0) return result;
+    return annotateOwnerResultTransform({
+      ...result,
+      content: [{ ...first, text: replaced.text }, ...result.content.slice(1)],
+    }, {
+      kind: "atlas_symbol_handles",
+      issued: replaced.issued,
+      scope: "job_bound_agent_session",
+      before_chars: first.text.length,
+      after_chars: replaced.text.length,
+    });
+  }
   let issued = 0;
   let text = first.text;
   if (action === "code.skeleton") {
@@ -85,6 +110,20 @@ export function appendResearcherSymbolHandles(result, session, action) {
     before_chars: first.text.length,
     after_chars: text.length,
   });
+}
+
+// A result's own handle is labelled `symbol`, the word the `symbols` parameter
+// takes it back under. This runs as the last presentation step: coverage,
+// paging and display all read the execution field name before it. The typed
+// researcher surface relabels inside its own field-name pass.
+export function labelSymbolHandles(result, session) {
+  if (!session || usesResearcherAtlasReadSurface(sessionToolPolicy(session))) return result;
+  const first = result?.content?.[0];
+  if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+  const text = first.text.replace(/"symbolId"(\s*:\s*"s[1-9][0-9]{0,5}")/gu, '"symbol"$1');
+  return text === first.text
+    ? result
+    : { ...result, content: [{ ...first, text }, ...result.content.slice(1)] };
 }
 
 export function compactResearcherTypedAtlasResult(result, session, toolName, toolArgs = {}) {

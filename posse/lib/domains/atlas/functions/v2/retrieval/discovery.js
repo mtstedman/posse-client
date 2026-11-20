@@ -216,10 +216,10 @@ function examplesFor(action) {
   const examples = {
     "symbol.search": [{ action, query: "auth middleware", limit: 5 }],
     "symbol.card": [{ action, symbolId: "<symbolId>", includeResolutionMetadata: true }],
-    "symbol.callers": [{ action, symbolId: "<symbolId>", limit: 20 }],
+    "symbol.callers": [{ action, symbols: ["<symbol>"], limit: 20 }],
     "symbol.get": [
-      { action, symbolId: "<symbolId>" },
-      { action, symbolRef: { name: "Client.connect", file: "src/client.ts" } },
+      { action, symbols: ["<symbol>"] },
+      { action, names: ["Client.connect"], file: "src/client.ts" },
     ],
     "symbol.overview": [{ action, symbolId: "<symbolId>", kind: ["calls", "references"], limit: 25 }],
     "tree.overview": [{ action, maxDepth: 2, limit: 50 }],
@@ -228,8 +228,11 @@ function examplesFor(action) {
     "tree.expand": [{ action, paths: ["lib/auth/middleware.ts"], maxFiles: 40, branchFileCap: 20 }],
     "slice.build": [{ action, taskText: "debug auth middleware", budget: { maxCards: 8 } }],
     "edit.plan": [{ action, targetSymbols: ["<symbolId>"], search: "oldName", replace: "newName" }],
-    "code.window": [{ action, symbolId: "<symbolId>", reason: "Need implementation details after card/skeleton", identifiersToFind: ["handler"], expectedLines: 80 }],
-    "code.survey": [{ action, paths: "lib/domains/billing" }, { action, paths: ["lib/a.js", "lib/b.js"], symbols: ["processInvoice"] }],
+    "code.window": [
+      { action, symbols: ["<symbol>"], reason: "Need implementation details after card/skeleton" },
+      { action, file: "src/server.ts", names: ["handler"], reason: "Need the handler and its surrounding control flow" },
+    ],
+    "code.survey": [{ action, paths: "lib/domains/billing" }, { action, paths: ["lib/a.js", "lib/b.js"], names: ["processInvoice"] }],
     "code.structure": [{ action, paths: "lib/domains/billing", edgeKinds: ["imports"] }, { action, paths: ["lib/a.js", "lib/b.js"], edgeKinds: ["imports", "calls"] }],
     "code.db": [{ action, paths: "lib/domains/billing" }, { action, paths: ["lib/a.js", "lib/b.js"] }],
     "repo.overview": [{ action, level: "full", includeHotspots: true }],

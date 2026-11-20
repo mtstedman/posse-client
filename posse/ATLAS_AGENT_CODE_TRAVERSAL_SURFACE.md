@@ -271,14 +271,14 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Locate identifiers’ uses within a known file or symbol. Returns matching locations and enclosing-symbol context; a match inside a declaration of up to 60 lines also returns that declaration’s full source. Submit scattered identifiers together; a file path needs no prior ID lookup.
+Locate names’ uses within a known file or symbol. Returns matching locations and enclosing-symbol context; a match inside a declaration of up to 60 lines also returns that declaration’s full source. Results may include string/comment occurrences. Submit scattered names together. Give names with either file or symbols.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `contextLines` | `integer` | Optional | min 0; max 8 | Neighboring lines per match, clamped to 8. |
-| `file` | `string` | Conditional | min length 1 | Repository-relative file path fallback when you have a file but not an opaque symbolId. |
-| `identifiersToFind` | `array | string` | Required | min length 1; max length 5000; min items 1; max items 50 | Exact identifiers to locate together; results may include string/comment occurrences. |
-| `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
+| `file` | `string` | Conditional | min length 1 | Repository-relative path of the file to search. |
+| `names` | `array | string` | Required | min length 1; max length 5000; min items 1; max items 50 | Class, method, function, and variable names. |
+| `symbols` | `array<string>` | Conditional | min items 1; max items 1 | Search directly by atlas symbol. |
 
 ### `atlas.code.skeleton`
 
@@ -294,14 +294,13 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Map declarations in a known file without bodies or control flow. Returns names, ranges, signatures, symbol handles, and completeness counts. Includes class members and exports, but excludes local functions. If truncated, narrow with identifiersToFind or exportedOnly.
+Map declarations in a known file without bodies or control flow. Returns names, ranges, signatures, symbol handles, and completeness counts. Includes class members and exports, but excludes local functions. If truncated, narrow with names or exportedOnly.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `exportedOnly` | `boolean` | Optional |  | Prefer exported symbols only when possible. |
-| `file` | `string` | Optional | min length 1 | Optional relative file path to inspect. |
-| `identifiersToFind` | `array | string` | Optional | max length 5000; max items 50 | Optional exact names to focus the outline. |
-| `symbolId` | `string` | Optional |  | Opaque ATLAS symbol ID selecting its containing file. Use identifiersToFind to focus declarations. |
+| `file` | `string` | Optional | min length 1 | Repository-relative file path to inspect. |
+| `names` | `array | string` | Optional | min length 1; max length 5000; min items 1; max items 50 | Class, method, function, and variable names. |
 
 ### `atlas.code.structure`
 
@@ -346,8 +345,8 @@ Locate relevant declarations across known paths when the exact target is unclear
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `maxFiles` | `integer` | Optional | min 1; max 64 | Optional. Cap on files surveyed. Default 64, minimum 1, maximum 64. |
+| `names` | `array | string` | Optional | min length 1; max length 5000; min items 1; max items 16 | Class, method, function, and variable names. |
 | `paths` | `string | array` | Required | min length 1; max items 64 | Repository-relative directory prefix or file path — one string or an array of them, e.g. "src/billing" or ["lib/a.js", "lib/b.js"]. Resolves up to 64 indexed files. |
-| `symbols` | `array | string` | Optional | max length 5000; max items 16 | Optional declaration names to focus the survey. |
 
 ### `atlas.code.window`
 
@@ -363,18 +362,17 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Read a coherent source region around known declarations, including intervening control flow. Known names in a file need no prior ID lookup. Use granularity to select declaration regions, blocks, or a broader anchored file window within the issued limits. It also reads text files outside the symbol index (stylesheets, JSON, Markdown, SQL, configuration): give the file, granularity fileWindow, and text that appears in the wanted region as identifiersToFind.
+Read a coherent source region around known declarations, including intervening control flow. Select by file plus names, or by symbols. Use granularity to select declaration regions, blocks, or a broader anchored file window within the issued limits. It also reads text files outside the symbol index (stylesheets, JSON, Markdown, SQL, configuration): give the file, granularity fileWindow, and text that appears in the wanted region as names.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `autoFill` | `boolean` | Optional |  | Default true: keep partially new windows contiguous. False omits already-visible lines. |
 | `expectedLines` | `integer | string` | Optional | min 1; max 20000; max length 20 | Desired line count for the requested file-window slice, not the total file length. Symbol and block reads use their definition bounds. |
-| `file` | `string` | Conditional | min length 1 | Existing repository-relative file path already surfaced by Atlas when no symbolId is available. Use a surfaced dependency path. The file need not be indexed source. |
+| `file` | `string` | Conditional | min length 1 | Repository-relative path of an existing file. The file need not be indexed source. |
 | `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | symbol: named declarations (default); block: enclosing control flow; fileWindow: broader anchored source region. |
-| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | Exact declaration names in the selected file; include the names needed together. In a file outside the symbol index, exact text from the wanted region, such as a key, selector or heading. |
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Inline token cap, clamped to the repository limit shown in the runtime contract. |
+| `names` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | Class, method, function, and variable names. |
 | `reason` | `string` | Required | max length 20000 | Why exact source is needed for this known symbol or anchored file region. |
-| `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
+| `symbols` | `array<string>` | Conditional | min items 1; max items 1 | Search directly by atlas symbol. |
 
 ### `tools.compose_sprite_sheet`
 
@@ -1243,14 +1241,14 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Find who calls or references a known symbol. Use when you have an implementation and need upstream entry points, wrappers, consumers, or callers affected by a change. Mode caller (default) lists direct calls; reference lists indexed non-call references; all lists both. Returns one hop of symbols grouped by file with IDs and names, without bodies or call-site lines. Read relevant results with symbol.get using their returned IDs; repeat upstream as needed to trace error handling, state changes, or ownership. Re-export edges are excluded; dynamic or unresolved relationships may be absent.
+Find who calls or references a known symbol. Use when you have an implementation and need upstream entry points, wrappers, consumers, or callers affected by a change. Mode caller (default) lists direct calls; reference lists indexed non-call references; all lists both. Returns one hop of symbols grouped by file with their symbols and names, without bodies or call-site lines. Read relevant results with symbol.get using their returned symbols; repeat upstream as needed to trace error handling, state changes, or ownership. Re-export edges are excluded; dynamic or unresolved relationships may be absent.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `limit` | `integer` | Optional | min 1; max 100 | Maximum returned type/file/symbol entries; default 20. |
 | `mode` | `string` | Optional | default "caller"; values "caller", "reference", "all" | caller (default) lists direct calls; reference lists non-call references; all lists both. |
 | `offset` | `integer` | Optional | min 0; max 100000 | Entry offset within the current index generation. |
-| `symbolId` | `string` | Required |  | Target symbol whose callers or references to list. |
+| `symbols` | `array<string>` | Required | min items 1; max items 1 | Search directly by atlas symbol. |
 
 ### `atlas.symbol.get`
 
@@ -1266,17 +1264,13 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Read exact symbol bodies by file+symbols, symbolRef, symbolId, or independent items. Names resolve directly without a prior ID lookup. Oversized bodies return a bounded page and traversal_ref; errors remain per item.
+Read exact symbol bodies by names or by symbols. Names resolve directly without a prior lookup. Oversized bodies return a bounded page and traversal_ref; errors remain per item.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `file` | `string` | Conditional | min length 1; max length 4000 | Shared repository-relative path for symbols, or optional exact path for scalar duplicate-body disambiguation. |
-| `identifiersToFind` | `array | string` | Optional | min length 1; max length 5000; min items 1; max items 50 | Optional exact identifiers whose in-body coverage should be reported. |
-| `items` | `array<any>` | Conditional | min items 1; max items 10 | Independent exact selectors, each with symbolId or symbolRef{name,file?,kind?}. Use items alone as the selector mode. |
-| `maxTokens` | `integer` | Optional | min 1; max 8000 | Tokens per symbol; default and maximum 8000. |
-| `symbolId` | `string` | Conditional |  | Exact symbol ID returned by Atlas. |
-| `symbolRef` | `object` | Conditional |  | Exact symbol reference used when no symbol ID is needed. |
-| `symbols` | `array<string>` | Conditional | min items 1; max items 10 | Exact names or qualified names in the shared file. Use file+symbols together. |
+| `file` | `string` | Optional | min length 1; max length 4000 | Add a filepath when searching for names when available. |
+| `names` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 10 | Class, method, function, and variable names. |
+| `symbols` | `array<string>` | Conditional | min items 1; max items 10 | Search directly by atlas symbol. |
 
 ### `atlas.symbol.search`
 
@@ -1435,12 +1429,13 @@ posse-remote role ceiling, so remote agents do not currently receive them:
 These fields remain in canonical execution schemas for trusted runtime callers or
 compatibility. The agent projection removes them.
 
-- `atlas.code.lens`: `ifNoneMatch`, `sessionId`
-- `atlas.code.skeleton`: `ifNoneMatch`, `maxLines`, `maxTokens`, `sessionId`, `surveyGap`
-- `atlas.code.survey`: `sessionId`
-- `atlas.code.window`: `sessionId`, `sliceContext`
+- `atlas.code.lens`: `identifiersToFind`, `ifNoneMatch`, `sessionId`, `symbolId`
+- `atlas.code.skeleton`: `identifiersToFind`, `ifNoneMatch`, `maxLines`, `maxTokens`, `sessionId`, `surveyGap`, `symbolId`
+- `atlas.code.survey`: `sessionId`, `symbols`
+- `atlas.code.window`: `autoFill`, `identifiersToFind`, `sessionId`, `sliceContext`, `symbolId`
 - `atlas.fetch_ref`: `hashes`, `refs`
 - `tools.search_files`: `offset`
-- `atlas.symbol.callers`: `indexVersion`, `minConfidence`, `projection`
+- `atlas.symbol.callers`: `indexVersion`, `minConfidence`, `projection`, `symbolId`
+- `atlas.symbol.get`: `identifiersToFind`, `items`, `maxTokens`, `symbolId`, `symbolRef`
 - `atlas.symbol.search`: `entities`, `fileLexicalOverlapWeight`, `filterDeclarationFiles`, `filterToolingPaths`, `genericSymbolFrequencyThreshold`, `hierarchicalFileLimit`, `monorepoPackagePriors`, `semanticQueryNormalization`, `sessionId`, `taskText`, `taskType`, `vectorCandidateLimit`, `withinFileSymbolRerank`
 - `atlas.traverse_ref`: `hashes`, `ref`, `refs`, `traversal_refs`

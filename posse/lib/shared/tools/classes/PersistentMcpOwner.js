@@ -3,9 +3,9 @@
 
 import { COMPACT_RELATIONSHIP_PROJECTION } from "../../../catalog/atlas-presentation.js";
 import { filterToolsListMessage, toolsListError, recordToolsListFailure, recordProviderIssuedToolSurface } from "../functions/mcp-owner-tool-surface.js";
-import { appendResearcherSymbolHandles, researcherStructureExecutorArgs, researcherStructureProjection, structureMaxChars, compactResearcherTypedAtlasResult, normalizeResearcherTypedAtlasResultFieldNames } from "../functions/mcp-owner-atlas-presentation.js";
+import { appendSymbolHandles, labelSymbolHandles, researcherStructureExecutorArgs, structureProjection, structureMaxChars, compactResearcherTypedAtlasResult, normalizeResearcherTypedAtlasResultFieldNames } from "../functions/mcp-owner-atlas-presentation.js";
 import "../functions/ref-surface.js";
-export { __testResearcherStructureExecutorArgs, __testResearcherStructureProjection, __testStructureMaxChars } from "../functions/mcp-owner-atlas-presentation.js";
+export { __testResearcherStructureExecutorArgs, __testStructureProjection, __testStructureMaxChars } from "../functions/mcp-owner-atlas-presentation.js";
 import { routeResearcherDispatcherCall, noteResearcherTypedTraversalPromotion } from "../functions/mcp-owner-atlas-routing.js";
 export { __testRouteResearcherDispatcherCall } from "../functions/mcp-owner-atlas-routing.js";
 import { MCP_ATLAS_SOFT_CAP_FIELDS, DEFAULT_MCP_OAUTH_TTL_SECONDS, MCP_SESSION_RELEASED_NOTIFICATION, MCP_CONCURRENT_ATLAS_ACTIONS, MCP_CONTROL_METHODS, MCP_OWNER_PROGRESS_HEADER, MCP_OWNER_HEARTBEAT_INTERVAL_MS, MCP_TERMINAL_HANDOFF_TOOLS, POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../catalog/mcp.js";
@@ -17,6 +17,7 @@ import { resolveAtlasResearchRuntimeGuidance, resolveResearchBudgetVisibility, r
 import { omitAtlasCacheMetadata } from "../functions/atlas-agent-result.js";
 import { listHashRefTraversalsForContext } from "../../../domains/queue/functions/hash-refs.js";
 import { atlasDescriptorSchemaForAction } from "../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
+import { describeWithAgentSelectors } from "../../../domains/atlas/functions/v2/contracts/unified-selectors.js";
 import { hashRefToolContext, capString, cloneJson, gatewayGateBindingKey, mcpToolErrorPayload, ownerErrorSummary, toolsListCount, jsonlParseBuffer } from "../functions/mcp-owner-session-support.js";
 import crypto from "node:crypto";
 import { getAgentHandoffRecord, getTraversalCompletionSnapshotForCall, rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
@@ -64,7 +65,7 @@ import { admitSourceContextHeadroom, releaseSourceContextHeadroomReservation } f
 import { compactResearchSearchResult, compactResearchSearchRows } from "../functions/research-search-presentation.js";
 import { ATLAS_MUTATION_PATH_FIELDS } from "../../../catalog/tools/filesystem-mutations.js";
 import { usesResearcherAtlasReadSurface, sessionToolPolicy, requestedToolPolicyName, toolAllowedByPolicy, stripGatewaySessionTokenFields, nestedAtlasActionDenial, deniedToolCallMessage, deniedToolCallResult, hasSuiteToolAllowlist, delegatedEvidenceRequestAllowed } from "../functions/mcp-owner-tool-policy.js";
-import { resolveAtlasSymbolHandle, atlasSymbolSourcePath } from "../functions/mcp-owner-symbol-handles.js";
+import { resolveAtlasSymbolHandle, atlasSymbolSourcePath, atlasSymbolHandleForId } from "../functions/mcp-owner-symbol-handles.js";
 import { annotateOwnerResultTransform, preserveOwnerModelControlNotices, ownerExactSourceEvidence, ownerThinImplementationGap, tagOwnerModelControlNotice, isMemoryToolAction, finalizeSourceTransport, mcpResultTextChars, CLIENT_RESULT_CLIP_CHARS } from "../functions/mcp-owner-source-transport.js";
 import { recordOwnerToolObservation, recordOwnerAnsweredToolCall, ownerToolStructuredError } from "../functions/mcp-owner-tool-observations.js";
 import { admissionMaxPhysicalCalls, researchCeilingGraceDecision, researchCeilingEmissionFor, isTerminalResearchExplorationAdmission } from "../functions/mcp-owner-research-budget.js";
@@ -74,7 +75,8 @@ import { recordSourceSelectionObservations, sourceSelectionItems, sourceSelectio
 export { __testSubAgentObservationResults, __testSubAgentInputObservationDetails, __testSubAgentRoutingGuardResult, __testSubAgentRoutingSequence, __testSubAgentRoutingEnabled } from "../functions/mcp-owner-sub-agent-routing.js";
 export { __testDelegatedEvidenceRequestAllowed, __testAssessorFallbackReadKey, __testNestedAtlasActionDenial, __testDeniedToolCallMessage } from "../functions/mcp-owner-tool-policy.js";
 export { __testClampAtlasArgumentCeilings, __testSameFileAmbiguityBatchItems, __testEmptyIdentifierFilterRecovery, __testLensDirectoryTarget, __testExactNameSearchTarget, __testNearestNameSearchArgs } from "../functions/mcp-owner-atlas-recovery.js";
-export { __testRememberAtlasSymbolSourcePaths } from "../functions/mcp-owner-symbol-handles.js";
+export { __testRememberAtlasSymbolSourcePaths, resolveAtlasSymbolHandleArgs as __testResolveAtlasSymbolHandleArgs } from "../functions/mcp-owner-symbol-handles.js";
+export { appendSymbolHandles as __testAppendSymbolHandles } from "../functions/mcp-owner-atlas-presentation.js";
 export { __testOwnerAtlasPartialResultDiagnostic, __testFinalizeSourceTransport, __testPreserveOwnerModelControlNotices } from "../functions/mcp-owner-source-transport.js";
 export { __testOwnerSourceRangeEvidence, __testOwnerWindowResponseRangeEvidence } from "../functions/mcp-owner-evidence.js";
 
@@ -213,10 +215,25 @@ function projectAtlasModelResult(result, session, toolName, toolArgs = {}) {
   const projected = normalizeResearcherTypedAtlasResultFieldNames(
     omitAtlasCacheMetadata(result), session, toolName, toolArgs,
   );
+  const worded = agentSelectorErrorWording(labelSymbolHandles(projected, session), toolName, toolArgs);
   const capped = toolArgs && typeof toolArgs === "object" ? SOFT_CAPPED_ARGUMENTS.get(toolArgs) : null;
   return capped
-    ? appendOwnerModelControlNotice(projected, `\n\n${capped}`, { kind: "atlas_soft_cap", trigger: toolName })
-    : projected;
+    ? appendOwnerModelControlNotice(worded, `\n\n${capped}`, { kind: "atlas_soft_cap", trigger: toolName })
+    : worded;
+}
+
+// A refused call is reported in the execution contract's field names; the
+// agent sent `names` / `symbols`, so the refusal names those.
+function agentSelectorErrorWording(result, toolName, toolArgs) {
+  if (result?.isError !== true) return result;
+  const first = result?.content?.[0];
+  if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+  const requested = requestedToolPolicyName(toolName, toolArgs);
+  if (requested.suite !== "atlas") return result;
+  const text = describeWithAgentSelectors(requested.name, first.text);
+  return text === first.text
+    ? result
+    : { ...result, content: [{ ...first, text }, ...result.content.slice(1)] };
 }
 
 // A list argument over its schema cap is truncated to the cap, not refused: a
@@ -235,7 +252,9 @@ function softCapArrayArguments(schema, toolArgs) {
     toolArgs[field] = value.slice(0, limit);
     notes.push(`${field} listed ${value.length} entries; the first ${limit} were used and ${value.slice(limit).join(", ")} were not.`);
   }
-  if (notes.length > 0) SOFT_CAPPED_ARGUMENTS.set(toolArgs, notes.join(" "));
+  if (notes.length > 0) {
+    SOFT_CAPPED_ARGUMENTS.set(toolArgs, [SOFT_CAPPED_ARGUMENTS.get(toolArgs), ...notes].filter(Boolean).join(" "));
+  }
 }
 
 export const __testProjectAtlasModelResult = projectAtlasModelResult;
@@ -550,12 +569,11 @@ function researcherTypedArgumentRepair(session, toolName, toolArgs = {}) {
     && !(toolArgs?.symbolRef && typeof toolArgs.symbolRef === "object"
       && !Array.isArray(toolArgs.symbolRef) && String(toolArgs.symbolRef.name || "").trim());
   const nativeProblem = missingSymbolSelector
-    ? "args.symbolId or args.symbolRef is required"
+    ? "args.names or args.symbols is required"
     : String(failure?.message || validation.message || "the selected action arguments are invalid");
-  const problem = nativeProblem.replace(/\b(?:maxFiles|maxLines|symbols|fileRelPaths|search_mode)\b/gu, (field) => {
+  const problem = describeWithAgentSelectors(requested.name, nativeProblem).replace(/\b(?:maxFiles|maxLines|fileRelPaths|search_mode)\b/gu, (field) => {
     if (field === "maxFiles" && ["code.survey", "code.structure"].includes(requested.name)) return "limit";
     if (field === "maxLines" && requested.name === "code.skeleton") return "limit";
-    if (field === "symbols" && requested.name === "code.survey") return "identifiersToFind";
     if (field === "fileRelPaths" && requested.name.startsWith("memory.")) return "paths";
     if (field === "search_mode" && requested.name === "traverse_ref") return "searchMode";
     return field;
@@ -1310,7 +1328,7 @@ function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
   const structureCompacted = compactCodeStructureResult(requested.name || toolName, first.text, {
     args,
     context,
-    projection: researcherStructureProjection(session),
+    projection: structureProjection(),
     maxChars: structureMaxChars(session),
   });
   const compacted = structureCompacted.compacted
@@ -2126,6 +2144,9 @@ export class PersistentMcpOwner {
         );
         const toolName = routedTool.toolName;
         const toolArgs = routedTool.toolArgs;
+        if (routedTool.selectorNote && toolArgs && typeof toolArgs === "object") {
+          SOFT_CAPPED_ARGUMENTS.set(toolArgs, routedTool.selectorNote);
+        }
         const callId = session?.bootConfig?.agentCallId;
         if (finalReviewCompletedForCall(callId)) {
           sendResponse(res, 200, { ok: true, bootId: this.bootId, sessionId: id,
@@ -2846,6 +2867,7 @@ export class PersistentMcpOwner {
           response = {
             ...response,
             result: await addSearchSymbolHints(response.result, {
+              symbolFor: (symbolId) => atlasSymbolHandleForId(session, symbolId),
               executor: getSharedAtlasToolExecutor(),
               sessionContext: atlasExecutorSessionContext(session),
               bootConfig: session?.bootConfig || {},
@@ -4247,7 +4269,9 @@ export class PersistentMcpOwner {
       if (String(session?.bootConfig?.role || "") === "researcher" && requested.name === "symbol.search") {
         result = composed("search_presentation", compactResearchSearchResult(result));
       }
-      result = composed("symbol_handles", appendResearcherSymbolHandles(result, session, requested.name));
+      result = composed("symbol_handles", appendSymbolHandles(result, session, requested.name, {
+        atlasCall: requested.suite === "atlas",
+      }));
       result = composed("hash_ref_surface", appendHashRefToMcpTextResult(result, toolName, toolArgs, session));
       noteResearcherTypedTraversalPromotion(session, toolName, toolArgs, result);
       if (coverageOwner) {

@@ -37,11 +37,12 @@ function withTimeout(promise, ms) {
  *   bootConfig: { cwd?: string, atlasAvailable?: boolean },
  *   args: { pattern?: string, path?: string },
  *   callersIssued: boolean,
+ *   symbolFor?: (symbolId: string) => string | null,
  *   budgetMs?: number,
  * }} options
  */
 export async function addSearchSymbolHints(result, {
-  executor, sessionContext, bootConfig, args, callersIssued, budgetMs = SEARCH_HINT_BUDGET_MS,
+  executor, sessionContext, bootConfig, args, callersIssued, symbolFor, budgetMs = SEARCH_HINT_BUDGET_MS,
 }) {
   const first = Array.isArray(result?.content) ? result.content[0] : null;
   if (result?.isError === true || first?.type !== "text" || typeof first.text !== "string") return result;
@@ -59,6 +60,7 @@ export async function addSearchSymbolHints(result, {
       cwd: bootConfig.cwd,
       readRoot: resolved.readRoot || bootConfig.cwd,
       callersIssued,
+      symbolFor,
       source: {
         symbolsInFile: (repoRelPath) => mounted.query.symbolsInFile(repoRelPath),
         contentHashForPath: (repoRelPath) => mounted.query.contentHashForPath(repoRelPath),

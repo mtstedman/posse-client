@@ -481,21 +481,23 @@ export function validationFailureForAction(action, call, errors = []) {
   const missingFields = call?.file
     ? [
         ...(!call?.reason ? ["reason"] : []),
-        ...(!hasIdentifiers ? ["identifiersToFind"] : []),
+        ...(!hasIdentifiers ? ["names"] : []),
       ]
     : (validSymbolId
       ? (!call?.reason ? ["reason"] : [])
       : [
           ...(!call?.reason ? ["reason"] : []),
           "file",
-          "identifiersToFind",
+          "names",
         ]);
+  // Worded in the agent-facing selectors, which fold onto symbolId and
+  // identifiersToFind before this validation runs.
   const acceptedShapes = [
-    "{ reason, symbolId: '<64 lowercase hex>:<local id>' }",
-    "{ reason, file, identifiersToFind: ['identifier'] }",
+    "{ reason, symbols: ['<symbol from an Atlas result>'] }",
+    "{ reason, file, names: ['name'] }",
   ];
   const correction = invalidOpaqueId
-    ? "symbolId is not an opaque Atlas ID; provide a valid ID or send the name in identifiersToFind with file."
+    ? "symbols takes a symbol from an Atlas result; send a name in names with file."
     : "Choose the nearest accepted shape and add its missing fields.";
   return {
     message: `Invalid ATLAS parameters for code.window: ${correction} Accepted shapes: ${acceptedShapes.join(" or ")} You sent: ${sentFields.join(", ") || "no fields"}; nearest shape needs: ${[...new Set(missingFields)].join(", ") || "field corrections shown below"}.`,

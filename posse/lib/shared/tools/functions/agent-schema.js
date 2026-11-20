@@ -1,6 +1,7 @@
 // Agent-facing tool schemas are a projection of the canonical execution
 // schema. A property marked `internalOnly: true` remains available to internal
-// callers and validators but is omitted from every provider-facing schema.
+// callers and validators but is omitted from every provider-facing schema,
+// together with any `anyOf` alternative that requires it.
 
 const SAME_INSTANCE_SCHEMA_KEYS = new Set([
   "allOf",
@@ -69,6 +70,12 @@ function assertNoHiddenNames(values, hidden, path, keyword) {
   if (constrained.length > 0) throw internalConstraintError(path, keyword, constrained);
 }
 
+function requiresHiddenField(alternative, hidden) {
+  return isObject(alternative)
+    && Array.isArray(alternative.required)
+    && alternative.required.some((name) => hidden.has(String(name)));
+}
+
 function projectSchemaValue(value, hiddenForInstance = new Set(), path = "$") {
   if (Array.isArray(value)) {
     return value.map((item, index) => projectSchemaValue(item, hiddenForInstance, `${path}[${index}]`));
@@ -133,6 +140,23 @@ function projectSchemaValue(value, hiddenForInstance = new Set(), path = "$") {
           ];
         }),
       );
+      continue;
+    }
+
+    if (key === "anyOf" && Array.isArray(child)) {
+      // An alternative that requires a hidden field is one an agent cannot
+      // take, so it leaves the projection with that field. Hiding every
+      // alternative would leave the rule unsatisfiable, which is an authoring
+      // error like any other hidden constraint.
+      const reachable = child.filter((alternative) => !requiresHiddenField(alternative, localHidden));
+      if (reachable.length === 0 && child.length > 0) {
+        throw internalConstraintError(path, key, child.flatMap((alternative) => (
+          isObject(alternative) && Array.isArray(alternative.required)
+            ? alternative.required.filter((name) => localHidden.has(String(name)))
+            : []
+        )));
+      }
+      projected.anyOf = projectSchemaValue(reachable, localHidden, `${path}.anyOf`);
       continue;
     }
 

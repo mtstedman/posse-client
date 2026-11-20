@@ -9,6 +9,7 @@ import { COMPACT_RELATIONSHIP_PROJECTION } from "../../../../../catalog/atlas-pr
 
 import { ATLAS_TOOL_ACTIONS } from "./tool-params.js";
 import { ATLAS_RUNTIME_INPUTS } from "./runtimes.js";
+import { foldAtlasUnifiedSelectors } from "./unified-selectors.js";
 import { SYMBOL_GET_BATCH_POLICY } from "../../../../../catalog/symbol-get-batch.js";
 import { INTERNAL_ATLAS_ACTIONS, INTERNAL_TOOL_FAMILY } from "../../../../../catalog/internal-tools.js";
 
@@ -93,12 +94,12 @@ const identifierList = (opts = {}) => ({
   maxLength: 5000,
   ...opts,
 });
-const targetRequired = () => ({
-  anyOf: [
-    { required: ["symbolId"] },
-    { required: ["file"] },
-  ],
-});
+// Agent-facing selectors shared by every source tool: `names` are declared
+// names and `symbols` are Atlas symbols from earlier results. unified-selectors
+// folds both onto the execution fields before a call is validated or run, so a
+// rule below that names them describes the agent surface only.
+const nameSelectors = (maxItems = 50) => identifierList({ minLength: 1, minItems: 1, maxItems });
+const symbolSelectors = (maxItems) => a(s({ minLength: 1, maxLength: 256 }), { minItems: 1, maxItems });
 
 const createRefInputMode = () => ({
   oneOf: [
@@ -401,6 +402,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     sessionId: s({ maxLength: 256 }),
   }),
   "symbol.callers": o({
+    symbols: symbolSelectors(1),
     symbolId: symbolId(),
     mode: s({ enum: ["caller", "reference", "all"], default: "caller" }),
     limit: i({ minimum: 1, maximum: 100 }),
@@ -408,8 +410,11 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     minConfidence: n({ minimum: 0, maximum: 100 }),
     projection: s({ enum: [COMPACT_RELATIONSHIP_PROJECTION] }),
     indexVersion: s({ minLength: 1, maxLength: 512 }),
-  }, ["symbolId"]),
+  }, [], { anyOf: [{ required: ["symbols"] }, { required: ["symbolId"] }] }),
   "symbol.get": o({
+    names: nameSelectors(SYMBOL_GET_BATCH_POLICY.maxItems),
+    // Atlas symbols on the agent surface; with `file`, the execution contract's
+    // shared-file list of names.
     symbols: a(s({ minLength: 1 }), { minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems }),
     items: a(o({
       symbolId: symbolId(), symbolRef: symbolRef(), file: s({ minLength: 1, maxLength: 4000 }),
@@ -423,7 +428,8 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
   }, [], {
     anyOf: [
-      { required: ["file", "symbols"] },
+      { required: ["names"] },
+      { required: ["symbols"] },
       { required: ["items"] },
       { required: ["symbolId"] },
       { required: ["symbolRef"] },
@@ -563,20 +569,32 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     exportedOnly: b(),
     maxLines: i({ minimum: 1, maximum: 5000 }),
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
+    names: nameSelectors(),
     identifiersToFind: identifierList({ maxItems: 50 }),
     ifNoneMatch: s({ maxLength: 512 }),
     sessionId: s({ maxLength: 256 }),
     surveyGap: s({ minLength: 3, maxLength: 1000 }),
   }),
   "code.lens": o({
+    names: nameSelectors(),
+    symbols: symbolSelectors(1),
     symbolId: symbolId(),
     file: s({ minLength: 1 }),
     identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
     contextLines: i({ minimum: 0, maximum: 8 }),
     ifNoneMatch: s({ maxLength: 512 }),
     sessionId: s({ maxLength: 256 }),
-  }, ["identifiersToFind"], targetRequired()),
+  }, [], {
+    anyOf: [
+      { required: ["names", "file"] },
+      { required: ["names", "symbols"] },
+      { required: ["identifiersToFind", "symbolId"] },
+      { required: ["identifiersToFind", "file"] },
+    ],
+  }),
   "code.window": o({
+    names: nameSelectors(),
+    symbols: symbolSelectors(1),
     symbolId: symbolId(),
     file: s({ minLength: 1 }),
     reason: s({ maxLength: 20_000 }),
@@ -589,12 +607,15 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     sessionId: s({ maxLength: 256 }),
   }, [], {
     anyOf: [
+      { required: ["reason", "symbols"] },
+      { required: ["reason", "file", "names"] },
       { required: ["reason", "symbolId"] },
       { required: ["reason", "file", "identifiersToFind"] },
     ],
   }),
   "code.survey": o({
     paths: { type: ["string", "array"], minLength: 1, items: { type: "string", minLength: 1 }, maxItems: 64 },
+    names: nameSelectors(16),
     symbols: identifierList({ maxItems: 16 }),
     maxFiles: i({ minimum: 1, maximum: 64 }),
     sessionId: s({ maxLength: 256 }),
@@ -853,8 +874,10 @@ export function normalizeAtlasToolCall(call) {
   const action = String(/** @type {any} */ (call).action || "");
   const schema = ATLAS_TOOL_PARAM_SCHEMAS[action];
   if (!schema) return call;
-  const params = { .../** @type {Record<string, unknown>} */ (call) };
-  delete params.action;
+  const supplied = { .../** @type {Record<string, unknown>} */ (call) };
+  delete supplied.action;
+  // A selector the fold cannot place is left as sent for validation to report.
+  const params = foldAtlasUnifiedSelectors(action, supplied).args;
   if (["code.window", "code.lens", "code.skeleton", "symbol.get"].includes(action)
     && typeof params.identifiersToFind === "string"
     && params.identifiersToFind.trim()) {

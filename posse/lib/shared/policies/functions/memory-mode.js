@@ -4,10 +4,10 @@ export function atlasMemoryEnabled() {
   const env = String(process.env.POSSE_MEMORY_MODE || "").trim().toLowerCase();
   if (env) return !["off", "disabled", "none", "0", "false"].includes(env);
   try {
-    const value = String(getAccountSetting("atlas_memory_mode") || "on").trim().toLowerCase();
+    const value = String(getAccountSetting("atlas_memory_mode") || "off").trim().toLowerCase();
     return !["off", "disabled", "none", "0", "false"].includes(value);
   } catch {
-    return true;
+    return false;
   }
 }
 

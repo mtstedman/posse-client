@@ -123,8 +123,9 @@ export function exactSearchedName(pattern) {
  *
  * @param {IndexSymbol[]} definitions Exact-name declarations from the index.
  * @param {number | null} callers Indexed caller count of a single definition, or null to leave callers out.
+ * @param {((symbolId: string) => string | null) | null} [symbolFor] The session's short handle for a symbol ID.
  */
-export function definitionLine(name, definitions, callers) {
+export function definitionLine(name, definitions, callers, symbolFor = null) {
   if (definitions.length === 0) return "";
   const where = (/** @type {IndexSymbol} */ symbol) => `${symbol.repo_rel_path}:${symbol.range_start_line} (${symbol.kind})`;
   if (definitions.length > 1) {
@@ -134,7 +135,8 @@ export function definitionLine(name, definitions, callers) {
   if (callers == null) return `${name} is defined at ${where(symbol)}.`;
   if (callers === 0) return `${name} is defined at ${where(symbol)}; it has no indexed callers.`;
   const symbolId = `${symbol.content_hash}:${symbol.local_id}`;
-  return `${name} is defined at ${where(symbol)}; symbol.callers with symbolId ${symbolId} lists its ${callers} caller${callers === 1 ? "" : "s"}.`;
+  const selector = (typeof symbolFor === "function" && symbolFor(symbolId)) || symbolId;
+  return `${name} is defined at ${where(symbol)}; symbol.callers with symbols ["${selector}"] lists its ${callers} caller${callers === 1 ? "" : "s"}.`;
 }
 
 function sha256Hex(/** @type {Buffer} */ bytes) {
@@ -151,10 +153,11 @@ function sha256Hex(/** @type {Buffer} */ bytes) {
  *   readRoot: string,
  *   source: SymbolSource,
  *   callersIssued: boolean,
+ *   symbolFor?: ((symbolId: string) => string | null) | null,
  * }} options
  * @returns {Promise<string>}
  */
-export async function withSearchSymbolHints(text, { args, cwd, readRoot, source, callersIssued }) {
+export async function withSearchSymbolHints(text, { args, cwd, readRoot, source, callersIssued, symbolFor = null }) {
   const toRepoPath = (/** @type {string} */ displayPath) => {
     const relative = path.relative(readRoot, path.resolve(cwd, displayPath)).split(path.sep).join("/");
     return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : null;
@@ -187,7 +190,7 @@ export async function withSearchSymbolHints(text, { args, cwd, readRoot, source,
       .filter((symbol) => symbol?.name === name && DEFINITION_KINDS.has(String(symbol?.kind || "").toLowerCase()));
     if (definitions.length === 0) return annotated;
     const callers = definitions.length === 1 && callersIssued ? await source.callerCount(definitions[0]) : null;
-    const line = definitionLine(name, definitions, callers);
+    const line = definitionLine(name, definitions, callers, symbolFor);
     return line ? `${line}\n${annotated}` : annotated;
   } catch {
     return annotated;

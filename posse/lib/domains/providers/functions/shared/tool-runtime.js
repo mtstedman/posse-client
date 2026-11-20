@@ -122,6 +122,10 @@ function atlasToolTarget(input = {}) {
   const first = candidates.find((value) => value != null && String(value).trim() !== "");
   if (first) return String(first).split(/\r?\n/)[0].slice(0, 80);
   if (input.symbolId) return "symbol target";
+  if (Array.isArray(input.names) && input.names.length > 0) return input.names.slice(0, 3).join(", ").slice(0, 80);
+  if (Array.isArray(input.symbols) && input.symbols.length > 0) {
+    return `${input.symbols.length} symbol target${input.symbols.length === 1 ? "" : "s"}`;
+  }
   if (Array.isArray(input.symbolIds) && input.symbolIds.length > 0) {
     return `${input.symbolIds.length} symbol target${input.symbolIds.length === 1 ? "" : "s"}`;
   }

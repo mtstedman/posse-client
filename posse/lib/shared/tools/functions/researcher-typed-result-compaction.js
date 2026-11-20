@@ -137,7 +137,7 @@ export function compactSkeletonSymbolHandles(text, issueHandle) {
     // Exhausted sessions omit the selector rather than exposing an internal ID.
     if (!handle || !SYMBOL_HANDLE.test(handle)) return "";
     issued += 1;
-    return `  [symbol_id=${handle}]`;
+    return `  [symbol=${handle}]`;
   });
   if (content === map.content) return null;
   map.content = content;
@@ -531,6 +531,13 @@ export function normalizeResearcherTypedAtlasFieldNames(text, { action = null } 
       if (snake === key) continue;
       value[snake] = mergeFacadeField(value[snake], value[key]);
       delete value[key];
+      renamedFields += 1;
+    }
+    // A session handle is labelled `symbol`, the word the `symbols` parameter
+    // takes it back under.
+    if (typeof value.symbol_id === "string" && SYMBOL_HANDLE.test(value.symbol_id) && value.symbol == null) {
+      value.symbol = value.symbol_id;
+      delete value.symbol_id;
       renamedFields += 1;
     }
   };

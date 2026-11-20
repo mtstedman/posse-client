@@ -14,14 +14,11 @@ export const ATLAS_HISTORICAL_ACTION_ALIASES = Object.freeze({
   "code.get": "symbol.get",
 });
 
-// Session roles whose code.structure results take the compact projection:
-// the first set always, the gated set only while the
-// atlas_compact_structure_dev_assessor setting is on.
-export const ATLAS_COMPACT_STRUCTURE_ROLES = Object.freeze(["researcher"]);
-export const ATLAS_COMPACT_STRUCTURE_GATED_ROLES = Object.freeze(["dev", "assessor"]);
-// Inline bound for a gated role's compact code.structure page. The always-on
-// roles use the projection's own smaller default.
-export const ATLAS_COMPACT_STRUCTURE_GATED_MAX_CHARS = 12_000;
+// Every session role reads code.structure through the compact projection.
+// These roles keep the projection's own smaller inline page; every other role
+// gets the wider bound below.
+export const ATLAS_COMPACT_STRUCTURE_SMALL_PAGE_ROLES = Object.freeze(["researcher"]);
+export const ATLAS_COMPACT_STRUCTURE_MAX_CHARS = 12_000;
 
 // A post-commit WI refresh indexes the commit's bytes; paths a sibling job
 // sharing the WI worktree dirties during the refresh are re-read from the

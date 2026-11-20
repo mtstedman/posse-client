@@ -1,4 +1,5 @@
 import { normalizedOwnerSourcePath } from "./mcp-owner-evidence.js";
+import { ATLAS_SYMBOL_SELECTOR_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/unified-selectors.js";
 
 const ATLAS_SYMBOL_HANDLE_PATTERN = /^s[1-9][0-9]{0,5}$/;
 
@@ -74,6 +75,50 @@ export function resolveAtlasSymbolHandle(session, value) {
     if (matches.length === 1) return { ok: true, value: matches[0], repaired: true };
   }
   return { ok: true, value };
+}
+
+// Resolve every session handle in a call's symbol selectors back to its
+// canonical ID. Handles are what every role reads in Atlas results, so every
+// role's calls pass through here before validation and execution.
+export function resolveAtlasSymbolHandleArgs(session, args = {}, { action = null, symbolsOnly = false } = {}) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return { args, resolved: 0 };
+  let resolved = 0;
+  let unknown = null;
+  const one = (value) => {
+    if (typeof value !== "string") return value;
+    const result = resolveAtlasSymbolHandle(session, value);
+    if (!result.ok) {
+      unknown ||= result.handle;
+      return value;
+    }
+    if (result.value !== value) resolved += 1;
+    return result.value;
+  };
+  const many = (value) => (Array.isArray(value) ? value.map(one) : one(value));
+  const out = { ...args };
+  // `symbols` carries Atlas symbols only on the actions that select by them;
+  // elsewhere the same field name holds declared names and is left alone. A
+  // name an agent put there by mistake passes through for the fold to move.
+  // The typed researcher route resolves its execution selectors itself, with
+  // its own repair telemetry, so it asks for `symbols` alone.
+  const keys = [...(symbolsOnly ? [] : ["symbolId", "symbolIds", "entrySymbols"]),
+    ...(ATLAS_SYMBOL_SELECTOR_ACTIONS.includes(action) ? ["symbols"] : [])];
+  for (const key of keys) {
+    if (out[key] != null) out[key] = many(out[key]);
+  }
+  if (!symbolsOnly && Array.isArray(out.items)) {
+    out.items = out.items.map((item) => (item && typeof item === "object" && !Array.isArray(item) && item.symbolId != null
+      ? { ...item, symbolId: one(item.symbolId) }
+      : item));
+  }
+  if (unknown) {
+    return {
+      args,
+      resolved: 0,
+      error: `Unknown Atlas symbol handle ${unknown}; reuse only a handle returned in this job-bound agent session`,
+    };
+  }
+  return { args: resolved > 0 ? out : args, resolved };
 }
 
 export function __testRememberAtlasSymbolSourcePaths(session, mappings = []) {

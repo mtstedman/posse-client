@@ -256,6 +256,7 @@ function displayWindows(value, blockOffset) {
   // short symbolHandle, so a symbol target is recognised by either field.
   const fileMode = value.symbolId == null
     && value.symbolHandle == null
+    && typeof value.symbol !== "string"
     && Array.isArray(value.identifiersFound)
     && !Array.isArray(value.requestedWindows);
   // A response with nothing to display and nothing withheld (a coverage
@@ -274,7 +275,7 @@ function displayWindows(value, blockOffset) {
   if (blocks.length === 0) return null;
   // Symbol-card responses carry no identifier lists at all, so a symbol target
   // is recognised by its id or handle and a single numbered body.
-  const symbolTarget = (value.symbolId != null || value.symbolHandle != null)
+  const symbolTarget = (value.symbolId != null || value.symbolHandle != null || typeof value.symbol === "string")
     && lifted.length === 1 && lifted[0].shown;
   if (symbolTarget) return { header: symbolWindowDisplay(header, lifted[0].shown), blocks };
   return { header, blocks };

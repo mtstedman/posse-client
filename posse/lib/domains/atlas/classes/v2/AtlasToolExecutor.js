@@ -12,6 +12,7 @@ import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
 import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js";
 import { ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS } from "../../functions/v2/contracts/jobs.js";
 import { normalizeAtlasIdentifier } from "../../functions/v2/contracts/identifiers.js";
+import { foldAtlasUnifiedSelectors } from "../../functions/v2/contracts/unified-selectors.js";
 import { atlasNestedAction, atlasNestedActionArgKeys } from "../../../../shared/tools/functions/atlas-nested-action.js";
 import { normalizeCodeLensContextLines } from "../../functions/v2/retrieval/code.js";
 import { codeSurveyPathError } from "../../functions/v2/retrieval/survey.js";
@@ -904,9 +905,18 @@ export class AtlasToolExecutor {
     const toolName = String(request.toolName || "").trim();
     if (!toolName) throw new Error("AtlasToolExecutor.executeTool requires toolName");
     const suppliedArgs = request.args && typeof request.args === "object" ? request.args : {};
-    const rawArgs = canonicalizeAtlasRepoPaths(suppliedArgs, requestRepoPathRoots(request));
+    const pathArgs = canonicalizeAtlasRepoPaths(suppliedArgs, requestRepoPathRoots(request));
     const baseAction = resolveAtlasAction(toolName);
-    const action = gatewayEffectiveAction(baseAction, rawArgs);
+    const action = gatewayEffectiveAction(baseAction, pathArgs);
+    // Callers that reach the executor without the tool owner (Bossy's read
+    // gateway, embedded providers) send the same agent-facing selectors.
+    const unified = foldAtlasUnifiedSelectors(action, pathArgs);
+    if (unified.error) {
+      return conductorEnvelopeToToolResult({
+        ok: false, action, error: { code: "invalid_params", message: unified.error },
+      });
+    }
+    const rawArgs = unified.args;
     // Keep the caller's search limit through caching and result trimming.
     // Candidate-pool expansion belongs only at the native dispatch boundary.
     const args = action === "symbol.search" ? rawArgs : nativeCompleteToolArgs(action, rawArgs);

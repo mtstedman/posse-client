@@ -143,27 +143,25 @@ const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
       Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
     ]),
   }),
+  // The six source tools select by `names` and `symbols`, the same fields
+  // every other role is issued; the owner folds them onto the native selectors.
   "symbol.callers": Object.freeze({
-    properties: Object.freeze({ limit: Object.freeze({ maximum: 100 }) }),
-    anyOf: Object.freeze([
-      Object.freeze({ required: Object.freeze(["symbolId"]) }),
-      Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
-    ]),
+    required: Object.freeze(["symbols"]),
+    properties: Object.freeze({
+      limit: Object.freeze({ maximum: 100 }),
+      symbols: Object.freeze({ maxItems: 1 }),
+    }),
   }),
   "symbol.get": Object.freeze({
+    properties: Object.freeze({ names: Object.freeze({ maxItems: SYMBOL_GET_BATCH_POLICY.maxItems }) }),
     anyOf: Object.freeze([
-      Object.freeze({ required: Object.freeze(["file", "symbols"]) }),
-      Object.freeze({ required: Object.freeze(["items"]) }),
-      Object.freeze({ required: Object.freeze(["symbolId"]) }),
-      Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
-      Object.freeze({ required: Object.freeze(["symbolRef"]) }),
+      Object.freeze({ required: Object.freeze(["names"]) }),
+      Object.freeze({ required: Object.freeze(["symbols"]) }),
     ]),
   }),
   "code.skeleton": Object.freeze({
     properties: Object.freeze({ limit: Object.freeze({ maximum: 5000 }) }),
     anyOf: Object.freeze([
-      Object.freeze({ required: Object.freeze(["symbolId"]) }),
-      Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
       Object.freeze({ required: Object.freeze(["file"]) }),
       Object.freeze({ required: Object.freeze(["path"]) }),
     ]),
@@ -172,7 +170,7 @@ const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
     required: Object.freeze(["paths"]),
     properties: Object.freeze({
       limit: Object.freeze({ maximum: 64 }),
-      identifiersToFind: Object.freeze({ maxItems: 16 }),
+      names: Object.freeze({ maxItems: 16 }),
       paths: Object.freeze({ maxItems: 64 }),
     }),
   }),
@@ -183,16 +181,17 @@ const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
     }) }),
   }),
   "code.lens": Object.freeze({
-    required: Object.freeze(["identifiersToFind"]),
+    required: Object.freeze(["names"]),
+    properties: Object.freeze({ symbols: Object.freeze({ maxItems: 1 }) }),
     anyOf: Object.freeze([
-      Object.freeze({ required: Object.freeze(["symbolId"]) }),
-      Object.freeze({ required: Object.freeze(["symbolHandle"]) }),
+      Object.freeze({ required: Object.freeze(["symbols"]) }),
       Object.freeze({ required: Object.freeze(["file"]) }),
       Object.freeze({ required: Object.freeze(["path"]) }),
     ]),
   }),
   "code.window": Object.freeze({
-    required: Object.freeze(["identifiersToFind"]),
+    required: Object.freeze(["names"]),
+    properties: Object.freeze({ symbols: Object.freeze({ maxItems: 1 }) }),
     anyOf: Object.freeze([
       Object.freeze({ required: Object.freeze(["file"]) }),
       Object.freeze({ required: Object.freeze(["path"]) }),
@@ -223,6 +222,7 @@ const WORKFLOW_ARG_FIELDS = new Set([
   "maxTokens",
   "minConfidence",
   "mode",
+  "names",
   "offset",
   "paths",
   "query",
@@ -263,9 +263,9 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
     additionalProperties: false,
   };
   const properties = {
+    names: { type: "array", minItems: 1, maxItems: 50, items: { type: "string", minLength: 1 } },
     symbols: { type: "array", minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems,
-      items: { type: "string", minLength: 1 },
-      description: "Exact names or qualified names sharing file for symbol.get." },
+      items: { type: "string", minLength: 1 } },
     items: {type: "array", minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems,
       items: {type: "object", properties: {
         symbolId, symbolRef: symbolRefItem, file: {type: "string"}, path: {type: "string"},
@@ -450,7 +450,7 @@ function nativeArgNames(value) {
 
 function researcherActionFieldAliases(action) {
   if (action === "traverse_ref") return { searchMode: "search_mode" };
-  if (action === "code.survey") return { identifiersToFind: "symbols", limit: "maxFiles" };
+  if (action === "code.survey") return { limit: "maxFiles" };
   if (action === "code.structure") return { limit: "maxFiles" };
   if (action === "code.skeleton") return { limit: "maxLines" };
   if (["memory.surface", "memory.get"].includes(action)) return { paths: "fileRelPaths" };
@@ -511,6 +511,8 @@ export function normalizeResearcherTypedActionArgs(action, args = {}) {
   for (const [from, to] of Object.entries(researcherActionFieldAliases(action))) {
     if (!error) error = move(from, to);
   }
+  // The survey's earlier advertised filter name stays accepted, unadvertised.
+  if (!error && action === "code.survey") error = move("identifiersToFind", "symbols");
   if (!error && ["memory.surface", "memory.get"].includes(action)
     && typeof normalized.fileRelPaths === "string") normalized.fileRelPaths = [normalized.fileRelPaths];
   if (!error && action === "code.lens" && Number.isInteger(normalized.contextLines) && normalized.contextLines > 8) {

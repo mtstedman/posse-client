@@ -9,6 +9,7 @@ import { ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS, normalizeAtlasCodeWindowPolicy } fro
 import { optionalAtlasSymbolId, sanitizeAtlasSymbolIdList } from "../../../../domains/atlas/functions/v2/symbol-id.js";
 import { coerceLooseAtlasSymbolArgs, validateAtlasPayloadSymbolIds } from "../../../../domains/atlas/functions/v2/signal-extraction.js";
 import { ATLAS_TOOL_PARAM_SCHEMAS } from "../../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
+import { foldAtlasUnifiedSelectors } from "../../../../domains/atlas/functions/v2/contracts/unified-selectors.js";
 import { normalizeAtlasIdentifierList } from "../../../../domains/atlas/functions/v2/contracts/identifiers.js";
 
 const ATLAS_MAX_QUERY_LENGTH = 512;
@@ -286,7 +287,9 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
   codeWindowPolicy = null,
 } = {}) {
   const normalizedAction = normalizeAction(action);
-  const payload = { ...(args || {}) };
+  const unified = foldAtlasUnifiedSelectors(normalizedAction, { ...(args || {}) });
+  if (unified.error) throw new Error(`ATLAS ${unified.error}`);
+  const payload = unified.args;
   const fallbackOnlyNested = nestedFallbackOnlyAction(payload);
   if (ATLAS_FALLBACK_ONLY_ACTIONS.has(normalizedAction) || fallbackOnlyNested) {
     throw new Error("ATLAS file.read is intentionally not exposed. Use code.window in file mode, its continuation handle, or code.lens for indexed source. Use the issued deterministic read_file/chain_read tool for exact file content.");
@@ -553,7 +556,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
   if (normalizedAction === "symbol.callers") {
     const symbolId = optionalAtlasSymbolId(payload.symbolId, "symbol.callers symbolId");
     const mode = sanitizeString(payload.mode || "caller", 16).toLowerCase();
-    if (!symbolId) throw new Error("ATLAS symbol.callers requires symbolId.");
+    if (!symbolId) throw new Error("ATLAS symbol.callers requires symbols.");
     if (!["caller", "reference", "all"].includes(mode)) {
       throw new Error("ATLAS symbol.callers mode must be caller, reference, or all.");
     }
@@ -575,7 +578,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
     const symbolId = optionalAtlasSymbolId(payload.symbolId, "symbol.get symbolId");
     const symbolRef = sanitizeSymbolRef(payload.symbolRef);
     if (!symbolId && !symbolRef?.name) {
-      throw new Error("ATLAS symbol.get requires symbolId or symbolRef.");
+      throw new Error("ATLAS symbol.get requires names or symbols.");
     }
     if (payload.file != null && !isSafeRelativePath(payload.file)) {
       throw new Error("ATLAS symbol.get file must be a safe relative path.");
@@ -627,10 +630,10 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
     const file = payload.file && isSafeRelativePath(payload.file)
       ? sanitizeString(payload.file, 512)
       : null;
-    if (!symbolId && !file) throw new Error("ATLAS code.lens requires symbolId or file.");
+    if (!symbolId && !file) throw new Error("ATLAS code.lens requires file or symbols.");
     const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind || payload.identifiers, ATLAS_MAX_IDENTIFIERS);
     if (identifiersToFind.length === 0) {
-      throw new Error("ATLAS code.lens requires identifiersToFind.");
+      throw new Error("ATLAS code.lens requires names.");
     }
     return {
       action: normalizedAction,
@@ -653,11 +656,11 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
     const file = payload.file && isSafeRelativePath(payload.file)
       ? sanitizeString(payload.file, 512)
       : null;
-    if (!symbolId && !file) throw new Error("ATLAS code.window requires symbolId or file.");
+    if (!symbolId && !file) throw new Error("ATLAS code.window requires file or symbols.");
     if (!reason) throw new Error("ATLAS code.window requires reason.");
     const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind, ATLAS_MAX_IDENTIFIERS);
     if (file && identifiersToFind.length === 0) {
-      throw new Error("ATLAS code.window file mode requires identifiersToFind.");
+      throw new Error("ATLAS code.window file mode requires names.");
     }
     return {
       action: normalizedAction,

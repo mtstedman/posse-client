@@ -3,6 +3,7 @@ import { redactBridgeValue, redactString } from "../../bridge/functions/redactio
 import { isPosseMcpGatewaySurfaceName, stripPosseMcpGatewayPrefix } from "../../integrations/functions/mcp-gateway.js";
 import { TOOL_CATALOG, TOOL_OBSERVATION_ALIASES } from "../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { FINAL_REVIEW_TOOL_NAME } from "../../../catalog/final-review.js";
+import { foldAtlasUnifiedSelectors } from "../../atlas/functions/v2/contracts/unified-selectors.js";
 import { getAgentCallById } from "../../queue/functions/agent-calls.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import { finalReviewLogSummary } from "../../assessment/functions/final-review-log-summary.js";
@@ -345,8 +346,10 @@ export function __testSummarizeAtlasArgs(input = {}) {
 // own title, which operators already see in the log prefix.
 export function atlasSummaryHint(input = {}, action = null) {
   if (!input || typeof input !== "object") return "";
-  const args = input;
   const a = String(action || "").toLowerCase().replace(/^atlas\./, "");
+  // A provider's own tool-use record carries the agent-facing names/symbols
+  // selectors; summarize them as the execution fields they fold onto.
+  const args = foldAtlasUnifiedSelectors(a, input).args;
 
   const firstArrayEntry = (arr, max = 2) => {
     if (!Array.isArray(arr) || arr.length === 0) return null;
@@ -469,11 +472,14 @@ export function atlasSummaryHint(input = {}, action = null) {
   }
 
   if (a === "code.skeleton" || a === "code.lens" || a === "code.window") {
-    const loc = args.file || (args.symbolId ? "symbol target" : null);
+    // A session handle the fold could not place (it resolves only in the
+    // owner) is still a symbol target.
+    const bySymbol = !!args.symbolId || (Array.isArray(args.symbols) && args.symbols.length > 0);
+    const loc = args.file || (bySymbol ? "symbol target" : null);
     const ids = identifierEntry(args.identifiersToFind, 3);
     const selection = ids && loc ? `${ids} @ ${loc}` : (ids || loc || "");
     const shape = a === "code.window"
-      ? (args.symbolId
+      ? (bySymbol
           ? String(args.granularity || "symbol")
           : `file window${args.expectedLines ? ` ${args.expectedLines}L` : ""}`)
       : (a === "code.lens" && args.contextLines != null ? `±${args.contextLines}L` : "");

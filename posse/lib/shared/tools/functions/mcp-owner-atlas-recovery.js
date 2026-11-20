@@ -62,7 +62,12 @@ export const __testEmptyIdentifierFilterRecovery = emptyIdentifierFilterRecovery
  * @param {Record<string, any>} toolArgs
  * @returns {Array<{symbolId: string, file: string}> | null}
  */
-export const IDENTIFIER_FILTER_FIELDS = ["identifiersToFind", "identifiers_to_find", "symbols"];
+export const IDENTIFIER_FILTER_FIELDS = ["identifiersToFind", "identifiers_to_find", "symbols", "names"];
+
+// A presented result labels its session handle `symbol`.
+function handleLabel(value) {
+  return typeof value?.symbol === "string" ? value.symbol : "";
+}
 
 /**
  * Identifiers a narrowed outline or survey filtered everything away with.
@@ -124,7 +129,7 @@ export function sameFileAmbiguityBatchItems(result, toolArgs) {
   const candidateFile = requestedFile || String(candidates[0]?.file || "").trim();
   if (!candidateFile) return null;
   for (const candidate of candidates) {
-    const symbolId = String(candidate?.symbolId || candidate?.symbol_id || "").trim();
+    const symbolId = String(candidate?.symbolId || candidate?.symbol_id || handleLabel(candidate) || "").trim();
     if (!symbolId || String(candidate?.file || "") !== candidateFile) return null;
     items.push({ symbolId, file: candidateFile });
   }
@@ -186,7 +191,7 @@ export function exactNameSearchTarget(result, toolArgs) {
   const items = searchResultItems(result);
   if (!items || items.length !== 1) return null;
   const item = items[0] || {};
-  const symbolId = String(item.symbolId || item.symbol_id || item.symbolHandle || "").trim();
+  const symbolId = String(item.symbolId || item.symbol_id || item.symbolHandle || handleLabel(item) || "").trim();
   if (!symbolId) return null;
   const file = String(item.location?.path || item.path || item.file || item.repo_rel_path
     || String(item.at || "").replace(/:\d+(?:-\d+)?$/u, "") || "").trim();

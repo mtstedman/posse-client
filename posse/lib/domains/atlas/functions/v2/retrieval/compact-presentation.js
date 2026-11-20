@@ -1,5 +1,6 @@
 // @ts-check
 import { COMPACT_RELATIONSHIP_DEFAULT_LIMIT, COMPACT_RELATIONSHIP_MAX_LIMIT, COMPACT_RELATIONSHIP_DEFAULT_MAX_CHARS, COMPACT_STRUCTURE_PROJECTION, COMPACT_STRUCTURE_DEFAULT_MAX_CHARS } from "../../../../../catalog/atlas-presentation.js";
+import { isAtlasSymbolId } from "../symbol-id.js";
 export { COMPACT_RELATIONSHIP_DEFAULT_LIMIT, COMPACT_RELATIONSHIP_MAX_LIMIT, COMPACT_RELATIONSHIP_DEFAULT_MAX_CHARS, COMPACT_STRUCTURE_PROJECTION, COMPACT_STRUCTURE_DEFAULT_MAX_FILES, COMPACT_STRUCTURE_DEFAULT_MAX_CHARS, COMPACT_STRUCTURE_ENVELOPE_RESERVE_CHARS } from "../../../../../catalog/atlas-presentation.js";
 
 const RELATIONSHIP_ORDER = Object.freeze(["caller", "reference"]);
@@ -283,7 +284,8 @@ export async function presentSymbolGetAmbiguityChoices(candidates, options) {
 // This projection keeps every navigational fact (stable handle, qualified
 // ownership, kind, line, non-default visibility, every explicit edge with its
 // endpoints and direction, warnings, ambiguity, incompleteness) and removes
-// only duplicated representation. Module rows are represented by the file key;
+// only duplicated representation. An edge endpoint that the inventory lists is
+// named by name and file; its canonical ID is the inventory key. Module rows are represented by the file key;
 // a namespace row is represented once per file as `namespace`. Fan-in/out is
 // emitted only when edges were computed, so "edges disabled" never reads as
 // "zero relationships".
@@ -339,8 +341,9 @@ function compactSymbolRow(symbol) {
 /**
  * @param {Record<string, any>} file
  * @param {Map<string, string>} handleById
+ * @param {Set<string>} listedIds collects canonical IDs used as inventory keys
  */
-function compactStructureFile(file, handleById) {
+function compactStructureFile(file, handleById, listedIds) {
   const path = textOrNull(file.path) || "";
   const rows = Array.isArray(file.symbols) ? file.symbols : [];
   /** @type {Record<string, Array<string | number>>} */
@@ -366,6 +369,9 @@ function compactStructureFile(file, handleById) {
     }
     const ref = symbolReference(row);
     if (!ref) continue;
+    // Only the long canonical form is worth leaving off an edge; a short
+    // handle costs nothing to repeat and lets an edge be followed directly.
+    if (id && ref === id && isAtlasSymbolId(id)) listedIds.add(id);
     // A duplicate reference keeps the first row; a later identical ref cannot
     // add navigational information and would silently overwrite the line.
     if (Object.prototype.hasOwnProperty.call(symbols, ref)) continue;
@@ -393,12 +399,18 @@ function modelFacingStructureFile(file) {
  * @param {Record<string, any>} edge
  * @param {"internal" | "inbound" | "outbound"} scope
  * @param {Map<string, string>} handleById
+ * @param {Set<string>} listedIds canonical IDs the file inventory already carries
  */
-function compactStructureEdge(edge, scope, handleById) {
+function compactStructureEdge(edge, scope, handleById, listedIds) {
   /** @param {string} prefix */
   const endpoint = (prefix) => {
     const id = textOrNull(edge[`${prefix}SymbolId`]);
-    const ref = (id && handleById.get(id)) || id || null;
+    // The inventory already keys a listed symbol by its canonical ID next to
+    // its name and file, so repeating that 64-hex ID on every edge that touches
+    // it is duplicated representation. A session handle is short and stays; an
+    // endpoint outside the inventory keeps its ID because nothing else holds it.
+    const handle = id ? handleById.get(id) : null;
+    const ref = handle || (id && !listedIds.has(id) ? id : null);
     return {
       ...(ref ? { ref } : {}),
       name: textOrNull(edge[`${prefix}Name`]) || "",
@@ -428,10 +440,12 @@ export function projectCompactCodeStructure(data, options = {}) {
   const record = plainRecord(data) || {};
   /** @type {Map<string, string>} */
   const handleById = new Map();
+  /** @type {Set<string>} */
+  const listedIds = new Set();
   const files = (Array.isArray(record.files) ? record.files : [])
     .map((file) => plainRecord(file))
     .filter((file) => file != null)
-    .map((file) => compactStructureFile(/** @type {Record<string, any>} */ (file), handleById));
+    .map((file) => compactStructureFile(/** @type {Record<string, any>} */ (file), handleById, listedIds));
   const metrics = plainRecord(record.metrics) || {};
   const requestedKinds = Array.isArray(metrics.edgeKinds)
     ? metrics.edgeKinds.map((kind) => String(kind || "")).filter(Boolean)
@@ -442,9 +456,13 @@ export function projectCompactCodeStructure(data, options = {}) {
     if (!Array.isArray(rows)) continue;
     for (const raw of rows) {
       const edge = plainRecord(raw);
-      if (edge) edgeRows.push(compactStructureEdge(edge, /** @type {any} */ (scope), handleById));
+      if (edge) edgeRows.push(compactStructureEdge(edge, /** @type {any} */ (scope), handleById, listedIds));
     }
   }
+  // Relationships between files lead; an edge inside one file restates what
+  // that file's own outline already implies. The sort is stable, so each group
+  // keeps the native scope and site order.
+  edgeRows.sort((left, right) => Number(left.from.file === left.to.file) - Number(right.from.file === right.to.file));
   const explicitRequest = options.edgesRequested;
   const edgesComputed = explicitRequest === false
     ? false
@@ -523,9 +541,10 @@ function jsonChars(value) {
 /**
  * Split a compact projection into ordered pages that each fit `maxChars`.
  * Every page advances: it carries at least one edge row, one file, or one
- * symbol slice of a file too large for a page (marked `continued`). Edges are
- * placed on the first page ahead of any inventory; when even the edge table
- * alone exceeds the page, it is sliced across leading pages. Order is the
+ * symbol slice of a file too large for a page (marked `continued`). The file
+ * inventory comes first, so the first page answers "what is declared here";
+ * symbol edge rows follow it and are sliced across trailing pages when they
+ * do not fit. File-level edges ride in the first page's header. Order is the
  * projection order, so the same input always pages identically.
  *
  * @param {ReturnType<typeof projectCompactCodeStructure>} projected
@@ -557,22 +576,7 @@ export function paginateCompactCodeStructure(projected, options = {}) {
   const fits = (candidate) => jsonChars({ .../** @type {any} */ (candidate), pagination: paginationReserve }) <= maxChars;
   let page = openPage();
 
-  // 1. Edge rows, sliced when necessary. A row that fits nowhere alone is
-  //    still placed so the page advances rather than looping.
-  let placed = 0;
-  while (placed < edgeRows.length) {
-    const rows = Array.isArray(page.edges.rows) ? page.edges.rows : [];
-    const candidateEdges = { ...page.edges, rows: [...rows, edgeRows[placed]] };
-    if (rows.length === 0 || fits({ ...page, edges: candidateEdges })) {
-      page.edges = candidateEdges;
-      placed += 1;
-    } else {
-      page.edges.continued = true;
-      page = openPage();
-    }
-  }
-
-  // 2. Files, sliced by symbol when a single file exceeds the page.
+  // 1. Files, sliced by symbol when a single file exceeds the page.
   for (const file of files) {
     if (fits({ ...page, files: [...page.files, file] })) {
       page.files = [...page.files, file];
@@ -611,6 +615,24 @@ export function paginateCompactCodeStructure(projected, options = {}) {
       page.files = [...page.files, slice];
       part += 1;
       if (index < entries.length) page = openPage();
+    }
+  }
+  // 2. Edge rows after the inventory, sliced when necessary. A row that fits
+  //    nowhere alone is still placed so the page advances rather than looping.
+  //    The fit test reserves the `continued` marker, which is set only on a
+  //    page that carries edge rows and is followed by more.
+  let placed = 0;
+  while (placed < edgeRows.length) {
+    const rows = Array.isArray(page.edges.rows) ? page.edges.rows : [];
+    const candidateEdges = { ...page.edges, rows: [...rows, edgeRows[placed]] };
+    const pageIsEmpty = rows.length === 0 && page.files.length === 0;
+    const probeEdges = placed + 1 < edgeRows.length ? { ...candidateEdges, continued: true } : candidateEdges;
+    if (pageIsEmpty || fits({ ...page, edges: probeEdges })) {
+      page.edges = candidateEdges;
+      placed += 1;
+    } else {
+      if (rows.length > 0) page.edges.continued = true;
+      page = openPage();
     }
   }
   const total = pages.length;
