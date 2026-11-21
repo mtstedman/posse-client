@@ -10,6 +10,7 @@ import { optionalAtlasSymbolId, sanitizeAtlasSymbolIdList } from "../../../../do
 import { coerceLooseAtlasSymbolArgs, validateAtlasPayloadSymbolIds } from "../../../../domains/atlas/functions/v2/signal-extraction.js";
 import { ATLAS_TOOL_PARAM_SCHEMAS } from "../../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
 import { foldAtlasUnifiedSelectors } from "../../../../domains/atlas/functions/v2/contracts/unified-selectors.js";
+import { withDescriptiveSearchSemantic } from "../../../../domains/atlas/functions/v2/contracts/search-defaults.js";
 import { normalizeAtlasIdentifierList } from "../../../../domains/atlas/functions/v2/contracts/identifiers.js";
 
 const ATLAS_MAX_QUERY_LENGTH = 512;
@@ -347,7 +348,8 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
         ...payload,
         query,
         limit: clampInt(payload.limit, 1, ATLAS_MAX_LIMIT, 10),
-        semantic: !!payload.semantic,
+        // Unset on a query worded as a description means on; see search-defaults.
+        semantic: withDescriptiveSearchSemantic({ ...payload, query }).semantic === true,
       },
     };
   }

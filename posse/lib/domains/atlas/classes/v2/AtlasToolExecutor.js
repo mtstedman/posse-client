@@ -13,6 +13,7 @@ import { ATLAS_TOOL_ACTIONS } from "../../functions/v2/contracts/tool-params.js"
 import { ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS } from "../../functions/v2/contracts/jobs.js";
 import { normalizeAtlasIdentifier } from "../../functions/v2/contracts/identifiers.js";
 import { foldAtlasUnifiedSelectors } from "../../functions/v2/contracts/unified-selectors.js";
+import { withDescriptiveSearchSemantic } from "../../functions/v2/contracts/search-defaults.js";
 import { atlasNestedAction, atlasNestedActionArgKeys } from "../../../../shared/tools/functions/atlas-nested-action.js";
 import { normalizeCodeLensContextLines } from "../../functions/v2/retrieval/code.js";
 import { codeSurveyPathError } from "../../functions/v2/retrieval/survey.js";
@@ -916,7 +917,8 @@ export class AtlasToolExecutor {
         ok: false, action, error: { code: "invalid_params", message: unified.error },
       });
     }
-    const rawArgs = unified.args;
+    // A search worded as a description uses the embedding index by default.
+    const rawArgs = action === "symbol.search" ? withDescriptiveSearchSemantic(unified.args) : unified.args;
     // Keep the caller's search limit through caching and result trimming.
     // Candidate-pool expansion belongs only at the native dispatch boundary.
     const args = action === "symbol.search" ? rawArgs : nativeCompleteToolArgs(action, rawArgs);
