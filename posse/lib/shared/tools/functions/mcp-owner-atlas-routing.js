@@ -106,7 +106,10 @@ function unifiedSelectorArgs(session, action, args, { symbolsOnly = false } = {}
     resolvedArgs = handles.args;
   }
   const unified = foldAtlasUnifiedSelectors(action, resolvedArgs);
-  if (unified.error) return { args, transforms, error: unified.error };
+  if (unified.error) {
+    return { args, transforms, error: unified.error,
+      ...(unified.unresolvedName ? { unresolvedName: unified.unresolvedName } : {}) };
+  }
   if (unified.folded) {
     transforms.push({
       kind: "atlas_unified_selectors",
@@ -114,6 +117,15 @@ function unifiedSelectorArgs(session, action, args, { symbolsOnly = false } = {}
     });
   }
   return { args: unified.args, transforms, ...(unified.note ? { note: unified.note } : {}) };
+}
+
+// symbol.callers handed a declared name is not refused here: the owner looks
+// the name up and runs the call when it names one declaration. `callersNameError`
+// is what the owner answers when it does not.
+function unresolvedRoute(unified) {
+  return unified.unresolvedName
+    ? { callersName: unified.unresolvedName, callersNameError: unified.error }
+    : { routingError: unified.error };
 }
 
 export function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, session = null) {
@@ -128,7 +140,7 @@ export function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, s
     if (requested.suite !== "atlas") return { toolName, toolArgs, transforms };
     const unified = unifiedSelectorArgs(session, requested.name, toolArgs);
     transforms.push(...unified.transforms);
-    if (unified.error) return { toolName, toolArgs, transforms, routingError: unified.error };
+    if (unified.error) return { toolName, toolArgs, transforms, ...unresolvedRoute(unified) };
     return {
       toolName,
       toolArgs: unified.args,
@@ -153,7 +165,9 @@ export function routeResearcherDispatcherCall(policy, toolName, toolArgs = {}, s
   const unified = unifiedSelectorArgs(session, action, supplied, { symbolsOnly: true });
   transforms.push(...unified.transforms);
   if (unified.error) {
-    return { toolName: `atlas.${action}`, toolArgs, transforms, routingError: unified.error };
+    // A name to resolve keeps the native field names the aliases produced.
+    return { toolName: `atlas.${action}`, toolArgs: unified.unresolvedName ? supplied : toolArgs, transforms,
+      ...unresolvedRoute(unified) };
   }
   supplied = unified.args;
   const selectorNote = unified.note || null;

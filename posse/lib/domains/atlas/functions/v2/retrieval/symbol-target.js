@@ -276,7 +276,22 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
   const pathExact = requestedFile
     ? eligible.filter((symbol) => symbol.repo_rel_path === requestedFile)
     : eligible;
-  const exported = pathExact;
+  // A directory given where a file was expected (`lib`, `packages/core/src`)
+  // scopes the lookup to that directory: nothing is indexed at the path itself
+  // and the name is declared beneath it. It then resolves like an unscoped
+  // name, limited to those files, instead of failing while listing the very
+  // declaration that was asked for.
+  const directoryPrefix = requestedFile ? `${requestedFile}/` : "";
+  const beneath = requestedFile && pathExact.length === 0
+    ? eligible.filter((symbol) => String(symbol.repo_rel_path || "").startsWith(directoryPrefix))
+    : [];
+  if (beneath.length > 0) {
+    return selectSymbolRefTargetAmong({ view, symbolRef, name, requestedFile: null, eligible, exported: beneath });
+  }
+  return selectSymbolRefTargetAmong({ view, symbolRef, name, requestedFile, eligible, exported: pathExact });
+}
+
+async function selectSymbolRefTargetAmong({ view, symbolRef, name, requestedFile, eligible, exported }) {
   const resolution = resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(exported), name, { caseSensitive: true, traitImplAlias: true });
   if (resolution.ambiguousBearers.length > 0) {
     const names = new Set(resolution.ambiguousBearers.map(exactIdentifier));

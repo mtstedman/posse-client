@@ -202,16 +202,19 @@ export function exactNameSearchTarget(result, toolArgs) {
   return { symbolId, ...(file ? { file } : {}) };
 }
 
-/** The directory a code.lens call named when it failed as not_a_file, else null. */
+/** The directory a one-file read (code.lens, code.skeleton) named when it failed as not_a_file, else null. */
 export function lensDirectoryTarget(result, toolArgs) {
   if (!result || result.isError !== true) return null;
   const file = String(toolArgs?.file || toolArgs?.path || "").trim().replace(/\/+$/u, "");
   if (!file) return null;
+  const error = result.structuredContent?.error || result._meta?.atlasError;
+  if (String(error?.code || "") === "not_a_file") return file;
   const text = (Array.isArray(result.content) ? result.content : [])
     .map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n");
-  // Native lens words it "the path is not a regular file"; in a repository that
-  // is a directory, and a survey that fails keeps the original error anyway.
-  return /"code"\s*:\s*"not_a_file"|\bnot_a_file\b/u.test(text) ? file : null;
+  // The native readers word it "the path is not a regular file"; in a
+  // repository that is a directory, and a survey that fails keeps the original
+  // error anyway.
+  return /"code"\s*:\s*"not_a_file"|\bnot_a_file\b|: the path is not a regular file|: it is a directory/u.test(text) ? file : null;
 }
 
 export const __testLensDirectoryTarget = lensDirectoryTarget;
@@ -237,3 +240,47 @@ export function withNestedAtlasAction(toolArgs, action) {
 export const __testExactNameSearchTarget = exactNameSearchTarget;
 
 export const __testNearestNameSearchArgs = nearestNameSearchArgs;
+
+const CALLERS_NAME_CHOICES = 6;
+
+/** Arguments for the exact name search that resolves a name given to symbol.callers. */
+export function callersNameSearchArgs(name) {
+  return { query: String(name || "").trim(), scope: "name", limit: 20 };
+}
+
+/** The member a qualified name ends in (`Router.run` -> `run`), or null for a bare name. */
+export function qualifiedNameMember(name) {
+  const parts = String(name || "").trim().split(/::|[.#]/u).filter(Boolean);
+  return parts.length > 1 ? parts.at(-1) : null;
+}
+
+/**
+ * The declaration a name given to symbol.callers identifies, from an exact
+ * name search. One match is the symbol to read callers of; several or none
+ * are reported, never chosen between.
+ *
+ * @param {any} result A symbol.search result.
+ * @param {string} name
+ * @returns {{ symbol: string, label: string } | { message: string } | null} null when the search result is unusable.
+ */
+export function callersNameTarget(result, name) {
+  const items = searchResultItems(result);
+  if (!items) return null;
+  const matches = items.filter((item) => handleOrId(item) && symbolMatchesRequestedIdentifier(
+    { name: item?.name, qualified_name: item?.qualified_name || item?.name }, name, { traitImplAlias: true },
+  ));
+  const describe = (item) => `${item.qualified_name || item.name} (${item.at || item.path || item.file || "indexed"})`;
+  if (matches.length === 1) return { symbol: handleOrId(matches[0]), label: describe(matches[0]) };
+  if (matches.length === 0) {
+    return { message: `No indexed declaration is named "${name}". symbol.callers reads the callers of one declaration: `
+      + "give its declared name or a symbol from an Atlas result." };
+  }
+  const listed = matches.slice(0, CALLERS_NAME_CHOICES).map((item) => `${handleOrId(item)} ${describe(item)}`).join("; ");
+  const more = matches.length > CALLERS_NAME_CHOICES ? `; and ${matches.length - CALLERS_NAME_CHOICES} more` : "";
+  return { message: `"${name}" names ${matches.length} declarations: ${listed}${more}. `
+    + "symbol.callers reads one; pass the one you mean in symbols." };
+}
+
+function handleOrId(item) {
+  return String(item?.symbolId || item?.symbol_id || item?.symbolHandle || handleLabel(item) || "").trim();
+}

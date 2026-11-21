@@ -77,11 +77,14 @@ function foldSymbolCallers(args) {
   ]);
   if (ids.length === 0) {
     const name = entries[0];
+    // The fold has no index to look a name up in, so it refuses. A caller that
+    // does (the tool owner) resolves `unresolvedName` instead of answering this.
     return {
       ...unchanged(args),
       error: name
         ? `symbol.callers needs an Atlas symbol in symbols; "${name}" is a name, not a symbol from an Atlas result`
         : "symbol.callers needs one Atlas symbol in symbols",
+      ...(name ? { unresolvedName: name } : {}),
     };
   }
   const { symbols: _symbols, ...rest } = args;
@@ -205,7 +208,7 @@ export function describeWithAgentSelectors(action, text) {
  *
  * @param {string} action
  * @param {Record<string, any>} args
- * @returns {{ args: Record<string, any>, folded: boolean, repairedNames: number, note?: string, error?: string }}
+ * @returns {{ args: Record<string, any>, folded: boolean, repairedNames: number, note?: string, error?: string, unresolvedName?: string }}
  */
 export function foldAtlasUnifiedSelectors(action, args) {
   if (!isPlainObject(args)) return unchanged(args);

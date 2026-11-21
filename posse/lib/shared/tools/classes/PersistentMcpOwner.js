@@ -70,7 +70,7 @@ import { annotateOwnerResultTransform, preserveOwnerModelControlNotices, ownerEx
 import { recordOwnerToolObservation, recordOwnerAnsweredToolCall, ownerToolStructuredError } from "../functions/mcp-owner-tool-observations.js";
 import { admissionMaxPhysicalCalls, researchCeilingGraceDecision, researchCeilingEmissionFor, isTerminalResearchExplorationAdmission } from "../functions/mcp-owner-research-budget.js";
 import { subAgentRoutingEnabled, subAgentRoutingBlockReason, subAgentRoutingContext, subAgentRoutingGuardResult, subAgentInputObservationDetails, subAgentObservationResults, noteSubAgentRoutingSuccess } from "../functions/mcp-owner-sub-agent-routing.js";
-import { sameFileAmbiguityBatchItems, emptyIdentifierFilterRecovery, IDENTIFIER_FILTER_FIELDS, lensDirectoryTarget, withNestedAtlasAction, exactNameSearchQuery, exactNameSearchTarget, nearestNameSearchArgs, searchResultItems, clampAtlasArgumentCeilings } from "../functions/mcp-owner-atlas-recovery.js";
+import { sameFileAmbiguityBatchItems, emptyIdentifierFilterRecovery, IDENTIFIER_FILTER_FIELDS, lensDirectoryTarget, withNestedAtlasAction, exactNameSearchQuery, exactNameSearchTarget, nearestNameSearchArgs, searchResultItems, clampAtlasArgumentCeilings, callersNameSearchArgs, callersNameTarget, qualifiedNameMember } from "../functions/mcp-owner-atlas-recovery.js";
 import { recordSourceSelectionObservations, sourceSelectionItems, sourceSelectionCoverageCursor, coveredSourceSelectionObservation, suppressedSourceSelectionObservation } from "../functions/mcp-owner-evidence.js";
 export { __testSubAgentObservationResults, __testSubAgentInputObservationDetails, __testSubAgentRoutingGuardResult, __testSubAgentRoutingSequence, __testSubAgentRoutingEnabled } from "../functions/mcp-owner-sub-agent-routing.js";
 export { __testDelegatedEvidenceRequestAllowed, __testAssessorFallbackReadKey, __testNestedAtlasActionDenial, __testDeniedToolCallMessage } from "../functions/mcp-owner-tool-policy.js";
@@ -2709,7 +2709,7 @@ export class PersistentMcpOwner {
           return;
         }
         if (requested.suite === "atlas") {
-          const response = await this._executeAtlasToolCall({
+          const atlasCall = {
             message,
             session,
             toolName,
@@ -2718,7 +2718,10 @@ export class PersistentMcpOwner {
             delegatedEvidence,
             assignedPhysicalCallStep: assignedResearchPhysicalCallStep,
             physicalCeilingGrace: researchPhysicalCeilingGrace,
-          });
+          };
+          const response = routedTool.callersName
+            ? await this._executeCallersByName(atlasCall, routedTool)
+            : await this._executeAtlasToolCall(atlasCall);
           if (rejectAgentHandoffForLaterTool(
             session?.bootConfig?.agentCallId,
             requested.name || toolName,
@@ -3593,10 +3596,10 @@ export class PersistentMcpOwner {
   }
 
   /**
-   * code.lens reads one file. Handed a directory it answered not_a_file and
-   * the caller had to spend another call on code.survey; survey over that
-   * directory with the same identifiers is what was asked, so it runs on the
-   * same physical step.
+   * code.lens and code.skeleton read one file. Handed a directory they
+   * answered not_a_file and the caller had to spend another call on
+   * code.survey; survey over that directory with the same identifiers is what
+   * was asked, so it runs on the same physical step.
    *
    * @param {any} message
    * @param {any} args
@@ -3605,7 +3608,9 @@ export class PersistentMcpOwner {
   async _recoverLensDirectory(message, args, assignedPhysicalCallStep) {
     if (args?.lensDirectoryRecovery || args?.identifierFilterRecovery || args?.ambiguityRecovery) return message;
     const requested = requestedToolPolicyName(args?.toolName, args?.toolArgs);
-    if (effectiveAtlasResearchAction(requested) !== "code.lens") return message;
+    const action = effectiveAtlasResearchAction(requested);
+    if (!["code.lens", "code.skeleton"].includes(action)) return message;
+    const reader = action.slice("code.".length);
     const nested = args?.toolArgs?.args && typeof args.toolArgs.args === "object" && !Array.isArray(args.toolArgs.args);
     const toolArgs = nested ? args.toolArgs.args : (args?.toolArgs || {});
     const directory = lensDirectoryTarget(message?.result, toolArgs);
@@ -3619,7 +3624,7 @@ export class PersistentMcpOwner {
       lensDirectoryRecovery: true,
       assignedPhysicalCallStep,
       sameStepRecovery: true,
-      toolName: String(args?.toolName || "").replace(/code[._]lens/u, (match) => match.replace("lens", "survey")),
+      toolName: String(args?.toolName || "").replace(/code[._](?:lens|skeleton)/u, (match) => match.replace(reader, "survey")),
       toolArgs: nested ? { ...withNestedAtlasAction(args.toolArgs, "code.survey"), args: surveyArgs } : surveyArgs,
     });
     const result = recovered?.result;
@@ -3628,8 +3633,69 @@ export class PersistentMcpOwner {
       ...recovered,
       result: appendOwnerModelControlNotice(
         result,
-        `\n\n${directory} is not a file; code.lens reads one file, so code.survey over it is returned instead.`,
-        { kind: "atlas_lens_directory_survey", trigger: "code.lens" },
+        `\n\n${directory} is not a file; ${action} reads one file, so code.survey over it is returned instead.`,
+        { kind: "atlas_lens_directory_survey", trigger: action },
+      ),
+    };
+  }
+
+  /**
+   * symbol.callers reads the callers of one symbol, and agents name that
+   * symbol the way they name everything else: by its declared name. Look the
+   * name up with an exact name search and, when it identifies one
+   * declaration, run the callers read for it on the same physical step. Several
+   * declarations, or none, are reported back; the owner never picks one.
+   *
+   * @param {any} call The Atlas call as it would have been executed.
+   * @param {{ callersName: string, callersNameError: string }} routed
+   */
+  async _executeCallersByName(call, routed) {
+    const name = String(routed.callersName || "").trim();
+    const refused = (text) => mcpToolResultMessage(call.message, mcpToolErrorPayload(text));
+    const nested = call.toolArgs?.args && typeof call.toolArgs.args === "object" && !Array.isArray(call.toolArgs.args);
+    const supplied = nested ? call.toolArgs.args : (call.toolArgs || {});
+    const searchToolName = String(call.toolName || "")
+      .replace(/symbol[._]callers/u, (match) => match.replace("callers", "search"));
+    const search = async (query) => {
+      const searchArgs = callersNameSearchArgs(query);
+      const found = await this._executeAtlasToolCall({
+        ...call,
+        providerTransforms: [],
+        exactNameRecovery: true,
+        sameStepRecovery: true,
+        toolName: searchToolName,
+        toolArgs: nested ? { ...withNestedAtlasAction(call.toolArgs, "symbol.search"), args: searchArgs } : searchArgs,
+      });
+      return callersNameTarget(found?.result, name);
+    };
+    let target;
+    try {
+      target = await search(name);
+      // A name search matches declared names; an owner-qualified request is
+      // found by its member and then held to the full qualified name.
+      const member = qualifiedNameMember(name);
+      if (member && !target?.symbol) target = (await search(member)) || target;
+    } catch {
+      target = null;
+    }
+    if (!target) return refused(routed.callersNameError);
+    if (!target.symbol) return refused(target.message);
+    const resolved = resolveAtlasSymbolHandle(call.session, target.symbol);
+    if (!resolved.ok) return refused(routed.callersNameError);
+    const { symbols: _symbols, names: _names, ...rest } = supplied;
+    const callersArgs = { ...rest, symbolId: resolved.value };
+    const answered = await this._executeAtlasToolCall({
+      ...call,
+      sameStepRecovery: true,
+      toolArgs: nested ? { ...call.toolArgs, args: callersArgs } : callersArgs,
+    });
+    if (!answered?.result || answered.result.isError === true) return answered;
+    return {
+      ...answered,
+      result: appendOwnerModelControlNotice(
+        answered.result,
+        `\n\n${name} is ${target.label}.`,
+        { kind: "atlas_callers_name_resolved", trigger: "symbol.callers" },
       ),
     };
   }
