@@ -15,6 +15,7 @@
 
 import os from "os";
 import { getSetting } from "../../queue/functions/index.js";
+import { FIX_SCOPE_HANDOFF_GUARD_VALUES, LOG_LEVEL_VALUES } from "../../../catalog/setting-policy.js";
 
 const TUNABLE_DEFAULTS = Object.freeze({
   git_atlas_post_commit_hook_timeout_ms: 600000,
@@ -39,8 +40,8 @@ const TUNABLE_DEFAULTS = Object.freeze({
   atlas_prefetch_cache_ttl_ms: 600000,
 });
 
-const LOG_LEVEL_VALUES = new Set(["debug", "info", "warn", "error"]);
-const FIX_SCOPE_HANDOFF_GUARD_VALUES = new Set(["off", "auto", "warn", "enforce"]);
+const LOG_LEVEL_VALUE_SET = new Set(LOG_LEVEL_VALUES);
+const FIX_SCOPE_HANDOFF_GUARD_VALUE_SET = new Set(FIX_SCOPE_HANDOFF_GUARD_VALUES);
 
 function readPositiveInt(key, fallback) {
   try {
@@ -116,7 +117,7 @@ export function getGitAtlasPostCommitHookTimeoutMs() {
 export function getFixScopeHandoffGuardMode() {
   return readEnum(
     "fix_scope_handoff_guard",
-    FIX_SCOPE_HANDOFF_GUARD_VALUES,
+    FIX_SCOPE_HANDOFF_GUARD_VALUE_SET,
     TUNABLE_DEFAULTS.fix_scope_handoff_guard,
   );
 }
@@ -146,7 +147,7 @@ export function getDisplayEventRateLimitPerSec() {
 }
 
 export function getLogLevelName() {
-  return readEnum("posse_log_level", LOG_LEVEL_VALUES, TUNABLE_DEFAULTS.posse_log_level);
+  return readEnum("posse_log_level", LOG_LEVEL_VALUE_SET, TUNABLE_DEFAULTS.posse_log_level);
 }
 
 export function getAtlasV2BootTimeoutMs() {

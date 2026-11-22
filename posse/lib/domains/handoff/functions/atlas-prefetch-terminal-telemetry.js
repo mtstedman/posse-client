@@ -2,6 +2,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { positiveInt } from "./helpers/rejection-store.js";
 import { canonicalSourcePath } from "./evidence-source-path.js";
+import { AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../catalog/handoff.js";
 
 export function recordAtlasTrunkHitRate(packet, context) {
   const database = context?.db || getDb();
@@ -120,7 +121,7 @@ function citedSourcePaths(packet) {
   for (const handoff of Array.isArray(packet?.handoffs) ? packet.handoffs : []) {
     for (const claim of Array.isArray(handoff?.report?.claims) ? handoff.report.claims : []) {
       const detail = claim?.[1];
-      for (const lane of ["evidence", "proof", "support"]) {
+      for (const lane of AGENT_HANDOFF_CLAIM_CITATION_FIELDS) {
         for (const evidence of Array.isArray(detail?.[lane]) ? detail[lane] : []) {
           push(evidence?.path);
           for (const window of Array.isArray(evidence?.provenance?.source_windows)

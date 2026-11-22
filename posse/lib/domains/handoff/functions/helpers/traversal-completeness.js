@@ -2,6 +2,7 @@
 
 import crypto from "node:crypto";
 import { AGENT_HANDOFF_LIMITS } from "../../../../catalog/handoff.js";
+import { RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES } from "../../../../catalog/setting-policy.js";
 
 export const DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS = 1600;
 export const MIN_TRAVERSAL_COMPLETION_MAX_CHARS = 180;
@@ -37,7 +38,7 @@ export const TRAVERSAL_COMPLETION_TRIGGER_TERMS = Object.freeze([
   ...new Set(TRAVERSAL_COMPLETION_LANES.flatMap((lane) => lane.terms)),
 ]);
 
-const TRAVERSAL_COMPLETION_MODE_VALUES = new Set(["off", "shadow", "on"]);
+const TRAVERSAL_COMPLETION_MODE_VALUES = new Set(RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES);
 const TRAVERSAL_COMPLETION_RECIPIENTS = new Set(["researcher"]);
 const TRAVERSAL_COMPLETION_JOB_TYPES = new Set(["research"]);
 

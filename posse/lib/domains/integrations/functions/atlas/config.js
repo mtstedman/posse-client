@@ -42,6 +42,7 @@ import {
 } from "../../../../catalog/atlas.js";
 import { MODEL_TIERS } from "../../../../catalog/model.js";
 import { normalizeAtlasV2Mode } from "../atlas-v2-mode.js";
+import { ATLAS_RESEARCH_PREFETCH_FOCUS_MODE_VALUES } from "../../../../catalog/setting-policy.js";
 
 export {
   ATLAS_AUTO_FEEDBACK_VALUES,
@@ -801,7 +802,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     dbResearchPrefetchFocus,
     "on",
   )).trim().toLowerCase();
-  const researchPrefetchFocusMode = ["off", "shadow", "on"].includes(rawResearchPrefetchFocusMode)
+  const researchPrefetchFocusMode = ATLAS_RESEARCH_PREFETCH_FOCUS_MODE_VALUES.includes(rawResearchPrefetchFocusMode)
     ? rawResearchPrefetchFocusMode
     : "on";
   const surveyBriefEdgeCount = Math.max(0, Math.min(32, parseIntOrNull(firstProvided(

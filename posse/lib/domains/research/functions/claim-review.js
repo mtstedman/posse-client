@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import assert from "node:assert/strict";
 import { RESEARCH_CLAIM_REVIEW as POLICY } from "../../../catalog/research-claim-review.js";
+import { AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../catalog/handoff.js";
 
 export const claimReviewDigest = value => crypto.createHash("sha256").update(value).digest("hex");
 
@@ -19,7 +20,7 @@ export function buildClaimReviewInput(packet) {
     candidate.unreviewed_claim_ids = candidate.unreviewed_claim_ids.filter(id => id !== claimId);
     const keys = new Map(evidenceKeys);
     const ids = [];
-    for (const source of ["evidence", "proof", "support"].flatMap(lane => detail?.[lane] || [])) {
+    for (const source of AGENT_HANDOFF_CLAIM_CITATION_FIELDS.flatMap(lane => detail?.[lane] || [])) {
       if (typeof source.excerpt !== "string" || !source.excerpt) continue;
       const digest = claimReviewDigest(source.excerpt);
       assert(!source.excerpt_sha256 || source.excerpt_sha256 === digest, "Committed excerpt digest mismatch");

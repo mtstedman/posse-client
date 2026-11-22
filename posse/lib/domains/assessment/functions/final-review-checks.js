@@ -31,6 +31,7 @@ import {
   FINAL_REVIEW_SHARED_TEST_RUNNERS,
   FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS,
 } from "../../../catalog/final-review.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 // A located diagnostic line: `path(line,col): ...` (tsc) or `path:line:col ...`.
 const LOCATED_LINE = /^\s*([^\s():]+\.[A-Za-z0-9]+)(?:\((\d+)|:(\d+))/u;
@@ -55,7 +56,7 @@ export function changedTestPlan(job, payload, change, declaredPlan, {
   cwd,
   lineagePaths = [],
 } = {}) {
-  if (!cwd || !["dev", "fix"].includes(String(job?.job_type || ""))
+  if (!cwd || !DEV_ROLE_JOB_TYPES.has(String(job?.job_type || ""))
     || String(payload?.task_mode || "code") !== "code") return null;
   const declared = new Set(declaredPlan?.deferred_checks ? [] : [
     ...(Array.isArray(declaredPlan?.unit_test_paths) ? declaredPlan.unit_test_paths : []),

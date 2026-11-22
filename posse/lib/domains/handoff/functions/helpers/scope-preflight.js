@@ -1,3 +1,4 @@
+import { DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 // lib/domains/handoff/functions/helpers/scope-preflight.js
 //
 // Deterministic scope preflight checks for handoff packets.
@@ -31,7 +32,7 @@ function hasNonWildcardCreateRoot(scope = {}) {
 export function isZeroEditCodeTask(scope = {}) {
   const taskMode = scope?.task_mode || scope?._raw_payload?.task_mode || "code";
   const jobType = scope?.job_type || "";
-  return (jobType === "dev" || jobType === "fix")
+  return DEV_ROLE_JOB_TYPES.has(jobType)
     && taskMode === "code"
     && !hasExplicitFileScope(scope)
     && !hasNonWildcardCreateRoot(scope);
@@ -50,7 +51,7 @@ export function assertHandoffScopePreflight(packet) {
 
 export function buildScopePlausibilityWarning(packet = {}) {
   const taskMode = packet?.task_mode || packet?._raw_payload?.task_mode || "code";
-  if (!["dev", "fix"].includes(packet?.job_type) || taskMode !== "code") return null;
+  if (!DEV_ROLE_JOB_TYPES.has(packet?.job_type) || taskMode !== "code") return null;
   const filesToModify = Array.isArray(packet.files_to_modify) ? packet.files_to_modify : [];
   const filesToCreate = Array.isArray(packet.files_to_create) ? packet.files_to_create : [];
   const filesToDelete = Array.isArray(packet.files_to_delete) ? packet.files_to_delete : [];

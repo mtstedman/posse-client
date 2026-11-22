@@ -16,7 +16,7 @@
 
 import path from "node:path";
 
-import { AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES } from "../../../../catalog/handoff.js";
+import { AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_CLAIM_REF_FIELDS, AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../../catalog/handoff.js";
 
 export const AGENT_HANDOFF_COMPLETION_PROSE_MAX_CHARS = 1000;
 
@@ -230,7 +230,7 @@ function relativizeClaimSelectors(claims, roots, note, label) {
       const object = plain(detail);
       if (!object) return detail;
       const out = { ...object };
-      for (const lane of ["evidence", "proof", "support", "decoy"]) {
+      for (const lane of AGENT_HANDOFF_CLAIM_REF_FIELDS) {
         if (out[lane] != null) out[lane] = rewriteLane(out[lane], `${detailLabel}.${lane}`);
       }
       return out;
@@ -374,7 +374,7 @@ function normalizeEnvelope(source, roots, note) {
     out = fillSoleParentTarget(out, note);
   }
   // Assessor compact form carries evidence at the top level.
-  for (const lane of ["evidence", "proof", "support"]) {
+  for (const lane of AGENT_HANDOFF_CLAIM_CITATION_FIELDS) {
     if (Array.isArray(out[lane])) {
       out[lane] = out[lane].map((entry, index) => {
         const relative = relativizeEvidenceSelector(entry, roots);

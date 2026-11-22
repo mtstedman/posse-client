@@ -8,6 +8,8 @@ import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { recordObservation } from "../../../domains/observability/functions/observations.js";
 import { isResearchAtlasCitationFetchAction, isResearchAtlasExplorationAction } from "../../../domains/integrations/functions/deterministic-mcp/research-synthesis.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
+import { RESEARCH_NATIVE_EXPLORATION_TOOLS } from "../../../catalog/observation.js";
+import { ATLAS_GATEWAY_FAMILIES } from "../../../catalog/atlas-tools.js";
 
 export const OWNER_MODEL_CONTROL_NOTICES = Symbol("ownerModelControlNotices");
 
@@ -210,17 +212,9 @@ export function __testPlannerTriageSequence({
   return { notices, observations, state: session._plannerTriage || null };
 }
 
-export const ATLAS_NESTED_ACTION_WRAPPERS = new Set(["query", "code", "repo", "agent", "workflow"]);
+export const ATLAS_NESTED_ACTION_WRAPPERS = new Set([...ATLAS_GATEWAY_FAMILIES, "workflow"]);
 
-export const RESEARCH_NATIVE_PHYSICAL_WORK_TOOLS = new Set([
-  "read_file",
-  "chain_verdict",
-  "list_files",
-  "search_files",
-  "git_history",
-  "inspect_file",
-  "hash_file",
-]);
+export const RESEARCH_NATIVE_PHYSICAL_WORK_TOOLS = RESEARCH_NATIVE_EXPLORATION_TOOLS;
 
 // Research admission/classification must see the REAL action: gateway wrappers
 // (atlas_query/atlas_code/atlas_repo/...) carry it nested in args.action, and

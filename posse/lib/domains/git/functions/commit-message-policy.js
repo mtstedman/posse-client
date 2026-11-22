@@ -4,8 +4,9 @@ import path from "node:path";
 import { getSetting } from "../../queue/functions/index.js";
 import { SECRET_PATTERNS } from "../../../shared/telemetry/functions/logging/secret-patterns.js";
 import { gitExec } from "./utils.js";
+import { GIT_COMMIT_STYLE_VALUES } from "../../../catalog/setting-policy.js";
 
-const COMMIT_STYLES = new Set(["off", "conventional", "gitmoji"]);
+const COMMIT_STYLES = new Set(GIT_COMMIT_STYLE_VALUES);
 const COMMIT_TYPES = new Set([
   "build",
   "chore",

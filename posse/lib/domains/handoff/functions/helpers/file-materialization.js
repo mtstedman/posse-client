@@ -10,6 +10,7 @@ import {
 } from "../../../runtime/functions/protected-paths.js";
 import { resolvePathWithin } from "../../../../shared/scope/functions/path.js";
 import { DIRTY_WORKTREE_RECOVERY_KEY, PRESERVED_WORK_RESUME_KEY } from "../../../../catalog/human-input.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 
 function uniquePaths(values = []) {
   return [...new Set((Array.isArray(values) ? values : [])
@@ -156,7 +157,7 @@ async function stageGreenfieldFiles(cwd, relPaths) {
 function isWritingCodePacket(packet) {
   const taskMode = packet?.task_mode || packet?._raw_payload?.task_mode || "code";
   return packet?.recipient === "dev"
-    && ["dev", "fix"].includes(packet?.job_type)
+    && DEV_ROLE_JOB_TYPES.has(packet?.job_type)
     && taskMode === "code";
 }
 

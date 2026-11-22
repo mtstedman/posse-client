@@ -1,6 +1,7 @@
 import { mergeEvidenceCatalog } from "./merged-packet-evidence.js";
 import { packetEvidence } from "./packet-evidence.js";
 import { materializedEvidenceIdentity } from "./evidence-selector.js";
+import { AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../../catalog/handoff.js";
 
 function failStoredPacket(message) {
   const error = new Error(message);
@@ -12,7 +13,7 @@ function mapStoredClaimEvidence(claim, mapEvidence) {
   const detail = claim?.[1];
   if (!detail || typeof detail !== "object") return claim;
   const mapped = { ...detail };
-  for (const lane of ["evidence", "proof", "support"]) {
+  for (const lane of AGENT_HANDOFF_CLAIM_CITATION_FIELDS) {
     if (Array.isArray(detail[lane])) mapped[lane] = detail[lane].map(mapEvidence);
   }
   if (Array.isArray(detail.decoy)) {

@@ -4,6 +4,7 @@ import { SYMBOL_GET_BATCH_POLICY } from "../../../../catalog/symbol-get-batch.js
 import { flattenSharedFileItems } from "../../../atlas/functions/v2/retrieval/symbol-get-batch.js";
 import { COMPACT_STRUCTURE_DEFAULT_MAX_FILES } from "../../../atlas/functions/v2/retrieval/compact-presentation.js";
 import { ATLAS_TOOL_DEFS_RAW } from "../../../../catalog/atlas-tools.js";
+import { ATLAS_AGENT_HASH_REF_OWNER_SCOPES, ATLAS_CALLER_MODES, ATLAS_CODE_GRANULARITIES, ATLAS_FETCH_REF_SEARCH_MODES, ATLAS_MEMORY_AGENT_FEEDBACK_VERDICTS, ATLAS_MEMORY_DOMAINS, ATLAS_RELATIONSHIP_KINDS, ATLAS_SEARCH_SCOPES, ATLAS_STRUCTURE_EDGE_KINDS } from "../../../../catalog/atlas-params.js";
 
 export function researcherAtlasBatchGuidance() {
   return `Run independent, already-needed Atlas tool calls in parallel in the same turn when all arguments are known. Pass each tool its own structured arguments; keep dependent reads sequential. Use a tool's multi-item form only within its declared shared output budget; each item reports its own success or error. After each result, reassess the unresolved evidence gaps. Continue only with a read that can resolve a specific remaining gap. Stop retrieving and hand off when the requested answer is supported; remaining capacity is a safety margin, not a target.`;
@@ -214,7 +215,6 @@ const WORKFLOW_ARG_FIELDS = new Set([
   "identifiersToFind",
   "includeEdges",
   "includeSymbols",
-  "includeUnresolved",
   "kind",
   "limit",
   "maxFiles",
@@ -273,7 +273,7 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
         maxTokens: {type: "integer", minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol},
       }, anyOf: [{required: ["symbolId"]}, {required: ["symbolRef"]}], additionalProperties: false}},
     query: { type: "string", minLength: 1 },
-    scope: { type: "string", enum: ["name", "body", "either"] },
+    scope: { type: "string", enum: [...ATLAS_SEARCH_SCOPES] },
     limit: { type: "integer", minimum: 1, maximum: 20000 },
     offset: { type: "integer", minimum: 0 },
     semantic: { type: "boolean" },
@@ -285,11 +285,10 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
     },
     symbolIds: { ...stringArray, items: symbolId },
     symbolRef: symbolRefItem,
-    kind: { type: "array", items: { type: "string", enum: ["calls", "references", "reads", "writes", "uses_type", "imports", "extends", "implements"] }, maxItems: 20 },
+    kind: { type: "array", items: { type: "string", enum: [...ATLAS_RELATIONSHIP_KINDS] }, maxItems: 20 },
     minConfidence: { type: "number", minimum: 0, maximum: 100 },
-    mode: { type: "string", enum: ["caller", "reference", "all"] },
+    mode: { type: "string", enum: [...ATLAS_CALLER_MODES] },
     minCallConfidence: { type: "number", minimum: 0, maximum: 1 },
-    includeUnresolved: { type: "boolean" },
     includeResolutionMetadata: { type: "boolean" },
     file: { type: "string", minLength: 1, description: "Existing repository-relative path already surfaced by Atlas; never guess a dependency file." },
     path: { type: "string", minLength: 1, description: "Alias for file, as surfaced in Atlas results." },
@@ -305,14 +304,14 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
     autoFill: { type: "boolean", description: "Keep partially new code.window excerpts contiguous across dedupe gaps. Default true; false keeps sparse output. Does not expand the selection." },
     granularity: {
       type: "string",
-      enum: ["symbol", "block", "fileWindow"],
+      enum: [...ATLAS_CODE_GRANULARITIES],
       description: "symbol selects declaration bodies, block selects enclosing control flow, and fileWindow returns a coherent source region in the file, including files outside the symbol index.",
     },
     contextLines: { type: "integer", minimum: 0, maximum: 200000, description: "Requested surrounding lines; values above 8 are clamped to 8." },
     maxTokens: { type: "integer", minimum: 1, maximum: 200000 },
     exportedOnly: { type: "boolean" },
     surveyGap: { type: "string", minLength: 3 },
-    edgeKinds: { type: "array", items: { type: "string", enum: ["imports", "calls", "references", "extends", "implements", "uses_type"] }, maxItems: 6 },
+    edgeKinds: { type: "array", items: { type: "string", enum: [...ATLAS_STRUCTURE_EDGE_KINDS] }, maxItems: 6 },
     includeEdges: { type: "boolean" },
     includeSymbols: { type: "boolean" },
     traversal_ref: { type: ["string", "array"], items: { type: "string" }, maxItems: 100 },
@@ -321,18 +320,18 @@ function researcherActionArgsSchema({ allowSymbolHandles = false } = {}) {
     refs: stringArray,
     hashes: stringArray,
     search: { type: "string" },
-    searchMode: { type: "string", enum: ["auto", "literal", "regex"] },
+    searchMode: { type: "string", enum: [...ATLAS_FETCH_REF_SEARCH_MODES] },
     reaccessAuthorization: { type: "string", minLength: 16 },
-    domains: { type: "array", items: { type: "string", enum: ["general", "ux", "schema", "security", "performance"] }, maxItems: 5 },
+    domains: { type: "array", items: { type: "string", enum: [...ATLAS_MEMORY_DOMAINS] }, maxItems: 5 },
     memoryId: { type: "string", minLength: 1 },
-    verdict: { type: "string", enum: ["used", "stale", "wrong", "duplicate"] },
+    verdict: { type: "string", enum: [...ATLAS_MEMORY_AGENT_FEEDBACK_VERDICTS] },
     detail: { type: "string" },
     text: { type: "string", minLength: 1 },
     source_ref: { type: "string" },
     lines: { type: "string" },
     note: { type: "string" },
     object_type: { type: "string" },
-    owner_scope: { type: "string", enum: ["work_item", "job"] },
+    owner_scope: { type: "string", enum: [...ATLAS_AGENT_HASH_REF_OWNER_SCOPES] },
   };
   return {
     type: "object",

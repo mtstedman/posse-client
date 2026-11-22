@@ -1,3 +1,4 @@
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 // A job's provider pin belongs to that job's execution role. Copying the pin
 // to another job is denied unless the caller names one of these continuity
 // routes and the source/target job types match the route exactly.
@@ -9,7 +10,7 @@ export const PROVIDER_AFFINITY_ROUTES = Object.freeze({
 });
 
 const KNOWN_PROVIDER_AFFINITY_ROUTES = new Set(Object.values(PROVIDER_AFFINITY_ROUTES));
-const DEV_JOB_TYPES = new Set(["dev", "fix"]);
+const DEV_JOB_TYPES = DEV_ROLE_JOB_TYPES;
 
 export function providerForAffinityRoute(sourceJob, targetJobType, route) {
   if (!KNOWN_PROVIDER_AFFINITY_ROUTES.has(route)) {

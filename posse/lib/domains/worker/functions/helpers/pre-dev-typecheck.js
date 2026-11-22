@@ -22,8 +22,9 @@ import { recordObservation } from "../../../observability/functions/observations
 import { getSetting } from "../../../settings/functions/repository-settings.js";
 import { repairVerificationPrerequisites } from "../../../verification/functions/prerequisite-adapters.js";
 import { collectTypecheckDiagnosticsAsync } from "../../../../shared/tools/functions/toolkit/scoped-runners.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 
-export const PRE_DEV_TYPECHECK_JOB_TYPES = Object.freeze(new Set(["dev", "fix"]));
+export const PRE_DEV_TYPECHECK_JOB_TYPES = DEV_ROLE_JOB_TYPES;
 const MAX_RENDERED_DIAGNOSTICS = 80;
 const MAX_RENDERED_CHARS = 8000;
 

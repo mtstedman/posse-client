@@ -140,11 +140,15 @@ function parseLayerJson(value) {
 }
 
 /**
+ * Merge identity of a symbol before ordinal disambiguation: kind plus the
+ * qualified name, or the bare name when the row has none. Mirrors the native
+ * writer's `merge_key`.
+ *
  * @param {{ kind: string, name: string, qualified_name?: string | null }} sym
  * @returns {string}
  */
 function symbolMergeKey(sym) {
-  return `${String(sym.kind || "")}\0${String(sym.qualified_name || sym.name || "")}`;
+  return `${String(sym.kind || "")}\0${String(sym.qualified_name ?? sym.name ?? "")}`;
 }
 
 export class BlobStore {
@@ -218,13 +222,16 @@ export class BlobStore {
                parser_spec_version = excluded.parser_spec_version`
           : "INSERT INTO blobs(content_hash, lang, byte_size, first_seen_ts) VALUES(?, ?, ?, ?) ON CONFLICT(content_hash) DO NOTHING",
       ),
+      // A layer writes no flat rows, so the blob it creates carries no parse
+      // stamp: `blobs.parser_*` means "the flat tree-sitter projection is
+      // present", and only a flat ingest or merge sets it.
       blobInsertIfMissing: db.prepare(
+        "INSERT INTO blobs(content_hash, lang, byte_size, first_seen_ts) VALUES(?, ?, ?, ?) ON CONFLICT(content_hash) DO NOTHING",
+      ),
+      blobStampParseVersion: db.prepare(
         hasBlobParserVersion
-          ? `INSERT INTO blobs
-               (content_hash, lang, byte_size, first_seen_ts, parser_version, parser_spec_version)
-             VALUES(?, ?, ?, ?, ?, ?)
-             ON CONFLICT(content_hash) DO NOTHING`
-          : "INSERT INTO blobs(content_hash, lang, byte_size, first_seen_ts) VALUES(?, ?, ?, ?) ON CONFLICT(content_hash) DO NOTHING",
+          ? "UPDATE blobs SET parser_version = ?, parser_spec_version = ? WHERE content_hash = ?"
+          : "SELECT 0 WHERE ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL",
       ),
       symbolInsert: db.prepare(
         hasBodyIdentifiers
@@ -566,13 +573,22 @@ export class BlobStore {
            ORDER BY bs.local_id ASC`,
         ).all(content_hash)
       );
+      // Symbols sharing kind and qualified name (overloads, impl-block
+      // duplicates) are told apart by ordinal: the n-th payload symbol with a
+      // key maps to the n-th existing one in local-id order.
+      /** @type {Map<string, number[]>} */
       const existingByKey = new Map();
       let nextLocalId = -1;
       for (const row of existingRows) {
         nextLocalId = Math.max(nextLocalId, Number(row.local_id));
-        existingByKey.set(symbolMergeKey(row), Number(row.local_id));
+        const key = symbolMergeKey(row);
+        const ids = existingByKey.get(key);
+        if (ids) ids.push(Number(row.local_id));
+        else existingByKey.set(key, [Number(row.local_id)]);
       }
       nextLocalId += 1;
+      /** @type {Map<string, number>} */
+      const ordinalByKey = new Map();
       const edgeMax = /** @type {{ max_edge_id: number | null } | undefined} */ (
         this.#db.prepare("SELECT MAX(edge_id) AS max_edge_id FROM blob_edges WHERE from_content_hash = ?").get(content_hash)
       );
@@ -585,7 +601,9 @@ export class BlobStore {
       for (const sym of symbols || []) {
         this.#assertSymbolShape(sym, content_hash);
         const key = symbolMergeKey(sym);
-        const existingLocalId = existingByKey.get(key);
+        const ordinal = ordinalByKey.get(key) ?? 0;
+        ordinalByKey.set(key, ordinal + 1);
+        const existingLocalId = existingByKey.get(key)?.[ordinal];
         if (existingLocalId != null) {
           localIdMap.set(sym.local_id, existingLocalId);
           counts.mapped_symbols++;
@@ -593,7 +611,6 @@ export class BlobStore {
         }
         const newLocalId = nextLocalId++;
         localIdMap.set(sym.local_id, newLocalId);
-        existingByKey.set(key, newLocalId);
         symbolsToInsert.push({ sym, newLocalId });
       }
 
@@ -665,6 +682,9 @@ export class BlobStore {
         counts.inserted_edges++;
       }
       if (layerSource === "treesitter") {
+        // The merge filled the parser rows: mark the source parse current, as
+        // a flat ingest would.
+        this.#stmt.blobStampParseVersion.run(ATLAS_PARSER_VERSION, ATLAS_PARSER_SPEC_VERSION, content_hash);
         this.#writeBlobLayerRecord({
           content_hash,
           lang,
@@ -901,6 +921,9 @@ export class BlobStore {
         "Ledger.reingestBlobWithBackend: content_hash must be SHA-256 hex",
       );
     }
+    if (!this.hasBlob(content_hash)) {
+      throw new RangeError(`Ledger.reingestBlobWithBackend: blob ${content_hash} is not ingested`);
+    }
     /** @type {{ removed_symbols: number, removed_edges: number, removed_blob: number }} */
     const counts = { removed_symbols: 0, removed_edges: 0, removed_blob: 0 };
     const txn = this.#db.transaction(() => {
@@ -967,14 +990,7 @@ export class BlobStore {
     ));
     const rowsDigest = layerRowsDigest(symbols, edges, source, lang);
 
-    this.#stmt.blobInsertIfMissing.run(
-      content_hash,
-      lang,
-      effectiveByteSize,
-      nowIso(),
-      source === "treesitter" ? ATLAS_PARSER_VERSION : toolVersion,
-      parserSpecVersion,
-    );
+    this.#stmt.blobInsertIfMissing.run(content_hash, lang, effectiveByteSize, nowIso());
 
     const layerArgs = [
       content_hash,

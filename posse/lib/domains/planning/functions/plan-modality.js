@@ -3,6 +3,7 @@ import {
   requiredWorkItemOutputs,
   requiresRepositoryExecution,
 } from "../../intake/functions/objective-contract.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 const REPO_FILE_EXTENSION_RE =
   /\.(?:c|cc|cpp|cs|css|go|h|hpp|html?|java|js|jsx|json|mjs|cjs|php|py|rb|rs|scss|sh|sql|svelte|ts|tsx|vue|xml|ya?ml)$/iu;
@@ -42,8 +43,8 @@ function normalizedTaskShape(task = {}) {
 export function plannerTaskProducesRepoOutput(task = {}) {
   const { jobType, taskMode } = normalizedTaskShape(task);
   if (jobType === "promote") return true;
-  if ((jobType === "dev" || jobType === "fix") && taskMode === "db") return true;
-  if ((jobType === "dev" || jobType === "fix") && taskMode === "code") {
+  if (DEV_ROLE_JOB_TYPES.has(jobType) && taskMode === "db") return true;
+  if (DEV_ROLE_JOB_TYPES.has(jobType) && taskMode === "code") {
     // A declared dev/fix task is repository execution even when its output is
     // documentation, configuration, or an extensionless file such as a
     // Dockerfile. The path boundary, not a source-extension allowlist, is the

@@ -5,6 +5,7 @@
 
 import { getProviderName, nextProviderSelectionCursor, selectProviderName, isProviderReady } from "./provider.js";
 import { getConfiguredImageProviders, getConfiguredImageModel, isArtifactMode } from "../../artifacts/functions/index.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 export const NO_IMAGE_PROVIDERS_AVAILABLE = "No image providers available";
 
@@ -78,7 +79,7 @@ export function shouldPreservePinnedProvider(targetJob, role, allowedProviders, 
 }
 
 export function requiresGitNoopCheck(job, payload = null) {
-  if (!(job?.job_type === "dev" || job?.job_type === "fix")) return false;
+  if (!DEV_ROLE_JOB_TYPES.has(job?.job_type)) return false;
   const taskMode = effectiveArtifactTaskMode(job, payload);
   // DB-only jobs mutate the project database, not the worktree — a zero-diff
   // COMPLETE is their normal success shape, so the git no-op guard must not

@@ -32,6 +32,7 @@ import { waitForCurrentView } from "../view-health.js";
 import { ATLAS_TOOL_ACTIONS } from "../contracts/tool-params.js";
 import { resolveTargetBranch } from "../../../../git/functions/target-branch.js";
 import { invalidateStorageCacheNativeAsync } from "../native/storage.js";
+import { ATLAS_GATEWAY_FAMILIES } from "../../../../../catalog/atlas-tools.js";
 
 /** @type {Map<string, any>} */
 const RETRIEVE_RESOURCES = new Map();
@@ -484,7 +485,7 @@ const CONDUCTOR_TOOL_VIEW_OPTIONAL_ACTIONS = new Set([
   "usage.stats",
 ]);
 
-const CONDUCTOR_TOOL_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent"]);
+const CONDUCTOR_TOOL_GATEWAY_ACTIONS = new Set(ATLAS_GATEWAY_FAMILIES);
 // NOTE: memory.feedback is deliberately absent — it writes only memory.db
 // (WAL + busy_timeout), which is lane-safe by design and tested on the reader
 // lane. This set gates LEDGER-mutating actions off the read-only lane. Every

@@ -1,4 +1,4 @@
-import { AGENT_HANDOFF_LIMITS, RESEARCHER_REPORT_BRIEF_POLICY } from "../../../../catalog/handoff.js";
+import { AGENT_HANDOFF_LIMITS, RESEARCHER_REPORT_BRIEF_POLICY, AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../../catalog/handoff.js";
 import { claimEvidenceReferences } from "./evidence-references.js";
 import { materializedEvidenceIdentity } from "./evidence-selector.js";
 
@@ -124,7 +124,7 @@ function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommen
   };
   for (const claim of report.claims || []) {
     const detail = claim[1] || {};
-    for (const lane of ["evidence", "proof", "support"]) {
+    for (const lane of AGENT_HANDOFF_CLAIM_CITATION_FIELDS) {
       for (const evidence of detail[lane] || []) add(evidence, lane);
     }
     for (const [evidence, reason] of detail.decoy || []) add(evidence, "decoy", reason);
@@ -175,7 +175,7 @@ export function renderReport(report, { expandEvidence = false, claimCode = false
     for (const claim of report.claims) {
       parts.push(`Claim: ${claim[0]}`);
       const detail = claim[1] || {};
-      for (const evidence of ["evidence", "proof", "support"]
+      for (const evidence of AGENT_HANDOFF_CLAIM_CITATION_FIELDS
         .flatMap((lane) => detail[lane] || [])) {
         parts.push(`Evidence: ${renderedEvidenceSelector(evidence)}`);
       }

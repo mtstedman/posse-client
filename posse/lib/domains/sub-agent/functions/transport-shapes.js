@@ -1,8 +1,8 @@
-import { RESEARCH_CHILD_PROFILE, SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
+import { RESEARCH_CHILD_PROFILE, SUB_AGENT_ENTRY_STATUSES, SUB_AGENT_ERROR_CODES, SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
 
 export function safeError(error) {
-  const rawCode = String(error?.code || "SUB_AGENT_CHILD_FAILED").trim();
-  const code = /^[A-Z0-9_]{3,80}$/.test(rawCode) ? rawCode : "SUB_AGENT_CHILD_FAILED";
+  const rawCode = String(error?.code || SUB_AGENT_ERROR_CODES.CHILD_FAILED).trim();
+  const code = /^[A-Z0-9_]{3,80}$/.test(rawCode) ? rawCode : SUB_AGENT_ERROR_CODES.CHILD_FAILED;
   return {
     code,
     retryable: error?.retryable === true,
@@ -115,23 +115,23 @@ export function publicEntry(entry) {
   const coverage = entry.profile === RESEARCH_CHILD_PROFILE
     ? {}
     : { coverage: entry.coverage };
-  if (entry.status === "completed") {
+  if (entry.status === SUB_AGENT_ENTRY_STATUSES.COMPLETED) {
     return {
       id: entry.id,
       handle: entry.handle,
-      status: "completed",
+      status: SUB_AGENT_ENTRY_STATUSES.COMPLETED,
       packet: entry.packet,
       ...coverage,
       usage: entry.usage,
     };
   }
-  if (["failed", "cancelled", "timed_out"].includes(entry.status)) {
+  if ([SUB_AGENT_ENTRY_STATUSES.FAILED, SUB_AGENT_ENTRY_STATUSES.CANCELLED, SUB_AGENT_ENTRY_STATUSES.TIMED_OUT].includes(entry.status)) {
     return {
       id: entry.id,
       handle: entry.handle,
       status: entry.status,
       error: entry.error,
-      ...(entry.profile === RESEARCH_CHILD_PROFILE && entry.status !== "cancelled"
+      ...(entry.profile === RESEARCH_CHILD_PROFILE && entry.status !== SUB_AGENT_ENTRY_STATUSES.CANCELLED
         ? { retry_guidance: "An identical dispatch replays this settled result. If research is still needed and child budget remains, narrow or reword the question; otherwise continue with available evidence or report the gap." }
         : {}),
       ...coverage,

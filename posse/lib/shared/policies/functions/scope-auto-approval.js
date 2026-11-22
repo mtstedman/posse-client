@@ -1,3 +1,4 @@
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 // Deterministic auto-approval policy for mechanical scope-expansion requests.
 //
 // request_scope parks the requesting job behind a human gate. For path
@@ -72,7 +73,7 @@ const COLOCATED_TEST_FILENAME_RE = /(?:^|\/)(?:conftest\.py|[^/]+(?:\.test|\.spe
 const NON_ROUTINE_TEST_DIRECTORY_RE = /(?:^|\/)(?:\.github|\.gitea|\.forgejo|\.gitlab|\.circleci|\.buildkite|\.azure-pipelines|\.woodpecker|\.?ci|deploy|deploys|deployment|deployments)\//i;
 const EXECUTABLE_SCRIPT_EXTENSION_RE = /\.(?:sh|bash|zsh|ksh|csh|tcsh|fish|command|ps1|psm1|bat|cmd|vbs|exe)$/i;
 
-const TEST_ELIGIBLE_JOB_TYPES = new Set(["dev", "fix"]);
+const TEST_ELIGIBLE_JOB_TYPES = DEV_ROLE_JOB_TYPES;
 
 function normalizeScopePath(value) {
   return String(value || "").replace(/\\/g, "/").trim().replace(/^\.\//, "");

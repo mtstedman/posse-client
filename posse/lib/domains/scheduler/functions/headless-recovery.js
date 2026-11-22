@@ -18,9 +18,9 @@ import {
   humanGateStateIsActive,
   postCompletionGateKindForPayload,
 } from "../../../catalog/human-input.js";
+import { PARKED_JOB_STATUSES } from "../../../catalog/job.js";
 
-// Parked states a timed-out gate's original job is failed from.
-const HEADLESS_FAILABLE_ORIGINAL_STATUSES = Object.freeze(["waiting_on_review", "waiting_on_human", "blocked"]);
+// A timed-out gate fails its original job only while that job is parked.
 
 /**
  * Headless human_input timeout recovery.
@@ -150,7 +150,7 @@ export function recoverHeadlessHumanTimeouts({
         try {
           humanPayload = parseJobPayload(hj);
           const origJob = humanPayload.original_job_id ? getJob(humanPayload.original_job_id) : null;
-          if (origJob && HEADLESS_FAILABLE_ORIGINAL_STATUSES.includes(origJob.status)) parkedOriginal = origJob;
+          if (origJob && PARKED_JOB_STATUSES.includes(origJob.status)) parkedOriginal = origJob;
         } catch (err) {
           log(`  -> headless recovery lookup failed for human_input #${hj.id}: ${err?.message || String(err)}`, "red");
         }

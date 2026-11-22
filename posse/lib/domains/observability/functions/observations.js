@@ -1,6 +1,6 @@
 import { logDescriptorMatchesPath } from "../../../shared/telemetry/functions/log-file-identity.js";
 import { readNotFoundProbe } from "./read-not-found.js";
-import { READ_NOT_FOUND_OBSERVATION } from "../../../catalog/observation.js";
+import { READ_NOT_FOUND_OBSERVATION, isToolCallObservationType, TOOL_SYSTEM_FEED_OBSERVATION_TYPES } from "../../../catalog/observation.js";
 import { isDiagnosticObservation } from "../../../catalog/diagnostic-logging.js";
 import { advancedLoggingEnabled } from "../../../shared/telemetry/functions/diagnostic-logging.js";
 import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
@@ -1792,12 +1792,34 @@ export function getRecentToolInvocations({ limit = 200, includeUnscoped = true, 
   `).all(candidateLimit);
   return enrichToolInvocationRows(
     db,
+    // Tool history lists agent calls only; nudges and harness notices are
+    // the system feed's (getRecentToolSystemNotices).
     _collapseToolInvocationRows(mergeObservationRows([...fileRows, ...dbRows], "desc", candidateLimit)
-      .filter((row) => !isInternalBackgroundObservationType(row.observation_type)
-        && !isToolSurfaceRecordObservationType(row.observation_type)))
+      .filter((row) => isToolCallObservationType(row.observation_type)))
       .filter((row) => !_isQuietAgentHandoffRow(row)),
     { includeUnscoped },
   ).slice(0, cappedLimit);
+}
+
+// The system feed: harness notices about this run's tool calls (model-visible
+// notices, budget advisories, argument repairs, transport errors) and the
+// agent's pickup of operator nudges, newest first. Tool history leaves them out.
+export function getRecentToolSystemNotices({ limit = 20 } = {}) {
+  const db = getDb();
+  const cappedLimit = Math.max(0, Number(limit) || 0);
+  const candidateLimit = Math.max(200, cappedLimit * 10);
+  const types = [...TOOL_SYSTEM_FEED_OBSERVATION_TYPES];
+  const fileRows = readObservationFileRows({ typePrefix: "tool.", limit: candidateLimit, order: "desc" })
+    .filter((row) => TOOL_SYSTEM_FEED_OBSERVATION_TYPES.has(String(row.observation_type || "")));
+  const dbRows = db.prepare(`
+    SELECT o.*
+    FROM job_observations o
+    WHERE o.observation_type IN (${types.map(() => "?").join(", ")})
+      AND o.created_at >= ?
+    ORDER BY o.id DESC
+    LIMIT ?
+  `).all(...types, getRunTelemetryStartedAt(), candidateLimit);
+  return mergeObservationRows([...fileRows, ...dbRows], "desc", candidateLimit).slice(0, cappedLimit);
 }
 
 export function getToolInvocationCountsByJob({ limit = 50 } = {}) {
@@ -1822,10 +1844,7 @@ export function getToolInvocationCountsByJob({ limit = 50 } = {}) {
     .filter((row) => row.job_id != null
       && row.observation_type !== "tool.chain_read"
       && !String(row.observation_type || "").endsWith(".started")
-      && !HARNESS_SYSTEM_TYPE_SUFFIXES.some((suffix) => String(row.observation_type || "").endsWith(suffix))
-      && !isInternalBackgroundObservationType(row.observation_type)
-      && !isToolSurfaceRecordObservationType(row.observation_type)
-      && String(row.observation_type || "").startsWith("tool."));
+      && isToolCallObservationType(row.observation_type));
 
   const groups = new Map();
   for (const row of rows) {

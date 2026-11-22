@@ -6,6 +6,7 @@ import { isLeaseValid } from "../../queue/functions/attempts.js";
 import { configuredVerificationPlan } from "../../worker/functions/helpers/configured-verification.js";
 import { TEST_EXECUTION_RECEIPT_KIND, TEST_EXECUTION_RECEIPT_SCHEMA_VERSION } from "../../../catalog/verification.js";
 import { currentCommit } from "../../verification/functions/receipt-fingerprint.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 // PASS wrap-up keeps the implementation lease. No second worker, whole-WI
 // barrier, Atlas warm, verifier process, or assessor call is needed when the
@@ -14,7 +15,7 @@ import { currentCommit } from "../../verification/functions/receipt-fingerprint.
 export async function prepareFinalReviewWrapUp({ job, cwd, committedHash, commitBaseHash,
   filesCommitted, filesCommittedUnknown, verifiedNoChange, leaseToken, projectDir, preAssessAlreadyVerified }) {
   if (!cwd || filesCommittedUnknown || (!committedHash && !verifiedNoChange)
-    || !["dev", "fix"].includes(job.job_type) || !isLeaseValid(job.id, leaseToken)
+    || !DEV_ROLE_JOB_TYPES.has(job.job_type) || !isLeaseValid(job.id, leaseToken)
     || configuredVerificationPlan(projectDir, { preAssessAlreadyVerified }).enabled) return null;
   const payload = parseJobPayload(job);
   if (payload.task_mode && payload.task_mode !== "code") return null;

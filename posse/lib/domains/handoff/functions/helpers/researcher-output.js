@@ -1,5 +1,5 @@
 import { normalizeLineRange as normalizeCitationLines } from "./citation-range.js";
-import { AGENT_HANDOFF_PROFILES } from "../../../../catalog/handoff.js";
+import { AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../../catalog/handoff.js";
 // lib/domains/handoff/functions/helpers/researcher-output.js
 //
 // Researcher structured output parsing helpers.
@@ -66,7 +66,7 @@ function researcherEvidenceRefs(report = {}) {
   });
   for (const claim of Array.isArray(report.claims) ? report.claims : []) {
     const detail = claim?.[1] || {};
-    for (const item of ["evidence", "proof", "support"].flatMap((lane) => (
+    for (const item of AGENT_HANDOFF_CLAIM_CITATION_FIELDS.flatMap((lane) => (
       Array.isArray(detail[lane]) ? detail[lane] : []
     ))) {
       const grounded = ["Tool Result", "Full Tool Call"].includes(item?.provenance?.kind);

@@ -15,9 +15,10 @@ import { getHumanGate, reviseOpenHumanGateGeneration } from "../../queue/functio
 import { getJob, updateJobPayload } from "../../queue/functions/index.js";
 import { jobHasLiveLeaseAt } from "../../queue/functions/lease-state.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
+import { AWAITING_ANSWER_GATE_JOB_STATUSES } from "../../../catalog/job.js";
 
 // A gate in these states is not being presented or answered.
-const AMENDABLE_GATE_JOB_STATUSES = new Set(["queued", "waiting_on_human"]);
+const AMENDABLE_GATE_JOB_STATUSES = new Set(AWAITING_ANSWER_GATE_JOB_STATUSES);
 
 function gateQuestionId(gateJobId, index) {
   return `gate:${gateJobId}:${index}`;

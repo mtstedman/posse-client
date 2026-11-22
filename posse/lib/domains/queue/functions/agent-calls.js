@@ -20,6 +20,7 @@ import { AGENT_CALL_CHILD_KINDS, isAgentCallChildKind } from "../../../catalog/a
 import { providerTurnLimitMode } from "../../../catalog/provider.js";
 import { pricingBasis } from "../../billing/functions/pricing.js";
 import { persistToolGroupsForJobs } from "../../conversation/functions/tool-group-store.js";
+import { RESEARCH_LOOKUP_OBSERVATION_TYPES, RESEARCH_LOOKUP_OBSERVATION_TYPES_SQL, TOOL_CALL_OBSERVATION_SQL } from "../../../catalog/observation.js";
 
 // Provider-native web tool uses are replayed after the agent process returns,
 // so they can land a beat after finished_at while still belonging to the call.
@@ -36,11 +37,8 @@ const TOOL_LOG_FINISH_BOUNDARY_GRACE_SECONDS = 0.25;
 const AGENT_CALL_TOOL_OBSERVATION_COUNT_SQL = `(
   SELECT COUNT(*) FROM job_observations o
   WHERE o.job_id = ac.job_id
-    AND o.observation_type LIKE 'tool.%'
+    AND ${TOOL_CALL_OBSERVATION_SQL("o.observation_type")}
     AND o.observation_type != 'tool.chain_read'
-    AND o.observation_type != 'tool.response_transform'
-    AND o.observation_type != 'tool.surface.issued'
-    AND o.observation_type NOT LIKE '%.started'
     AND (
       COALESCE(
         json_extract(o.detail_json, '$.agent_call_id'),
@@ -61,18 +59,13 @@ const AGENT_CALL_TOOL_OBSERVATION_COUNT_SQL = `(
       )
     )
 )`;
+const RESEARCH_LOOKUP_TYPES = new Set(RESEARCH_LOOKUP_OBSERVATION_TYPES);
 const RESEARCH_GUARDRAIL_OBSERVATION_TYPES = new Set([
   "research.evidence",
   "research.synthesis_required",
   "agent_handoff.committed",
   "hash_ref.fetch_batch",
-  "tool.atlas",
-  "tool.chain_verdict",
-  "tool.list",
-  "tool.search",
-  "tool.git_history",
-  "tool.inspect",
-  "tool.hash",
+  ...RESEARCH_LOOKUP_OBSERVATION_TYPES,
 ]);
 
 function observationDetail(row) {
@@ -127,7 +120,7 @@ export function summarizeResearchGuardrailObservations(rows = []) {
       if (refCount > 1) stats.multi_fetch_batches += 1;
       stats.fetched_refs += refCount;
     }
-    if (["tool.atlas", "tool.chain_verdict", "tool.list", "tool.search", "tool.git_history", "tool.inspect", "tool.hash"].includes(type)) {
+    if (RESEARCH_LOOKUP_TYPES.has(type)) {
       stats.lookup_calls += 1;
     }
     if (type === "tool.atlas") {
@@ -504,10 +497,7 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
           THEN COALESCE(json_extract(detail_json, '$.ref_count'), 0) ELSE 0 END
         ) AS fetched_refs,
         SUM(CASE
-          WHEN observation_type IN (
-            'tool.atlas', 'tool.chain_verdict', 'tool.list', 'tool.search',
-            'tool.git_history', 'tool.inspect', 'tool.hash'
-          )
+          WHEN observation_type IN (${RESEARCH_LOOKUP_OBSERVATION_TYPES_SQL})
           THEN 1 ELSE 0 END
         ) AS lookup_calls,
         SUM(CASE
@@ -521,8 +511,7 @@ export function getResearcherGuardrailStats({ sinceIso = null, limit = 50, inclu
       FROM job_observations
       WHERE observation_type IN (
         'research.evidence', 'research.synthesis_required', 'hash_ref.fetch_batch',
-        'tool.atlas', 'tool.chain_verdict', 'tool.list', 'tool.search',
-        'tool.git_history', 'tool.inspect', 'tool.hash'
+        ${RESEARCH_LOOKUP_OBSERVATION_TYPES_SQL}
       )
       ${sinceIso ? "AND created_at >= ?" : ""}
       GROUP BY job_id
@@ -921,9 +910,8 @@ export function listWorkItemsWithCallRollups({ limit = 200 } = {}) {
       SELECT work_item_id, COUNT(*) AS tool_calls
       FROM job_observations
       WHERE work_item_id IS NOT NULL
-        AND observation_type LIKE 'tool.%'
+        AND ${TOOL_CALL_OBSERVATION_SQL()}
         AND observation_type != 'tool.chain_read'
-        AND observation_type != 'tool.response_transform'
       GROUP BY work_item_id
     ) obs ON obs.work_item_id = wi.id
     ORDER BY wi.id DESC
@@ -974,9 +962,8 @@ export function getToolInvocationsForAgentCall(agentCallId) {
     SELECT id, observation_type, summary, detail_json, created_at
     FROM job_observations
     WHERE job_id = ?
-      AND observation_type LIKE 'tool.%'
+      AND ${TOOL_CALL_OBSERVATION_SQL()}
       AND observation_type != 'tool.chain_read'
-      AND observation_type != 'tool.response_transform'
       AND (
         COALESCE(
           json_extract(detail_json, '$.agent_call_id'),

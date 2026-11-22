@@ -1,3 +1,5 @@
+import { NATIVE_API_PROVIDERS } from "./provider.js";
+
 // Canonical closed sets and policy tables for the cooperative Team session.
 //
 // Remote arbitrates exclusive write claims by literal path comparison and
@@ -275,4 +277,5 @@ export const TEAM_GRANT_GIT_EXEC_BUILTIN_COMMANDS = Object.freeze([
 // and Codex adapters can expose native shell/patch/file writes that no grant
 // check can follow, so approval mode refuses them for every role: the check
 // is about what the adapter *can* do, not what the role is expected to do.
-export const TEAM_MANAGED_PROVIDERS = Object.freeze(["anthropic", "openai", "grok"]);
+// Those are exactly the native API adapters: Posse runs their tool loop.
+export const TEAM_MANAGED_PROVIDERS = NATIVE_API_PROVIDERS;

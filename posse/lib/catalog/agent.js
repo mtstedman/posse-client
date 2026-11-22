@@ -1,3 +1,5 @@
+import { REASONING_EFFORTS } from "./model.js";
+
 export const AGENT_DEFINITION_SCHEMA = "bossy.agent.v1";
 export const AGENT_TURN_PROTOCOL = "bossy.agent_turn.v1";
 // Caller-owned chats share provider dispatch without inheriting agent tools.
@@ -34,4 +36,4 @@ export const AGENT_DEFAULTS = Object.freeze({
   limits: Object.freeze({ turns: 20_000, calls: 10_000, spend_usd: 2, wall_seconds: 1800 }),
 });
 
-export const AGENT_REASONING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh"]);
+export const AGENT_REASONING_EFFORTS = REASONING_EFFORTS;

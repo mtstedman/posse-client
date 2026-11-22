@@ -5,6 +5,7 @@ import { TERMINAL_JOB_STATUSES } from "../../queue/functions/common.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { normPath } from "../../../shared/scope/functions/path.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 function payloadScopePaths(job) {
   const payload = parseJobPayload(job);
@@ -16,7 +17,7 @@ function payloadScopePaths(job) {
 // `focusJobId` limits serialization to the pairs that include that job, which
 // is compared on `focusPaths` (its newly added paths) when they are given.
 export function serializePlanScopeOverlaps(jobs, { focusJobId = null, focusPaths = null } = {}) {
-  const writers = jobs.filter((job) => ["dev", "fix"].includes(job.job_type));
+  const writers = jobs.filter((job) => DEV_ROLE_JOB_TYPES.has(job.job_type));
   const graph = new Map(jobs.map((job) => [job.id, getDependencies(job.id)]));
   const reaches = (from, to, hardOnly = false, seen = new Set()) => {
     if (from === to) return true;
@@ -67,7 +68,7 @@ export function serializePlanScopeOverlaps(jobs, { focusJobId = null, focusPaths
 export function serializeWidenedScopeOverlaps(job) {
   const db = getDb();
   const fresh = job?.id ? db.prepare("SELECT * FROM jobs WHERE id = ?").get(Number(job.id)) : null;
-  if (!fresh || !["dev", "fix"].includes(fresh.job_type)) return [];
+  if (!fresh || !DEV_ROLE_JOB_TYPES.has(fresh.job_type)) return [];
   const parent = fresh.parent_job_id
     ? db.prepare("SELECT * FROM jobs WHERE id = ?").get(Number(fresh.parent_job_id))
     : null;

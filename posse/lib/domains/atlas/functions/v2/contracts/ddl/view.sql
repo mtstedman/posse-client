@@ -77,6 +77,9 @@ CREATE INDEX IF NOT EXISTS idx_symbols_name           ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_lower_name_path ON symbols(LOWER(name), repo_rel_path);
 CREATE INDEX IF NOT EXISTS idx_symbols_qualified_name ON symbols(qualified_name)
   WHERE qualified_name IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_symbols_lower_qualified_name_path
+  ON symbols(LOWER(qualified_name), repo_rel_path)
+  WHERE qualified_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_symbols_path           ON symbols(repo_rel_path, range_start, global_id);
 CREATE INDEX IF NOT EXISTS idx_symbols_kind           ON symbols(kind);
 CREATE INDEX IF NOT EXISTS idx_symbols_lang           ON symbols(lang);

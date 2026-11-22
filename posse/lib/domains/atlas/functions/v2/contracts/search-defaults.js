@@ -24,10 +24,17 @@ export function isDescriptiveSearchQuery(query) {
   return tokens.length >= 2 && tokens.some((token) => PLAIN_WORD.test(token));
 }
 
+// The lexical and graph backends are both seeded from the query's words, so in
+// an even fusion a described query is outvoted two to one by name overlap and
+// the nearest embeddings never reach the result. Two votes per vector hit let
+// them through; a native binary that predates the argument ignores it.
+export const DESCRIPTIVE_SEARCH_VECTOR_EVIDENCE_WEIGHT = 2;
+
 /**
- * Turn the embedding backend on for a descriptive symbol.search query. An
- * explicit `semantic` value, and a search explicitly scoped to names, are
- * left as the caller wrote them.
+ * Turn the embedding backend on for a descriptive symbol.search query, with
+ * the vector weight that lets its hits surface. An explicit `semantic` value,
+ * and a search explicitly scoped to names, are left as the caller wrote them;
+ * so is an explicit weight.
  *
  * @param {Record<string, any>} args
  * @returns {Record<string, any>}
@@ -36,5 +43,10 @@ export function withDescriptiveSearchSemantic(args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) return args;
   if (args.semantic != null) return args;
   if (String(args.scope || "").trim().toLowerCase() === "name") return args;
-  return isDescriptiveSearchQuery(args.query) ? { ...args, semantic: true } : args;
+  if (!isDescriptiveSearchQuery(args.query)) return args;
+  return {
+    ...args,
+    semantic: true,
+    ...(args.vectorEvidenceWeight == null ? { vectorEvidenceWeight: DESCRIPTIVE_SEARCH_VECTOR_EVIDENCE_WEIGHT } : {}),
+  };
 }

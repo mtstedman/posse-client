@@ -34,6 +34,81 @@ export function isInternalBackgroundObservationType(value) {
   return INTERNAL_BACKGROUND_OBSERVATION_TYPE_SET.has(String(value || ""));
 }
 
+// ── tool.* rows that are not agent tool calls ───────────────────────────────
+// Every tool.* observation is one of four kinds:
+//   call     a tool call the agent issued (its .started twin included)
+//   message  the live operator channel: the operator's nudges the agent pulls
+//            or acknowledges, and the progress updates it posts
+//   system   harness rows about calls: model-visible notices appended to a
+//            result, budget advisories, argument repairs, transport errors,
+//            and tool-surface/response bookkeeping
+//   harness  background prefetch and autofeedback the agent never issued
+// Tool history and tool counts show calls only. Message and system notices
+// belong in the system feed; bookkeeping records are shown nowhere.
+// @catalog-sync id=posse.tool_observation.kinds role=authority relation=strict compare=names extract=strings projection_source=posse
+// @linked_repos posse-bossy:catalog/tool_observations.go
+export const TOOL_MESSAGE_OBSERVATION_TYPES = readonlySet([
+  "tool.agent_feedback",
+  "tool.get_operator_feedback",
+  "tool.ack_operator_feedback",
+]);
+export const TOOL_SYSTEM_NOTICE_OBSERVATION_TYPES = readonlySet([
+  "tool.response_control",
+  "tool.budget_advisory",
+  "tool.dispatch_agent.repaired",
+  "tool.surface.list_failed",
+  "tool.sub_agent.error",
+  "tool.sub_agent_next_input.error",
+  "tool.dispatch_agent.error",
+]);
+export const TOOL_SYSTEM_RECORD_OBSERVATION_TYPES = readonlySet([
+  "tool.response_transform",
+  "tool.surface.issued",
+]);
+export const TOOL_HARNESS_OBSERVATION_SUFFIXES = Object.freeze([".prefetch", ".autofeedback"]);
+// @catalog-sync end
+// A read of a missing path is an ordinary call outcome, not a failure.
+export const TOOL_BENIGN_OBSERVATION_TYPES = readonlySet(["tool.read.not_found"]);
+const TOOL_STARTED_SUFFIX = ".started";
+
+/**
+ * @param {unknown} value an observation_type
+ * @returns {"call" | "message" | "system" | "harness" | null} null outside tool.*
+ */
+export function toolObservationKind(value) {
+  const text = String(value || "");
+  const type = text.endsWith(TOOL_STARTED_SUFFIX) ? text.slice(0, -TOOL_STARTED_SUFFIX.length) : text;
+  if (!type.startsWith("tool.")) return null;
+  if (TOOL_MESSAGE_OBSERVATION_TYPES.has(type)) return "message";
+  if (TOOL_SYSTEM_NOTICE_OBSERVATION_TYPES.has(type) || TOOL_SYSTEM_RECORD_OBSERVATION_TYPES.has(type)
+    || isInternalBackgroundObservationType(type) || isInternalBackgroundObservationType(text)) return "system";
+  if (TOOL_HARNESS_OBSERVATION_SUFFIXES.some((suffix) => type.endsWith(suffix))) return "harness";
+  return "call";
+}
+
+export const isToolCallObservationType = (value) => toolObservationKind(value) === "call";
+
+// What the system feed shows: harness notices and the agent's pickup of
+// operator nudges. The agent's own progress posts are agent messages, and
+// bookkeeping records are shown nowhere.
+export const TOOL_SYSTEM_FEED_OBSERVATION_TYPES = readonlySet([
+  ...TOOL_SYSTEM_NOTICE_OBSERVATION_TYPES,
+  "tool.get_operator_feedback",
+  "tool.ack_operator_feedback",
+]);
+
+// SQL guard for tool counts, matching toolObservationKind(...) === "call".
+const quoted = (values) => [...values].map((value) => `'${value}'`).join(", ");
+export const TOOL_CALL_OBSERVATION_SQL = (column = "observation_type") => `(${column} LIKE 'tool.%'
+    AND ${column} NOT LIKE '%.started'
+    AND ${column} NOT IN (${quoted([
+      ...TOOL_MESSAGE_OBSERVATION_TYPES,
+      ...TOOL_SYSTEM_NOTICE_OBSERVATION_TYPES,
+      ...TOOL_SYSTEM_RECORD_OBSERVATION_TYPES,
+      ...INTERNAL_BACKGROUND_OBSERVATION_TYPES,
+    ])})
+    ${TOOL_HARNESS_OBSERVATION_SUFFIXES.map((suffix) => `AND ${column} NOT LIKE '%${suffix}'`).join("\n    ")})`;
+
 // Observation types that contribute to the local research exploration ledger.
 export const RESEARCH_EXPLORATION_OBSERVATION_TYPES = Object.freeze([
   "tool.atlas",
@@ -45,6 +120,29 @@ export const RESEARCH_EXPLORATION_OBSERVATION_TYPES = Object.freeze([
   "tool.inspect",
   "tool.hash",
 ]);
+// Native tools a research call explores with; each records one of the tool.*
+// exploration observations above. The synthesis gate also holds chain_read.
+export const RESEARCH_NATIVE_EXPLORATION_TOOLS = readonlySet([
+  "read_file",
+  "chain_verdict",
+  "list_files",
+  "search_files",
+  "git_history",
+  "inspect_file",
+  "hash_file",
+]);
+export const RESEARCH_NATIVE_SYNTHESIS_GATED_TOOLS = readonlySet([
+  "read_file",
+  "chain_read",
+  ...[...RESEARCH_NATIVE_EXPLORATION_TOOLS].filter((tool) => tool !== "read_file"),
+]);
+
+// Lookups the research guardrail diagnostics count per call: exploration
+// without plain file reads.
+export const RESEARCH_LOOKUP_OBSERVATION_TYPES = Object.freeze(
+  RESEARCH_EXPLORATION_OBSERVATION_TYPES.filter((type) => type !== "tool.read"),
+);
+export const RESEARCH_LOOKUP_OBSERVATION_TYPES_SQL = RESEARCH_LOOKUP_OBSERVATION_TYPES.map((type) => `'${type}'`).join(", ");
 
 export const RESEARCH_ATTEMPT_SCOPED_OBSERVATION_TYPES = readonlySet([
   "research.source_selection",

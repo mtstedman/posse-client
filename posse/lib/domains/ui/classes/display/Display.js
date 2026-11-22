@@ -8,6 +8,7 @@
 // Uses the alternate screen buffer so the TUI never pollutes scrollback.
 // Supports raw stdin keypress input for questions, inject, kill commands.
 
+import { formatToolSystemNotice, toolSystemNoticeKey } from "../../functions/display/tool-system-notice.js";
 import readline from "readline";
 import { DisplayInputController } from "./input-controller.js";
 import { DisplaySessionPaneController } from "./session-pane-controller.js";
@@ -633,6 +634,24 @@ export class Display {
     }
     this._appendEvent(text);
     this.requestRender({ reason });
+  }
+
+  // System-feed rows from the tool observation stream (see
+  // RunDisplaySnapshotController). Each is shown once, oldest first, through the
+  // normal lane routing; the burst bypasses the per-second event cap so a
+  // backlog of advisories is not dropped.
+  acceptToolSystemNotices(rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return;
+    if (!this._seenToolSystemNotices) this._seenToolSystemNotices = new Set();
+    const seen = this._seenToolSystemNotices;
+    const fresh = rows.filter((row) => !seen.has(toolSystemNoticeKey(row))).reverse();
+    if (fresh.length === 0) return;
+    for (const row of fresh) {
+      seen.add(toolSystemNoticeKey(row));
+      this._appendEvent(formatToolSystemNotice(row));
+    }
+    while (seen.size > 1000) seen.delete(seen.values().next().value);
+    this.requestRender({ reason: "event" });
   }
 
   _shouldSuppressEventLogLine(text) {

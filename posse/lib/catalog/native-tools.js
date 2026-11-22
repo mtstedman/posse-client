@@ -1,5 +1,5 @@
 import { projectRuntimeHandoffMetadata } from "./handoff-schema.js";
-import { PLANNER_DISPATCH_SETTINGS, RESEARCH_AGENT_TYPES, RESEARCH_CHILD_REQUEST_MODEL_TIERS } from "./planner-dispatch.js";
+import { PLANNER_DISPATCH_SETTINGS, PLANNER_RESEARCH_EFFORT_VALUES, RESEARCH_AGENT_TYPES, RESEARCH_CHILD_REQUEST_MODEL_TIERS } from "./planner-dispatch.js";
 import { SETTING_KEYS } from "./settings.js";
 import { PROJECT_DB_TYPES } from "./project-db.js";
 // Native deterministic-MCP tool schema definitions (pure data).
@@ -23,7 +23,11 @@ import {
   AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
   AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES,
   AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY,
+  agentHandoffProfileOutcomes,
 } from "./handoff.js";
+import { FINAL_REVIEW_CHECKS, FINAL_REVIEW_VERDICTS } from "./final-review.js";
+import { JOB_ASSESSOR_CONFIDENCE, PLANNER_ALLOWED_JOB_TYPES } from "./job.js";
+import { FEEDBACK_PHASES, FEEDBACK_STATUSES } from "./work-item-interactions.js";
 import { SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "./sub-agent.js";
 import { ARTIFACT_TASK_MODE_VALUES, SPRITE_SHEET_FIT_MODES, SPRITE_SHEET_LIMITS, TASK_MODE_VALUES } from "./artifact.js";
 import {
@@ -706,7 +710,7 @@ export const TOOL_AGENT_HANDOFF = {
       },
       confidence: {
         type: "string",
-        enum: ["low", "medium", "high"],
+        enum: [...JOB_ASSESSOR_CONFIDENCE],
         description:
           "Assessor-only confidence in the terminal verdict. Required for assessor.verdict.v1 and invalid for every other profile.",
       },
@@ -1165,7 +1169,7 @@ function semanticRoleTool({
         ...(confidence ? {
           confidence: {
             type: "string",
-            enum: ["low", "medium", "high"],
+            enum: [...JOB_ASSESSOR_CONFIDENCE],
             description: "Required confidence in the assessor's terminal verdict.",
           },
         } : {}),
@@ -1199,7 +1203,7 @@ const PLANNER_COMPACT_TASK_V3 = {
       description:
         "IDs from top-level shared_contracts. Use only for new cross-task symbols that cannot be discovered in existing repository code.",
     },
-    role: { type: "string", enum: ["dev", "artificer", "human_input", "promote"] },
+    role: { type: "string", enum: [...PLANNER_ALLOWED_JOB_TYPES] },
     intent: { type: "string", minLength: 1, maxLength: 1000 },
     summary: {
       type: "string",
@@ -1363,7 +1367,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
     "Finish research with the active profile and target. Staged report claims remain assessment-grade and evidence-backed, while an unsupported submitted claim moves into a clearly marked summary note with no retry. Pipeline claims are advisory and may omit evidence; invalid pipeline selectors are dropped so the planner can inspect the claim itself. Preserve exact existing verification commands in research.verification_targets. Use outcome input_required when an unresolved choice would materially change security, authentication, data handling, or user-facing semantics and leave that choice to the human. The receipt ends generation.",
   profile: AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE,
   profiles: [AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT],
-  outcomes: ["success", "gap", "input_required", "complete"],
+  outcomes: agentHandoffProfileOutcomes(AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT),
   handoff: exactHandoff({
     oneOf: [exactTarget("pipeline", "$pipeline"), exactTarget("result", "$result")],
   }, V2_RESEARCHER_REPORT),
@@ -1454,7 +1458,7 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR = semanticRoleTool({
     "A fail verdict must include at least one claim with proof so automatic repair starts only from a supported assertion. " +
     "Submit the canonical claim objects and their hash-ref proof selectors, plus the verdict fields present in the schema. The receipt ends provider generation.",
   profile: AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT,
-  outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
+  outcomes: agentHandoffProfileOutcomes(AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT),
   confidence: true,
   handoff: {
     type: "object",
@@ -1491,7 +1495,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
       },
       outcome: {
         type: "string",
-        enum: ["success", "gap", "input_required", "complete"],
+        enum: agentHandoffProfileOutcomes(AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT),
       },
       summary: {
         type: "string",
@@ -1701,7 +1705,7 @@ export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   description:
     "Finish citation synthesis with one parent report containing supported findings in named claim objects and optional summaries. Before the first handoff, narrow every evidence selector and target a sum of 30 or fewer selected lines. Submit the citation report fields present in the schema. The receipt ends provider generation.",
   profile: AGENT_HANDOFF_PROFILES.CITATION_SYNTHESIS,
-  outcomes: ["complete", "partial", "failed"],
+  outcomes: agentHandoffProfileOutcomes(AGENT_HANDOFF_PROFILES.CITATION_SYNTHESIS),
   handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({}, ["summary"], {
     summaryMaxLength: 500,
     claims: CITATION_CLAIMS,
@@ -1717,7 +1721,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCH_CHILD = {
   parameters: {
     type: "object",
     properties: {
-      outcome: { type: "string", enum: ["complete", "partial", "failed"] },
+      outcome: { type: "string", enum: agentHandoffProfileOutcomes(AGENT_HANDOFF_PROFILES.RESEARCH_INVESTIGATION) },
       report: exactReport({}, ["summary"], {
         summaryMaxLength: 2000,
         claims: {
@@ -1756,11 +1760,11 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
     properties: {
       verdict: {
         type: "string",
-        enum: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
+        enum: agentHandoffProfileOutcomes(AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT),
       },
       confidence: {
         type: "string",
-        enum: ["low", "medium", "high"],
+        enum: [...JOB_ASSESSOR_CONFIDENCE],
         description: "Required confidence in the terminal verdict.",
       },
       proof: {
@@ -2030,7 +2034,7 @@ export const TOOL_DISPATCH_AGENT = {
         properties: {
           timeout_ms: { type: "integer", minimum: 5000 },
           max_turns: { type: "integer", minimum: 1, maximum: 64 },
-          reasoning_effort: { type: "string", enum: ["low", "medium", "high", "xhigh"] },
+          reasoning_effort: { type: "string", enum: [...PLANNER_RESEARCH_EFFORT_VALUES] },
           model_tier: {
             type: "string",
             enum: [...RESEARCH_CHILD_REQUEST_MODEL_TIERS],
@@ -2047,7 +2051,7 @@ export const TOOL_DISPATCH_AGENT = {
 
 export const TOOL_DISPATCH_AGENT_PLANNER = {
   ...TOOL_DISPATCH_AGENT,
-  description: "Dispatch one focused researcher or a batch of independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question; code requests may add bounded repository anchors. Code requests whose anchors overlap run as one child: the surviving request lists merged_request_ids, and each absorbed request returns a result row with status merged and merged_into naming the survivor whose result answers it. For bulk external data, ask a web child to nominate the raw source file; findings, source snapshots, and reports return as durable refs that tasks cite directly. Use a concise question and at most eight starting anchors. The administrator bounds child count, effort, turns, and duration.",
+  description: "Dispatch one focused researcher or a batch of independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question; code requests may add bounded repository anchors. Code requests whose anchors overlap run as one child: the surviving request lists merged_request_ids, and each absorbed request returns a result row with status merged and merged_into naming the survivor whose result answers it. For bulk external data, ask a web child to nominate the raw source file; findings, source snapshots, and reports return as durable refs that tasks cite directly. Children have already read the code behind their findings: plan from their reports and cite their evidence as given, and do not read that code again; read source yourself only for something a child reported as not checked or that no child covered. Use a concise question and at most eight starting anchors. The administrator bounds child count, effort, turns, and duration.",
   parameters: {
     type: "object",
     properties: {
@@ -2478,12 +2482,12 @@ export const TOOL_AGENT_FEEDBACK = {
     properties: {
       phase: {
         type: "string",
-        enum: ["reading", "planning", "editing", "testing", "verifying", "blocked", "finalizing", "handoff"],
+        enum: [...FEEDBACK_PHASES],
         description: "Current operational phase.",
       },
       status: {
         type: "string",
-        enum: ["running", "blocked", "waiting", "verifying", "done"],
+        enum: [...FEEDBACK_STATUSES],
         description: "Current visible status. Defaults to running when omitted.",
       },
       summary: {
@@ -2590,7 +2594,7 @@ export const TOOL_RUN_SCOPED_CHECKS = {
     properties: {
       checks: {
         type: "array",
-        items: { type: "string", enum: ["lint", "typecheck"] },
+        items: { type: "string", enum: [...FINAL_REVIEW_CHECKS] },
         description: "Checks to run. Default: ['lint'].",
       },
       scope: {
@@ -2805,7 +2809,7 @@ export const TOOL_FINAL_REVIEW = {
       },
       verdict: {
         type: "string",
-        enum: ["pass", "fail", "needs_review", "blocked"],
+        enum: [...FINAL_REVIEW_VERDICTS],
         description: "Reviewer only. pass, fail with findings, needs_review when the contract itself cannot be judged, or blocked when the work cannot be completed or verified as specified: name the blocker in findings[].criterion and the operator decides at once.",
       },
       findings: {

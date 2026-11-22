@@ -1,10 +1,10 @@
 import crypto from "node:crypto";
 import path from "node:path";
 
-import { WORK_ITEM_BOUNDS, WORK_ITEM_FEED_EVENT_PROTOCOL } from "../../../catalog/bridge.js";
+import { WORK_ITEM_BOUNDS, WORK_ITEM_FEED_EVENT_PROTOCOL, WORK_ITEM_FEED_KINDS } from "../../../catalog/bridge.js";
 import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { AGENT_ACTIVITY_PROTOCOL } from "../../../catalog/event.js";
-import { NUDGE_STATES, QUESTION_STATES } from "../../../catalog/work-item-interactions.js";
+import { FEEDBACK_PHASES, FEEDBACK_STATUSES, NUDGE_STATES, QUESTION_STATES } from "../../../catalog/work-item-interactions.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -40,15 +40,7 @@ const RANGE_DAYS = Object.freeze([
   ["30d", "30 days", 30],
   ["90d", "90 days", 90],
 ]);
-const KNOWN_FEED_KINDS = new Set([
-  "comment", "chat", "question", "answer", "nudge", "agent_update",
-  "work_item_state", "lane_state", "handoff", "completion", "action",
-  "error", "runtime_batch", "unknown",
-]);
-const AGENT_FEEDBACK_PHASES = new Set([
-  "reading", "planning", "editing", "testing", "verifying", "blocked", "finalizing", "handoff",
-]);
-const AGENT_FEEDBACK_STATUSES = new Set(["running", "blocked", "waiting", "verifying", "done"]);
+const KNOWN_FEED_KINDS = new Set(WORK_ITEM_FEED_KINDS);
 const TERMINAL_FEEDBACK_JOB_STATUSES = new Set(TERMINAL_JOB_STATUSES);
 const QUESTION_KINDS = new Set(Object.keys(WORK_ITEM_QUESTION_CHOICE_IDS));
 const ACKNOWLEDGEMENT_DECISIONS = new Set(["accepted", "rejected", "deferred"]);
@@ -486,7 +478,7 @@ function projectedAgentActivity(row, event, db) {
   if (event.protocol === AGENT_ACTIVITY_PROTOCOL && event.phase != null && String(event.phase) !== phase) return null;
   const status = String(metadata.status || metadata.action || "");
   const summary = safeText(activity.body, 180, { nullable: false });
-  if (!AGENT_FEEDBACK_PHASES.has(phase) || !AGENT_FEEDBACK_STATUSES.has(status) || !summary) return null;
+  if (!FEEDBACK_PHASES.has(phase) || !FEEDBACK_STATUSES.has(status) || !summary) return null;
   const capabilities = ["work_item.agent.open"];
   if (!TERMINAL_FEEDBACK_JOB_STATUSES.has(activity.job_status)) capabilities.push("agent.nudge");
   return {

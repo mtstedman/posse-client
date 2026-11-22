@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { runtimeRoleForAgentCallRole } from "../../../../catalog/agent-call.js";
-import { ACTIVE_LEASE_STATUSES } from "../../../../catalog/job.js";
+import { ACTIVE_LEASE_STATUSES, DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../../catalog/work-item.js";
 import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
 import { isArtifactMode } from "../../../artifacts/functions/index.js";
@@ -18,7 +18,7 @@ import { workItemCheckoutReadRoot } from "../../../../shared/scope/functions/che
 
 const ACTIVE_JOB_STATUS_SET = new Set(ACTIVE_LEASE_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
-const CODE_WORKTREE_JOB_TYPES = new Set(["dev", "fix"]);
+const CODE_WORKTREE_JOB_TYPES = DEV_ROLE_JOB_TYPES;
 const WI_RESOURCE_CATEGORIES = Object.freeze(["artifacts", "workspace", "inputs", "context"]);
 
 function authorityError(code, message) {

@@ -7,6 +7,7 @@ import { packageManagerScriptForwardedArgs } from "../../../verification/functio
 import { nodeRunnerCommand } from "../../../verification/functions/node-runner-command.js";
 import { parseCommandArguments } from "../../../../shared/scope/functions/test-command.js";
 import { sha256 } from "../../../../shared/format/functions/sha256.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 
 function broadTestSelection(check, cwd, depth = 0) {
   if (check.unit_test_paths?.length || check.covered_unit_test_paths?.length) return false;
@@ -41,7 +42,7 @@ function broadTestSelection(check, cwd, depth = 0) {
 // explicit file commands and non-test registry obligations intact; their
 // post-change execution also runs in a detached, immutable checkout.
 export function scopeJobTestPlan(plan, { job, payload = {}, cwd, declaredPaths = [] } = {}) {
-  if (!plan || !cwd || !["dev", "fix"].includes(job?.job_type)
+  if (!plan || !cwd || !DEV_ROLE_JOB_TYPES.has(job?.job_type)
     || plan.source === "operator_approved_operation") return plan;
   if (plan.validation_error && plan.validation_error !== JOB_TESTS_DEFERRED_TO_INTEGRATION) return plan;
   const owners = unfinishedTestOwners(job, payload);

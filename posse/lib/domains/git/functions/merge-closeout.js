@@ -30,6 +30,7 @@ import { commandSpawnSpec } from "../../../shared/platform/functions/command-lau
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../catalog/process.js";
 import { filterProcessEnv } from "../../../shared/platform/functions/process-env.js";
 import { parentSecretValues, redactExactValues } from "../../../shared/platform/functions/subprocess-output.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 export const CLOSEOUT_RESOLUTION_RULES = Object.freeze({
   APPEND_APPEND: "append_append",
@@ -132,7 +133,7 @@ function jobPayload(job) {
 export function closeoutTestCommandFromJobs(jobs = []) {
   const counts = new Map();
   for (const job of Array.isArray(jobs) ? jobs : []) {
-    if (job?.status !== "succeeded" || !["dev", "fix"].includes(job?.job_type)) continue;
+    if (job?.status !== "succeeded" || !DEV_ROLE_JOB_TYPES.has(job?.job_type)) continue;
     const command = String(jobPayload(job).test_command || "").trim();
     if (command) counts.set(command, (counts.get(command) || 0) + 1);
   }

@@ -1,9 +1,10 @@
 // @ts-check
 import { readonlySet } from "./readonly-collections.js";
+import { JS_TS_SOURCE_EXTENSIONS } from "./files.js";
 
 
 
-export const JS_SOURCE_EXTENSIONS = readonlySet([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"]);
+export const JS_SOURCE_EXTENSIONS = JS_TS_SOURCE_EXTENSIONS;
 
 export const PHP_SOURCE_EXTENSIONS = readonlySet([".php"]);
 

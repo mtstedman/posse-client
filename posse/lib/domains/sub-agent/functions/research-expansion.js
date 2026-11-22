@@ -1,5 +1,14 @@
 import { HASH_REF_ALIAS_MAX_CHARS } from "../../../catalog/hash-store.js";
-import { RESEARCH_CHILD_PROFILE, SUB_AGENT_LIMITS } from "../../../catalog/sub-agent.js";
+import {
+  RESEARCH_CHILD_PROFILE,
+  RESEARCH_EXPANSION_REASONS,
+  RESEARCH_EXPANSION_SOURCE,
+  RESEARCH_EXPANSION_USAGE_GUIDANCE,
+  RESEARCH_SOURCE_BRIEF_OBJECT_TYPE,
+  SUB_AGENT_ENTRY_STATUSES,
+  SUB_AGENT_LIMITS,
+  SUB_AGENT_OBSERVATION_TYPES,
+} from "../../../catalog/sub-agent.js";
 import {
   materializeAgentHandoffEvidenceSelector,
   parseAgentHandoffEvidenceSelector,
@@ -9,15 +18,12 @@ import { surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-ref-policy.js";
 import { normalizedEvidenceSourceWindows } from "../../../shared/tools/functions/source-evidence.js";
 
-const MAX_EXPANDED_FILES = 12;
-const MAX_EXPANSION_REASON_CHARS = 48;
-
 // Expansion annotates each cited evidence occurrence in place after the
 // child's compact report was fitted to the planner's result cap. The reason
 // is bounded to JSON-safe characters so that growth has a fixed ceiling.
 function expansionReason(error) {
-  const raw = String(error?.message || "source_unavailable").replace(/[^\w .:/#-]+/g, " ").trim();
-  return (raw || "source_unavailable").slice(0, MAX_EXPANSION_REASON_CHARS);
+  const raw = String(error?.message || RESEARCH_EXPANSION_REASONS.SOURCE_UNAVAILABLE).replace(/[^\w .:/#-]+/g, " ").trim();
+  return (raw || RESEARCH_EXPANSION_REASONS.SOURCE_UNAVAILABLE).slice(0, SUB_AGENT_LIMITS.maxExpansionReasonChars);
 }
 
 // Worst-case characters one evidence occurrence gains from expansion: either
@@ -28,7 +34,7 @@ export function researchExpansionAnnotationChars() {
     + ',"expanded_ref":'.length + refChars
     + ',"source_ref":'.length + refChars;
   const omitted = ',"expanded":false'.length
-    + ',"expansion_reason":'.length + MAX_EXPANSION_REASON_CHARS + 2;
+    + ',"expansion_reason":'.length + SUB_AGENT_LIMITS.maxExpansionReasonChars + 2;
   return Math.max(expanded, omitted);
 }
 
@@ -117,12 +123,40 @@ function boundedSelector(evidence, entry) {
   };
 }
 
-function renderHunk(candidate) {
-  const lines = candidate.excerpt.replace(/\r\n?/g, "\n").split("\n");
-  const width = String(candidate.end).length;
+function excerptLines(candidate) {
+  return candidate.excerpt.replace(/\r\n?/g, "\n").split("\n");
+}
+
+// Children (and separate claims of one child) often cite overlapping ranges of
+// the same file. Each source line is shown once: overlapping or adjacent
+// citations collapse into one hunk that names every claim citing it.
+function mergedHunks(candidates) {
+  const hunks = [];
+  const ordered = [...candidates].sort((left, right) => left.start - right.start || left.end - right.end);
+  for (const candidate of ordered) {
+    const lines = excerptLines(candidate);
+    const last = hunks.at(-1);
+    const mergeable = lines.length === candidate.end - candidate.start + 1;
+    if (last?.mergeable && mergeable && candidate.start <= last.end + 1) {
+      for (let line = last.end + 1; line <= candidate.end; line++) last.lines.push(lines[line - candidate.start]);
+      last.end = Math.max(last.end, candidate.end);
+      for (const claim of candidate.claims) last.claims.add(claim);
+      last.sourceRefs.add(candidate.sourceRef);
+      continue;
+    }
+    hunks.push({
+      start: candidate.start, end: candidate.end, lines, mergeable,
+      claims: new Set(candidate.claims), sourceRefs: new Set([candidate.sourceRef]),
+    });
+  }
+  return hunks;
+}
+
+function renderHunk(hunk) {
+  const width = String(hunk.end).length;
   return [
-    `@@ ${candidate.start}-${candidate.end} @@  claims: ${[...candidate.claims].join(", ")}`,
-    ...lines.map((line, index) => `${String(candidate.start + index).padStart(width, " ")} | ${line}`),
+    `@@ ${hunk.start}-${hunk.end} @@  claims: ${[...hunk.claims].join(", ")}`,
+    ...hunk.lines.map((line, index) => `${String(hunk.start + index).padStart(width, " ")} | ${line}`),
   ].join("\n");
 }
 
@@ -139,11 +173,12 @@ function groupCandidates(candidates) {
 function renderedGroups(candidates) {
   return groupCandidates(candidates).map((group) => {
     const children = [...new Set(group.candidates.flatMap((candidate) => [...candidate.children]))];
+    const hunks = mergedHunks(group.candidates);
     const body = [
-      `=== ${group.path}  (${group.candidates.length} hunk${group.candidates.length === 1 ? "" : "s"}; children ${children.join(", ")}) ===`,
-      ...group.candidates.map(renderHunk),
+      `=== ${group.path}  (${hunks.length} hunk${hunks.length === 1 ? "" : "s"}; children ${children.join(", ")}) ===`,
+      ...hunks.map(renderHunk),
     ].join("\n");
-    return { ...group, children, body };
+    return { ...group, children, hunks, body };
   });
 }
 
@@ -180,7 +215,7 @@ export function expandResearchBatchEvidence(batch, {
   const occurrences = [];
 
   for (const entry of batch.entries || []) {
-    if (entry.status !== "completed" || entry.profile !== RESEARCH_CHILD_PROFILE
+    if (entry.status !== SUB_AGENT_ENTRY_STATUSES.COMPLETED || entry.profile !== RESEARCH_CHILD_PROFILE
       || entry.agentType !== "code" || !entry.sourceContext) continue;
     let claimNumber = 0;
     for (const handoff of entry.packet?.handoffs || []) {
@@ -191,14 +226,14 @@ export function expandResearchBatchEvidence(batch, {
           const occurrence = { entry, evidence, claimId: `${entry.id}#${claimNumber}` };
           occurrences.push(occurrence);
           if (!cap) {
-            markFailure(occurrence, "expansion_disabled");
+            markFailure(occurrence, RESEARCH_EXPANSION_REASONS.DISABLED);
             continue;
           }
           try {
             const parsed = parseAgentHandoffEvidenceSelector(evidence?.selector ?? evidence);
             const sourceRef = parsed.ref;
             const source = resolveEvidenceSource(entry.sourceContext, sourceRef);
-            if (!source?.payload_text) throw new Error("source_unavailable");
+            if (!source?.payload_text) throw new Error(RESEARCH_EXPANSION_REASONS.SOURCE_UNAVAILABLE);
             const materialized = materializeAgentHandoffEvidenceSelector(
               boundedSelector(evidence, source),
               entry.sourceContext,
@@ -207,15 +242,15 @@ export function expandResearchBatchEvidence(batch, {
             const excerpt = String(materialized.excerpt || "");
             const excerptLines = excerpt.replace(/\r\n?/g, "\n").split("\n");
             if (excerptLines.length > SUB_AGENT_LIMITS.maxEvidenceLines || excerpt.length > SUB_AGENT_LIMITS.maxEvidenceChars) {
-              throw new Error("hunk_limit");
+              throw new Error(RESEARCH_EXPANSION_REASONS.HUNK_LIMIT);
             }
             const visibleRange = visiblePayloadRange(source, materialized);
-            if (!visibleRange) throw new Error("visibility_range_unresolved");
+            if (!visibleRange) throw new Error(RESEARCH_EXPANSION_REASONS.VISIBILITY_RANGE_UNRESOLVED);
             const path = materialized.path || materialized.provenance?.path || evidence.path || source.metadata?.path;
-            if (!path) throw new Error("path_unresolved");
+            if (!path) throw new Error(RESEARCH_EXPANSION_REASONS.PATH_UNRESOLVED);
             const start = Number(materialized.source_start_line ?? materialized.lines?.start);
             const end = Number(materialized.source_end_line ?? materialized.lines?.end);
-            if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) throw new Error("line_range_unresolved");
+            if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) throw new Error(RESEARCH_EXPANSION_REASONS.LINE_RANGE_UNRESOLVED);
             const identity = `${path}\0${source.content_hash}\0${start}\0${end}\0${excerpt}`;
             let candidate = byIdentity.get(identity);
             if (!candidate) {
@@ -242,7 +277,7 @@ export function expandResearchBatchEvidence(batch, {
     candidate.selected = true;
     const groups = renderedGroups(candidates);
     const chars = groups.map((group) => group.body).join("\n\n").length;
-    if (groups.length > MAX_EXPANDED_FILES || chars > cap) candidate.selected = false;
+    if (groups.length > SUB_AGENT_LIMITS.maxExpandedFiles || chars > cap) candidate.selected = false;
   }
 
   const parentContext = batch.entries?.[0]?.parentContext || {};
@@ -254,8 +289,8 @@ export function expandResearchBatchEvidence(batch, {
     const draft = group.body;
     const surfaced = surfaceHashRefForContext(parentContext, {
       payloadText: draft,
-      objectType: "source_brief",
-      source: "tool:dispatch_agent.expand",
+      objectType: RESEARCH_SOURCE_BRIEF_OBJECT_TYPE,
+      source: RESEARCH_EXPANSION_SOURCE,
       note: group.path,
       metadata: sourceBriefMetadata(group, parentContext, draft.length),
     }, { ownerScope: "work_item" });
@@ -268,8 +303,8 @@ export function expandResearchBatchEvidence(batch, {
       ref,
       payloadText: draft,
       contentHash: surfaced.entry.content_hash,
-      objectType: "source_brief",
-      source: "tool:dispatch_agent.expand",
+      objectType: RESEARCH_SOURCE_BRIEF_OBJECT_TYPE,
+      source: RESEARCH_EXPANSION_SOURCE,
       note: group.path,
       metadata: sourceBriefMetadata(group, parentContext, draft.length, true),
     }, { ownerScope: "work_item" });
@@ -309,11 +344,11 @@ export function expandResearchBatchEvidence(batch, {
       continue;
     }
     briefParts.push(draft);
-    const hunks = group.candidates.map((candidate) => ({
-      start: candidate.start,
-      end: candidate.end,
-      claims: [...candidate.claims],
-      source_ref: candidate.sourceRef,
+    const hunks = group.hunks.map((hunk) => ({
+      start: hunk.start,
+      end: hunk.end,
+      claims: [...hunk.claims],
+      source_refs: [...hunk.sourceRefs],
     }));
     files.push({
       path: group.path,
@@ -338,14 +373,14 @@ export function expandResearchBatchEvidence(batch, {
   }
 
   for (const candidate of candidates.filter((item) => !item.selected)) {
-    for (const occurrence of candidate.occurrences) markFailure(occurrence, "expansion_budget_exhausted");
+    for (const occurrence of candidate.occurrences) markFailure(occurrence, RESEARCH_EXPANSION_REASONS.BUDGET_EXHAUSTED);
   }
 
   const brief = briefParts.join("\n\n");
   const result = {
     files,
     brief,
-    ...(files.length && brief ? { usage_guidance: "This brief is already visible. Cite files[].ref without rereading; use an issued traversal_ref only for source beyond the shown hunks." } : {}),
+    ...(files.length && brief ? { usage_guidance: RESEARCH_EXPANSION_USAGE_GUIDANCE } : {}),
     expanded_chars: brief.length,
     expanded_hunks: files.reduce((sum, file) => sum + file.hunks.length, 0),
     omitted: occurrences.filter((occurrence) => occurrence.evidence.expanded !== true).length,
@@ -355,7 +390,7 @@ export function expandResearchBatchEvidence(batch, {
       work_item_id: parentContext.work_item_id ?? parentContext.workItemId ?? null,
       job_id: parentContext.job_id ?? parentContext.jobId ?? null,
       attempt_id: parentContext.attempt_id ?? parentContext.attemptId ?? null,
-      observation_type: "sub_agent.research_expand",
+      observation_type: SUB_AGENT_OBSERVATION_TYPES.RESEARCH_EXPAND,
       summary: `Expanded ${result.expanded_hunks} research hunk(s) across ${files.length} file brief(s)`,
       detail: {
         files: files.length,

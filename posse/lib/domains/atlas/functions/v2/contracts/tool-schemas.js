@@ -11,18 +11,44 @@ import { ATLAS_TOOL_ACTIONS } from "./tool-params.js";
 import { ATLAS_RUNTIME_INPUTS } from "./runtimes.js";
 import { foldAtlasUnifiedSelectors } from "./unified-selectors.js";
 import { SYMBOL_GET_BATCH_POLICY } from "../../../../../catalog/symbol-get-batch.js";
-import { INTERNAL_ATLAS_ACTIONS, INTERNAL_TOOL_FAMILY } from "../../../../../catalog/internal-tools.js";
+import { INTERNAL_TOOL_FAMILY } from "../../../../../catalog/internal-tools.js";
+import { ATLAS_GATEWAY_ACTIONS, ATLAS_MULTI_GATEWAY_ACTIONS } from "../../../../../catalog/atlas-tools.js";
+import {
+  ATLAS_AGENT_HASH_REF_OWNER_SCOPES,
+  ATLAS_BUFFER_EVENT_TYPES,
+  ATLAS_CALLER_MODES,
+  ATLAS_CARD_DETAILS,
+  ATLAS_CODE_GRANULARITIES,
+  ATLAS_CONTEXT_MODES,
+  ATLAS_EDIT_OPERATIONS,
+  ATLAS_FETCH_REF_SEARCH_MODES,
+  ATLAS_INDEX_REFRESH_MODES,
+  ATLAS_MANUAL_FORMATS,
+  ATLAS_MEMORY_DOMAINS,
+  ATLAS_MEMORY_FEEDBACK_VERDICTS,
+  ATLAS_MEMORY_SPECIFIC_DOMAINS,
+  ATLAS_OVERVIEW_LEVELS,
+  ATLAS_RELATIONSHIP_KINDS,
+  ATLAS_REPO_STATUS_DETAILS,
+  ATLAS_RUNTIME_OUTPUT_MODES,
+  ATLAS_RUNTIME_STREAMS,
+  ATLAS_SEARCH_ENTITIES,
+  ATLAS_SEARCH_SCOPES,
+  ATLAS_STRUCTURE_EDGE_KINDS,
+  ATLAS_TASK_TYPES,
+  ATLAS_TREE_REF_TYPES,
+  ATLAS_USAGE_SCOPES,
+  ATLAS_WIRE_FORMATS,
+  ATLAS_WORKFLOW_ON_ERROR_MODES,
+  ATLAS_WORKFLOW_TRACE_LEVELS,
+} from "../../../../../catalog/atlas-params.js";
 
 const ATLAS_SYMBOL_ID_PATTERN = "^[0-9a-f]{64}:[0-9]+$";
-const TASK_TYPES = Object.freeze(["debug", "review", "implement", "explain"]);
-const CARD_DETAILS = Object.freeze(["minimal", "signature", "deps", "compact", "full"]);
-const WIRE_FORMATS = Object.freeze(["standard", "compact", "agent", "packed"]);
-const CODE_GRANULARITIES = Object.freeze(["symbol", "block", "fileWindow"]);
-const TREE_REF_TYPES = Object.freeze(["cluster", "process"]);
 const PATTERN_CACHE = new Map();
 const DELETE_NORMALIZED_FIELD = Symbol("delete-atlas-normalized-field");
 export const ATLAS_RECOVERY_CALL_MAX_BYTES = 8 * 1024;
-const ENUM_VALUE_ALIASES = Object.freeze({
+// Agent spellings the dispatcher maps onto an enum value before validation.
+export const ATLAS_ENUM_VALUE_ALIASES = Object.freeze({
   "$.cardDetail": Object.freeze({
     brief: "minimal",
     short: "minimal",
@@ -123,63 +149,8 @@ const gatewaySchema = () => o({
   actionName: s({ minLength: 1 }),
 }, [], { additionalProperties: true });
 
-// Actions listed here intentionally appear under more than one gateway. Keep
-// the expected gateway set explicit so tests can catch accidental removals in
-// either direction.
-export const ATLAS_MULTI_GATEWAY_ACTIONS = Object.freeze({
-  "edit.plan": Object.freeze(["query", "code", INTERNAL_TOOL_FAMILY]),
-  "code.survey": Object.freeze(["query", "code"]),
-  "code.structure": Object.freeze(["query", "code"]),
-});
-
-const QUERY_SHARED_ACTIONS = Object.freeze(
-  Object.entries(ATLAS_MULTI_GATEWAY_ACTIONS)
-    .filter(([, gateways]) => gateways.includes("query"))
-    .map(([action]) => action),
-);
-const CODE_SHARED_ACTIONS = Object.freeze(
-  Object.entries(ATLAS_MULTI_GATEWAY_ACTIONS)
-    .filter(([, gateways]) => gateways.includes("code"))
-    .map(([action]) => action),
-);
-
-const QUERY_GATEWAY_ACTIONS = Object.freeze([
-  "symbol.search",
-  "symbol.get",
-  "symbol.card",
-  "symbol.overview",
-  "symbol.callers",
-  "tree.branch",
-  "tree.expand",
-  ...QUERY_SHARED_ACTIONS,
-  "review.delta",
-  "review.analyze",
-  "review.risk",
-  "memory.surface",
-  "memory.get",
-]);
-const CODE_GATEWAY_ACTIONS = Object.freeze([
-  "code.skeleton",
-  "code.lens",
-  "code.window",
-  ...CODE_SHARED_ACTIONS,
-]);
-const REPO_GATEWAY_ACTIONS = Object.freeze([
-  "action.search",
-  "manual",
-]);
-const AGENT_GATEWAY_ACTIONS = Object.freeze([
-  "memory.store",
-  "memory.feedback",
-]);
-
-export const ATLAS_GATEWAY_ACTIONS = Object.freeze({
-  query: QUERY_GATEWAY_ACTIONS,
-  code: CODE_GATEWAY_ACTIONS,
-  repo: REPO_GATEWAY_ACTIONS,
-  agent: AGENT_GATEWAY_ACTIONS,
-  [INTERNAL_TOOL_FAMILY]: INTERNAL_ATLAS_ACTIONS,
-});
+// Gateway routing lists live in the catalog with the agent-facing tools.
+export { ATLAS_GATEWAY_ACTIONS, ATLAS_MULTI_GATEWAY_ACTIONS };
 
 const workflowStep = () => o({
   id: s({ minLength: 1, maxLength: 100 }),
@@ -196,7 +167,7 @@ const workflowBudget = () => o({
 });
 
 const workflowTrace = () => o({
-  level: s({ enum: ["summary", "verbose"], default: "summary" }),
+  level: s({ enum: ATLAS_WORKFLOW_TRACE_LEVELS, default: "summary" }),
   includeResolvedArgs: b(),
   maxPreviewTokens: i({ minimum: 1, maximum: 50_000 }),
 });
@@ -256,13 +227,13 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     limit: i({ minimum: 1, maximum: 100 }),
     includeSchemas: b(),
     includeExamples: b(),
-    format: s({ enum: ["text", "json"], default: "text" }),
+    format: s({ enum: ATLAS_MANUAL_FORMATS, default: "text" }),
   }),
   workflow: o({
     repoId: s({ maxLength: 256 }),
     steps: a(workflowStep(), { minItems: 1, maxItems: 50 }),
     budget: workflowBudget(),
-    onError: s({ enum: ["continue", "stop"], default: "continue" }),
+    onError: s({ enum: ATLAS_WORKFLOW_ON_ERROR_MODES, default: "continue" }),
     defaultMaxResponseTokens: i({ minimum: 1, maximum: 200_000 }),
     onlyFinalResult: b(),
     trace: workflowTrace(),
@@ -282,7 +253,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     offset: i({ minimum: 0 }),
     limit: i({ minimum: 1, maximum: 60000 }),
     search: s({ maxLength: 512 }),
-    search_mode: s({ enum: ["auto", "literal", "regex"] }),
+    search_mode: s({ enum: ATLAS_FETCH_REF_SEARCH_MODES }),
     reaccessAuthorization: s({ minLength: 16, maxLength: 512 }),
   }, ["traversal_ref"]),
   fetch_ref: o({
@@ -292,7 +263,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     offset: i({ minimum: 0 }),
     limit: i({ minimum: 1, maximum: 60000 }),
     search: s({ maxLength: 512 }),
-    search_mode: s({ enum: ["auto", "literal", "regex"] }),
+    search_mode: s({ enum: ATLAS_FETCH_REF_SEARCH_MODES }),
     reaccessAuthorization: s({ minLength: 16, maxLength: 512 }),
   }),
   create_ref: o({
@@ -303,7 +274,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     limit: i({ minimum: 1, maximum: 60000 }),
     note: s({ maxLength: 300 }),
     object_type: s({ maxLength: 80 }),
-    owner_scope: s({ enum: ["work_item", "job"] }),
+    owner_scope: s({ enum: ATLAS_AGENT_HASH_REF_OWNER_SCOPES }),
     chunks: a(o({
       text: s({ minLength: 1, maxLength: 60000 }),
       source_ref: s({ maxLength: 512 }),
@@ -312,7 +283,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
       limit: i({ minimum: 1, maximum: 60000 }),
       note: s({ maxLength: 300 }),
       object_type: s({ maxLength: 80 }),
-      owner_scope: s({ enum: ["work_item", "job"] }),
+      owner_scope: s({ enum: ATLAS_AGENT_HASH_REF_OWNER_SCOPES }),
     }, [], createRefChunkMode()), { minItems: 1, maxItems: 24 }),
   }, [], createRefInputMode()),
 
@@ -323,11 +294,11 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     buildEmptyView: b(),
   }),
   "repo.status": o({
-    detail: s({ enum: ["minimal", "standard", "full"], default: "standard" }),
+    detail: s({ enum: ATLAS_REPO_STATUS_DETAILS, default: "standard" }),
     surfaceMemories: b(),
   }),
   "index.refresh": o({
-    mode: s({ enum: ["smart", "full", "incremental"], default: "smart" }),
+    mode: s({ enum: ATLAS_INDEX_REFRESH_MODES, default: "smart" }),
     paths: repoPaths(1000),
     branch: s({ minLength: 1, maxLength: 256 }),
     wait: b(),
@@ -336,7 +307,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     operationId: s({ minLength: 1, maxLength: 128 }),
   }),
   "repo.overview": o({
-    level: s({ enum: ["stats", "directories", "hotspots", "graph", "full"], default: "stats" }),
+    level: s({ enum: ATLAS_OVERVIEW_LEVELS, default: "stats" }),
     includeHotspots: b(),
     directories: repoPaths(1000),
     maxDirectories: i({ minimum: 1, maximum: 500 }),
@@ -354,7 +325,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     content: s({ maxLength: 10 * 1024 * 1024 }),
     sessionId: s({ maxLength: 256 }),
     version: i({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
-    eventType: s({ enum: ["open", "change", "save", "close", "checkpoint"], default: "change" }),
+    eventType: s({ enum: ATLAS_BUFFER_EVENT_TYPES, default: "change" }),
     language: s({ maxLength: 80 }),
     dirty: b(),
     timestamp: s({ maxLength: 80 }),
@@ -376,11 +347,11 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     query: s({ minLength: 1, maxLength: 20_000 }),
     limit: i({ minimum: 1, maximum: 500 }),
     semantic: b(),
-    entities: a(s({ enum: ["symbols", "feedback"] }), { maxItems: 2 }),
-    scope: s({ enum: ["name", "body", "either"], default: "either" }),
+    entities: a(s({ enum: ATLAS_SEARCH_ENTITIES }), { maxItems: 2 }),
+    scope: s({ enum: ATLAS_SEARCH_SCOPES, default: "either" }),
     sessionId: s({ maxLength: 256 }),
     taskText: s({ maxLength: 20_000 }),
-    taskType: s({ enum: TASK_TYPES }),
+    taskType: s({ enum: ATLAS_TASK_TYPES }),
     vectorCandidateLimit: i({ minimum: 1, maximum: 1000 }),
     filterDeclarationFiles: b(),
     filterToolingPaths: b(),
@@ -388,6 +359,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     hierarchicalFileLimit: i({ minimum: 1, maximum: 40 }),
     withinFileSymbolRerank: b(),
     fileLexicalOverlapWeight: n({ minimum: 0, maximum: 1 }),
+    vectorEvidenceWeight: n({ minimum: 1, maximum: 4 }),
     monorepoPackagePriors: b(),
     semanticQueryNormalization: b(),
   }, ["query"]),
@@ -404,7 +376,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   "symbol.callers": o({
     symbols: symbolSelectors(1),
     symbolId: symbolId(),
-    mode: s({ enum: ["caller", "reference", "all"], default: "caller" }),
+    mode: s({ enum: ATLAS_CALLER_MODES, default: "caller" }),
     limit: i({ minimum: 1, maximum: 100 }),
     offset: i({ minimum: 0, maximum: 100_000 }),
     minConfidence: n({ minimum: 0, maximum: 100 }),
@@ -437,16 +409,15 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   }),
   "symbol.overview": o({
     symbolId: symbolId(),
-    kind: a(s({ enum: ["calls", "references", "reads", "writes", "uses_type", "imports", "extends", "implements"] }), { maxItems: 20 }),
+    kind: a(s({ enum: ATLAS_RELATIONSHIP_KINDS }), { maxItems: 20 }),
     limit: i({ minimum: 1, maximum: 500 }),
     minConfidence: n({ minimum: 0, maximum: 100 }),
-    includeUnresolved: b(),
   }, ["symbolId"]),
   "tree.overview": o({
     nodeId: s({ minLength: 1, maxLength: 2000 }),
     path: s({ minLength: 1, maxLength: 4000 }),
     symbolId: symbolId(),
-    refType: s({ enum: TREE_REF_TYPES }),
+    refType: s({ enum: ATLAS_TREE_REF_TYPES }),
     refId: s({ minLength: 1, maxLength: 512 }),
     maxDepth: i({ minimum: 0, maximum: 8 }),
     limit: i({ minimum: 1, maximum: 500 }),
@@ -460,7 +431,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     nodeId: s({ minLength: 1, maxLength: 2000 }),
     path: s({ minLength: 1, maxLength: 4000 }),
     symbolId: symbolId(),
-    refType: s({ enum: TREE_REF_TYPES }),
+    refType: s({ enum: ATLAS_TREE_REF_TYPES }),
     refId: s({ minLength: 1, maxLength: 512 }),
     maxDepth: i({ minimum: 0, maximum: 8 }),
     limit: i({ minimum: 1, maximum: 500 }),
@@ -472,7 +443,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   }),
   "tree.scope": o({
     taskText: s({ maxLength: 200_000 }),
-    taskType: s({ enum: TASK_TYPES }),
+    taskType: s({ enum: ATLAS_TASK_TYPES }),
     paths: repoPaths(100),
     editedFiles: repoPaths(100),
     path: s({ minLength: 1, maxLength: 4000 }),
@@ -480,10 +451,10 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     symbolId: symbolId(),
     nodeIds: a(s({ minLength: 1, maxLength: 2000 }), { maxItems: 100 }),
     refs: a(o({
-      refType: s({ enum: TREE_REF_TYPES }),
+      refType: s({ enum: ATLAS_TREE_REF_TYPES }),
       refId: s({ minLength: 1, maxLength: 512 }),
     }, ["refType", "refId"]), { maxItems: 20 }),
-    refType: s({ enum: TREE_REF_TYPES }),
+    refType: s({ enum: ATLAS_TREE_REF_TYPES }),
     refId: s({ minLength: 1, maxLength: 512 }),
     maxFiles: i({ minimum: 1, maximum: 500 }),
     maxBranches: i({ minimum: 1, maximum: 100 }),
@@ -500,16 +471,16 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     nodeIds: oneOrMany(s({ minLength: 1, maxLength: 2000 }), s({ minLength: 1, maxLength: 2000 }), { maxItems: 100 }),
     refs: oneOrMany(
       o({
-        refType: s({ enum: TREE_REF_TYPES }),
+        refType: s({ enum: ATLAS_TREE_REF_TYPES }),
         refId: s({ minLength: 1, maxLength: 512 }),
       }, ["refType", "refId"]),
       o({
-        refType: s({ enum: TREE_REF_TYPES }),
+        refType: s({ enum: ATLAS_TREE_REF_TYPES }),
         refId: s({ minLength: 1, maxLength: 512 }),
       }, ["refType", "refId"]),
       { maxItems: 20 },
     ),
-    refType: s({ enum: TREE_REF_TYPES }),
+    refType: s({ enum: ATLAS_TREE_REF_TYPES }),
     refId: s({ minLength: 1, maxLength: 512 }),
     maxFiles: i({ minimum: 1, maximum: 500 }),
     maxBranches: i({ minimum: 1, maximum: 100 }),
@@ -520,7 +491,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   "slice.build": o({
     taskText: s({ maxLength: 200_000 }),
     semantic: b(),
-    taskType: s({ enum: TASK_TYPES }),
+    taskType: s({ enum: ATLAS_TASK_TYPES }),
     stackTrace: s({ maxLength: 200_000 }),
     failingTestPath: s({ minLength: 1 }),
     editedFiles: repoPaths(100),
@@ -528,12 +499,12 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     knownCardEtags: o({}, [], { additionalProperties: s({ maxLength: 512 }), maxProperties: 1000 }),
     ifNoneMatch: s({ maxLength: 512 }),
     cardDetail: s({
-      enum: CARD_DETAILS,
+      enum: ATLAS_CARD_DETAILS,
       default: "compact",
       description: "ATLAS card detail level. Use compact for summary-sized cards.",
     }),
     wireFormat: s({
-      enum: WIRE_FORMATS,
+      enum: ATLAS_WIRE_FORMATS,
       default: "compact",
       description: "Response wire format. Use compact by default; packed is the most token-efficient columnar form.",
     }),
@@ -559,7 +530,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     targetFiles: repoPaths(100),
     search: s({ maxLength: 20_000 }),
     replace: s({ maxLength: 20_000 }),
-    operation: s({ enum: ["replace", "insert", "delete", "inspect"], default: "inspect" }),
+    operation: s({ enum: ATLAS_EDIT_OPERATIONS, default: "inspect" }),
     maxEdits: i({ minimum: 1, maximum: 500 }),
   }),
 
@@ -600,7 +571,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     reason: s({ maxLength: 20_000 }),
     expectedLines: { type: ["integer", "string"], minimum: 1, maximum: 20_000, maxLength: 20, pattern: "^[0-9]+$" },
     identifiersToFind: identifierList({ minLength: 1, minItems: 1, maxItems: 50 }),
-    granularity: s({ enum: CODE_GRANULARITIES, default: "symbol" }),
+    granularity: s({ enum: ATLAS_CODE_GRANULARITIES, default: "symbol" }),
     autoFill: b(),
     maxTokens: i({ minimum: 1, maximum: 200_000 }),
     sliceContext: sliceContextHint(),
@@ -622,7 +593,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   }, ["paths"]),
   "code.structure": o({
     paths: { type: ["string", "array"], minLength: 1, items: { type: "string", minLength: 1 }, maxItems: 128 },
-    edgeKinds: a(s({ enum: ["imports", "calls", "references", "extends", "implements", "uses_type"] }), { maxItems: 6 }),
+    edgeKinds: a(s({ enum: ATLAS_STRUCTURE_EDGE_KINDS }), { maxItems: 6 }),
     maxFiles: i({ minimum: 1, maximum: 128 }),
     includeSymbols: b(),
     includeEdges: b(),
@@ -634,16 +605,16 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
 
   context: o({
     taskText: s({ minLength: 1, maxLength: 200_000 }),
-    taskType: s({ enum: TASK_TYPES }),
-    contextMode: s({ enum: ["precise", "broad"], default: "broad" }),
+    taskType: s({ enum: ATLAS_TASK_TYPES }),
+    contextMode: s({ enum: ATLAS_CONTEXT_MODES, default: "broad" }),
     focusSymbols: symbolIds(100),
     focusPaths: repoPaths(100),
     maxTokens: i({ minimum: 1, maximum: 500_000 }),
   }, ["taskText"]),
   "context.summary": o({
     taskText: s({ minLength: 1, maxLength: 200_000 }),
-    taskType: s({ enum: TASK_TYPES }),
-    contextMode: s({ enum: ["precise", "broad"], default: "broad" }),
+    taskType: s({ enum: ATLAS_TASK_TYPES }),
+    contextMode: s({ enum: ATLAS_CONTEXT_MODES, default: "broad" }),
     focusSymbols: symbolIds(100),
     focusPaths: repoPaths(100),
     maxTokens: i({ minimum: 1, maximum: 500_000 }),
@@ -657,14 +628,14 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     sliceHandle: s({ minLength: 1, maxLength: 512 }),
     usefulSymbols: a(s({ minLength: 1, maxLength: 512 }), { maxItems: 1000 }),
     missingSymbols: a(s({ minLength: 1, maxLength: 512 }), { maxItems: 1000 }),
-    taskType: s({ enum: TASK_TYPES }),
+    taskType: s({ enum: ATLAS_TASK_TYPES }),
     taskText: s({ maxLength: 200_000 }),
     taskTags: a(s({ minLength: 1, maxLength: 256 }), { maxItems: 100 }),
   }, []),
   "agent.feedback.query": o({
     since: s({ maxLength: 80 }),
     limit: i({ minimum: 1, maximum: 10_000 }),
-    taskType: s({ enum: TASK_TYPES }),
+    taskType: s({ enum: ATLAS_TASK_TYPES }),
     halfLifeDays: n({ minimum: 0.1, maximum: 3650 }),
   }),
 
@@ -698,7 +669,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   }, ["filePath"]),
 
   "memory.store": o({
-    domains: a(s({ enum: ["ux", "schema", "security", "performance"] }), { maxItems: 4 }),
+    domains: a(s({ enum: ATLAS_MEMORY_SPECIFIC_DOMAINS }), { maxItems: 4 }),
     title: s({ minLength: 1, maxLength: 120 }),
     content: s({ minLength: 1, maxLength: 1200 }),
     // Aligned with the handler caps (memory.js): anchors past 100 were
@@ -712,7 +683,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   "memory.get": o({
     symbolIds: symbolIds(500),
     fileRelPaths: repoPaths(500),
-    domains: a(s({ enum: ["general", "ux", "schema", "security", "performance"] }), { maxItems: 5 }),
+    domains: a(s({ enum: ATLAS_MEMORY_DOMAINS }), { maxItems: 5 }),
   }),
   "memory.feedback": o({
     memoryId: s({ minLength: 1, maxLength: 256 }),
@@ -720,13 +691,13 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     // surfaces (posse admin memory / TUI review). Accepted here but NOT
     // advertised in the agent-facing catalog enum — agents issue evidence
     // verdicts; suppression stays a human GC decision.
-    verdict: s({ enum: ["used", "stale", "wrong", "duplicate", "suppress"] }),
+    verdict: s({ enum: ATLAS_MEMORY_FEEDBACK_VERDICTS }),
     detail: s({ maxLength: 500 }),
   }, ["memoryId", "verdict"]),
   "memory.surface": o({
     symbolIds: symbolIds(500),
     fileRelPaths: repoPaths(500),
-    domains: a(s({ enum: ["general", "ux", "schema", "security", "performance"] }), { maxItems: 5 }),
+    domains: a(s({ enum: ATLAS_MEMORY_DOMAINS }), { maxItems: 5 }),
   }),
 
   "policy.get": o({
@@ -738,7 +709,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
   }, ["policyPatch"]),
   "usage.stats": o({
     repoId: s({ maxLength: 256 }),
-    scope: s({ enum: ["session", "history", "both"], default: "both" }),
+    scope: s({ enum: ATLAS_USAGE_SCOPES, default: "both" }),
     since: s({ maxLength: 80 }),
     limit: i({ minimum: 1, maximum: 10_000 }),
     aggregateLimit: i({ minimum: 1, maximum: 100_000 }),
@@ -755,14 +726,14 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     queryTerms: a(s({ minLength: 1, maxLength: 256 }), { maxItems: 100 }),
     maxResponseLines: i({ minimum: 10, maximum: 1000 }),
     persistOutput: b(),
-    outputMode: s({ enum: ["minimal", "summary", "intent"], default: "minimal" }),
+    outputMode: s({ enum: ATLAS_RUNTIME_OUTPUT_MODES, default: "minimal" }),
   }, ["runtime"]),
   "runtime.queryOutput": o({
     artifactHandle: s({ minLength: 1, maxLength: 256, pattern: "^[A-Za-z0-9_.-]+$" }),
     queryTerms: a(s({ minLength: 1, maxLength: 256 }), { minItems: 1, maxItems: 100 }),
     maxExcerpts: i({ minimum: 1, maximum: 50 }),
     contextLines: i({ minimum: 0, maximum: 10 }),
-    stream: s({ enum: ["stdout", "stderr", "both"], default: "both" }),
+    stream: s({ enum: ATLAS_RUNTIME_STREAMS, default: "both" }),
   }, ["artifactHandle", "queryTerms"]),
   "scip.ingest": o({
     indexPath: s({ minLength: 1, maxLength: 4000 }),
@@ -1060,8 +1031,8 @@ function canonicalEnumValue(value, enumValues, path) {
     if (enumKey(enumValue) === key) return enumValue;
   }
   const aliases = /** @type {Record<string, unknown> | undefined} */ (
-    Object.prototype.hasOwnProperty.call(ENUM_VALUE_ALIASES, path)
-      ? /** @type {Record<string, unknown>} */ (ENUM_VALUE_ALIASES)[path]
+    Object.prototype.hasOwnProperty.call(ATLAS_ENUM_VALUE_ALIASES, path)
+      ? /** @type {Record<string, unknown>} */ (ATLAS_ENUM_VALUE_ALIASES)[path]
       : undefined
   );
   if (aliases && Object.prototype.hasOwnProperty.call(aliases, key)) return aliases[key];

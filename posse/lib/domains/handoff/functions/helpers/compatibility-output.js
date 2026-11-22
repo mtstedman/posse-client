@@ -1,5 +1,5 @@
 import { existingJobDependencyId } from "../../../planning/functions/existing-job-dependencies.js";
-import { AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILES } from "../../../../catalog/handoff.js";
+import { AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../../catalog/handoff.js";
 import { researcherPacketToStructuredOutput } from "./researcher-output.js";
 import { renderReport } from "./report-rendering.js";
 
@@ -34,7 +34,7 @@ function evidenceRefs(report) {
   });
   for (const claim of report.claims || []) {
     const detail = claim[1] || {};
-    for (const item of ["evidence", "proof", "support"].flatMap((lane) => detail[lane] || [])) {
+    for (const item of AGENT_HANDOFF_CLAIM_CITATION_FIELDS.flatMap((lane) => detail[lane] || [])) {
       const lane = item?.selector_kind === "path" || item?.path
         ? "support"
         : (isGroundedCompatibilityEvidence(item) ? "proof" : "support");

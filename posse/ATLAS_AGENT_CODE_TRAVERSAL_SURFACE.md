@@ -1241,7 +1241,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Find who calls or references a known symbol. Use when you have an implementation and need upstream entry points, wrappers, consumers, or callers affected by a change. Mode caller (default) lists direct calls; reference lists indexed non-call references; all lists both. Returns one hop of symbols grouped by file with their symbols and names, without bodies or call-site lines. Read relevant results with symbol.get using their returned symbols; repeat upstream as needed to trace error handling, state changes, or ownership. Re-export edges are excluded; dynamic or unresolved relationships may be absent.
+Find who calls or references a known symbol: one hop of symbols grouped by file with their symbols and names, without bodies or call-site lines. Re-export edges are excluded; dynamic or unresolved relationships may be absent.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1437,5 +1437,5 @@ compatibility. The agent projection removes them.
 - `tools.search_files`: `offset`
 - `atlas.symbol.callers`: `indexVersion`, `minConfidence`, `projection`, `symbolId`
 - `atlas.symbol.get`: `identifiersToFind`, `items`, `maxTokens`, `symbolId`, `symbolRef`
-- `atlas.symbol.search`: `entities`, `fileLexicalOverlapWeight`, `filterDeclarationFiles`, `filterToolingPaths`, `genericSymbolFrequencyThreshold`, `hierarchicalFileLimit`, `monorepoPackagePriors`, `semanticQueryNormalization`, `sessionId`, `taskText`, `taskType`, `vectorCandidateLimit`, `withinFileSymbolRerank`
+- `atlas.symbol.search`: `entities`, `fileLexicalOverlapWeight`, `filterDeclarationFiles`, `filterToolingPaths`, `genericSymbolFrequencyThreshold`, `hierarchicalFileLimit`, `monorepoPackagePriors`, `semanticQueryNormalization`, `sessionId`, `taskText`, `taskType`, `vectorCandidateLimit`, `vectorEvidenceWeight`, `withinFileSymbolRerank`
 - `atlas.traverse_ref`: `hashes`, `ref`, `refs`, `traversal_refs`

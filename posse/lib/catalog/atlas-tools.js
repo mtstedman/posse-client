@@ -1,3 +1,4 @@
+import { ATLAS_AGENT_HASH_REF_OWNER_SCOPES, ATLAS_BUFFER_EVENT_TYPES, ATLAS_CALLER_MODES, ATLAS_CODE_GRANULARITIES, ATLAS_EDIT_OPERATIONS, ATLAS_FETCH_REF_SEARCH_MODES, ATLAS_INDEX_REFRESH_MODES, ATLAS_MEMORY_AGENT_FEEDBACK_VERDICTS, ATLAS_MEMORY_DOMAINS, ATLAS_MEMORY_SPECIFIC_DOMAINS, ATLAS_OVERVIEW_LEVELS, ATLAS_RELATIONSHIP_KINDS, ATLAS_RUNTIME_OUTPUT_MODES, ATLAS_RUNTIME_STREAMS, ATLAS_SEARCH_ENTITIES, ATLAS_SEARCH_SCOPES, ATLAS_STRUCTURE_EDGE_KINDS, ATLAS_TASK_TYPES, ATLAS_TREE_REF_TYPES, ATLAS_USAGE_SCOPES, ATLAS_WIRE_FORMATS, ATLAS_WORKFLOW_ON_ERROR_MODES, ATLAS_WORKFLOW_TRACE_LEVELS } from "./atlas-params.js";
 import { COMPACT_RELATIONSHIP_PROJECTION } from "./atlas-presentation.js";
 // ATLAS v2 tool action schema definitions (pure data).
 //
@@ -61,6 +62,10 @@ function boundedInteger(value, minimum, maximum, fallback) {
   return Math.max(minimum, Math.min(maximum, parsed));
 }
 
+// Gateway tools that carry an Atlas action in args.action. The embedded host
+// also routes "internal"; planner triage also unwraps "workflow".
+export const ATLAS_GATEWAY_FAMILIES = Object.freeze(["query", "code", "repo", "agent"]);
+
 const QUERY_GATEWAY_ACTIONS = Object.freeze([
   "symbol.search",
   "symbol.get",
@@ -83,9 +88,9 @@ const CODE_GATEWAY_ACTIONS = Object.freeze([
   "code.skeleton",
   "code.lens",
   "code.window",
+  "edit.plan",
   "code.survey",
   "code.structure",
-  "edit.plan",
 ]);
 
 const REPO_GATEWAY_ACTIONS = Object.freeze([
@@ -97,6 +102,24 @@ const AGENT_GATEWAY_ACTIONS = Object.freeze([
   "memory.store",
   "memory.feedback",
 ]);
+
+// Actions listed under more than one gateway. Every other action belongs to
+// exactly one; the parity suite checks the lists against this table.
+export const ATLAS_MULTI_GATEWAY_ACTIONS = Object.freeze({
+  "edit.plan": Object.freeze(["query", "code", INTERNAL_TOOL_FAMILY]),
+  "code.survey": Object.freeze(["query", "code"]),
+  "code.structure": Object.freeze(["query", "code"]),
+});
+
+// The routed actions of each gateway tool, in agent-visible enum order. The
+// dispatcher routes and validates against the same lists.
+export const ATLAS_GATEWAY_ACTIONS = Object.freeze({
+  query: QUERY_GATEWAY_ACTIONS,
+  code: CODE_GATEWAY_ACTIONS,
+  repo: REPO_GATEWAY_ACTIONS,
+  agent: AGENT_GATEWAY_ACTIONS,
+  [INTERNAL_TOOL_FAMILY]: INTERNAL_ATLAS_ACTIONS,
+});
 
 export { INTERNAL_ATLAS_ACTIONS, INTERNAL_ATLAS_SURFACE_ACTIONS, INTERNAL_ATLAS_SURFACE_ACTION_SET };
 
@@ -229,13 +252,13 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           },
           additionalProperties: false,
         },
-        onError: { type: "string", enum: ["continue", "stop"], description: "Whether to continue after a failed step. Defaults to continue." },
+        onError: { type: "string", enum: [...ATLAS_WORKFLOW_ON_ERROR_MODES], description: "Whether to continue after a failed step. Defaults to continue." },
         defaultMaxResponseTokens: { type: "integer", description: "Default response cap for steps without maxResponseTokens." },
         onlyFinalResult: { type: "boolean", description: "Strip intermediate results from the returned payload." },
         trace: {
           type: "object",
           properties: {
-            level: { type: "string", enum: ["summary", "verbose"] },
+            level: { type: "string", enum: [...ATLAS_WORKFLOW_TRACE_LEVELS] },
             includeResolvedArgs: { type: "boolean" },
             maxPreviewTokens: { type: "integer" },
           },
@@ -277,7 +300,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         offset: { type: "integer", description: "Leave unset: the capability already owns its offset." },
         limit: { type: "integer", description: "Characters per ref, not source lines. Omit for normal traversal; response budgets still apply." },
         search: { type: "string", description: "Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists." },
-        search_mode: { type: "string", enum: ["auto", "literal", "regex"], description: "Search interpretation. Default: auto." },
+        search_mode: { type: "string", enum: [...ATLAS_FETCH_REF_SEARCH_MODES], description: "Search interpretation. Default: auto." },
         reaccessAuthorization: { type: "string", description: "One-use recovery token from a covered-source response. Requires one scalar string traversal_ref." },
       },
       required: ["traversal_ref"],
@@ -297,7 +320,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         offset: { type: "integer", description: "Character offset for paged materialized refs; for search mode, matched-row offset. Default: 0." },
         limit: { type: "integer", description: "Characters per ref, not source lines. Omit for normal traversal. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs." },
         search: { type: "string", description: "Optional case-insensitive search within materialized ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. The result contains matching numbered lines." },
-        search_mode: { type: "string", enum: ["auto", "literal", "regex"], description: "Search interpretation. Default: auto (literal first, then regex when the query contains regex syntax)." },
+        search_mode: { type: "string", enum: [...ATLAS_FETCH_REF_SEARCH_MODES], description: "Search interpretation. Default: auto (literal first, then regex when the query contains regex syntax)." },
         reaccessAuthorization: { type: "string", description: "One-use attempt-scoped authorization returned with a covered source response. Valid only when ref is one scalar string; arrays require separate calls because the authorization permits exactly one stored ref to be delivered once more." },
       },
       required: [],
@@ -318,7 +341,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         limit: { type: "integer", description: "Maximum characters to take from source_ref payload." },
         note: { type: "string", description: "Optional 'what is this' (max 300 chars). Surfaces inside the stub and stays sticky through handoffs." },
         object_type: { type: "string", description: "Optional object type label for the stub. Default agent.chunk." },
-        owner_scope: { type: "string", enum: ["work_item", "job"], description: "Visibility scope. Default work_item so the evidence identity can be handed to later agents in the work item." },
+        owner_scope: { type: "string", enum: [...ATLAS_AGENT_HASH_REF_OWNER_SCOPES], description: "Visibility scope. Default work_item so the evidence identity can be handed to later agents in the work item." },
         chunks: {
           type: "array",
           description: "Batch form: mint several chunks in one call (max 24) with per-item errors. Each item takes the same fields as the single form.",
@@ -332,7 +355,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
               limit: { type: "integer" },
               note: { type: "string" },
               object_type: { type: "string" },
-              owner_scope: { type: "string", enum: ["work_item", "job"] },
+              owner_scope: { type: "string", enum: [...ATLAS_AGENT_HASH_REF_OWNER_SCOPES] },
             },
             oneOf: [
               { required: ["text"] },
@@ -389,7 +412,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        mode: { type: "string", enum: ["smart", "full", "incremental"], description: "Refresh mode. smart chooses incremental when paths are supplied, otherwise full." },
+        mode: { type: "string", enum: [...ATLAS_INDEX_REFRESH_MODES], description: "Refresh mode. smart chooses incremental when paths are supplied, otherwise full." },
         paths: { type: "array", items: { type: "string" }, description: "Canonical repo-relative paths for incremental refresh." },
         branch: { type: "string", description: "Ledger branch to refresh. Defaults to the configured merge target." },
         wait: { type: "boolean", description: "Reserved for async schedulers; embedded v2 currently returns the warm result." },
@@ -408,7 +431,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        level: { type: "string", enum: ["stats", "directories", "hotspots", "graph", "full"], description: "Detail level: stats, directories, hotspots, graph, or full." },
+        level: { type: "string", enum: [...ATLAS_OVERVIEW_LEVELS], description: "Detail level: stats, directories, hotspots, graph, or full." },
         includeHotspots: { type: "boolean", description: "Include hotspot analysis when supported." },
         directories: { type: "array", items: { type: "string" }, description: "Relative directories to focus on." },
         maxDirectories: { type: "integer", description: "Maximum directories to include." },
@@ -445,7 +468,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         content: { type: "string", description: "Full buffer contents." },
         sessionId: { type: "string", description: "Optional editor/session namespace.", internalOnly: true },
         version: { type: "integer", description: "Optional editor buffer version." },
-        eventType: { type: "string", enum: ["open", "change", "save", "close", "checkpoint"], description: "Editor event that produced this buffer update." },
+        eventType: { type: "string", enum: [...ATLAS_BUFFER_EVENT_TYPES], description: "Editor event that produced this buffer update." },
         language: { type: "string", description: "Editor language id, when available." },
         dirty: { type: "boolean", description: "Whether the editor buffer has unsaved changes." },
         timestamp: { type: "string", description: "Editor event timestamp. Defaults to receipt time." },
@@ -522,18 +545,19 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         hierarchicalFileLimit: { type: "integer", minimum: 1, maximum: 40, description: "Experimental number of files admitted before final symbol interleaving.", internalOnly: true },
         withinFileSymbolRerank: { type: "boolean", description: "Experimental within-file symbol reranking that preserves file slots.", internalOnly: true },
         fileLexicalOverlapWeight: { type: "number", minimum: 0, maximum: 1, description: "Experimental native lexical file-score overlap weight.", internalOnly: true },
+        vectorEvidenceWeight: { type: "number", minimum: 1, maximum: 4, description: "Reciprocal-rank votes cast by one vector hit in native fusion.", internalOnly: true },
         monorepoPackagePriors: { type: "boolean", description: "Experimental generic monorepo package/path priors.", internalOnly: true },
         semanticQueryNormalization: { type: "boolean", description: "Experimental normalized secondary semantic query.", internalOnly: true },
-        scope: { type: "string", enum: ["name", "body", "either"], description: "Search symbol names, symbol-body identifier tokens, or both. Default either." },
+        scope: { type: "string", enum: [...ATLAS_SEARCH_SCOPES], description: "Search symbol names, symbol-body identifier tokens, or both. Default either." },
         entities: {
           type: "array",
-          items: { type: "string", enum: ["symbols", "feedback"] },
+          items: { type: "string", enum: [...ATLAS_SEARCH_ENTITIES] },
           description: "Entity families to include. Default symbols; feedback is returned in a separate entities list.",
           internalOnly: true,
         },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
         taskText: { type: "string", description: "Auxiliary task-ranking context supplied by orchestration.", internalOnly: true },
-        taskType: { type: "string", enum: ["debug", "review", "implement", "explain"], description: "Task classification supplied by orchestration.", internalOnly: true },
+        taskType: { type: "string", enum: [...ATLAS_TASK_TYPES], description: "Task classification supplied by orchestration.", internalOnly: true },
       },
       required: ["query"],
       additionalProperties: false,
@@ -610,7 +634,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       properties: {
         taskText: { type: "string", description: "Natural-language task description." },
         semantic: { type: "boolean", description: "Enable semantic/vector entry discovery when configured. Defaults on for taskText when semantic dispatch is enabled." },
-        taskType: { type: "string", enum: ["debug", "review", "implement", "explain"], description: "Optional task type for feedback-aware ranking." },
+        taskType: { type: "string", enum: [...ATLAS_TASK_TYPES], description: "Optional task type for feedback-aware ranking." },
         entrySymbols: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Exact opaque ATLAS symbol IDs returned by indexed results." },
         editedFiles: { type: "array", items: { type: "string" }, description: "Relative edited file paths." },
         stackTrace: { type: "string", description: "Optional stack trace for debugging context." },
@@ -618,7 +642,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         cardDetail: { type: "string", description: "ATLAS card detail level.", internalOnly: true },
         knownCardEtags: { type: "object", additionalProperties: { type: "string" }, description: "Optional map of symbolId to card ETag already held by the runtime; matching cards return lightweight refs.", internalOnly: true },
         ifNoneMatch: { type: "string", description: "Optional slice ETag for conditional fetch; matching slices return notModified metadata only.", internalOnly: true },
-        wireFormat: { type: "string", enum: ["standard", "compact", "agent", "packed"], description: "Response wire format selected by the runtime.", internalOnly: true },
+        wireFormat: { type: "string", enum: [...ATLAS_WIRE_FORMATS], description: "Response wire format selected by the runtime.", internalOnly: true },
         wireFormatVersion: { type: "integer", minimum: 1, maximum: 3, description: "Wire format version.", internalOnly: true },
         minConfidence: { type: "number", description: "Minimum slice expansion confidence.", internalOnly: true },
         minCallConfidence: { type: "number", description: "Minimum call-edge confidence.", internalOnly: true },
@@ -662,13 +686,13 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.callers": {
     type: "function",
     name: "atlas_symbol_callers",
-    description: "Find who calls or references a known symbol. Use when you have an implementation and need upstream entry points, wrappers, consumers, or callers affected by a change. Mode caller (default) lists direct calls; reference lists indexed non-call references; all lists both. Returns one hop of symbols grouped by file with their symbols and names, without bodies or call-site lines. Read relevant results with symbol.get using their returned symbols; repeat upstream as needed to trace error handling, state changes, or ownership. Re-export edges are excluded; dynamic or unresolved relationships may be absent.",
+    description: "Find who calls or references a known symbol: one hop of symbols grouped by file with their symbols and names, without bodies or call-site lines. Re-export edges are excluded; dynamic or unresolved relationships may be absent.",
     parameters: {
       type: "object",
       properties: {
         symbols: symbolsParameter(1),
         symbolId: { internalOnly: true, type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Target symbol whose callers or references to list." },
-        mode: { type: "string", enum: ["caller", "reference", "all"], description: "caller (default) lists direct calls; reference lists non-call references; all lists both." },
+        mode: { type: "string", enum: [...ATLAS_CALLER_MODES], description: "caller (default) lists direct calls; reference lists non-call references; all lists both." },
         limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum returned type/file/symbol entries; default 20." },
         offset: { type: "integer", minimum: 0, maximum: 100000, description: "Entry offset within the current index generation." },
         minConfidence: { type: "number", minimum: 0, maximum: 100, description: "Legacy minimum resolved-edge confidence, 0..1 or 0..100.", internalOnly: true },
@@ -746,10 +770,9 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID whose usages should be listed." },
-        kind: { type: "array", items: { type: "string", enum: ["calls", "references", "reads", "writes", "uses_type", "imports", "extends", "implements"] }, description: "Optional edge kinds to include." },
+        kind: { type: "array", items: { type: "string", enum: [...ATLAS_RELATIONSHIP_KINDS] }, description: "Optional edge kinds to include." },
         limit: { type: "integer", description: "Maximum usage sites to return." },
         minConfidence: { type: "number", description: "Minimum edge confidence, either 0..1 or 0..100." },
-        includeUnresolved: { type: "boolean", description: "Also include unresolved references with the same target name." },
       },
       required: ["symbolId"],
       additionalProperties: false,
@@ -765,7 +788,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         nodeId: { type: "string", description: "Exact ATLAS tree node id, such as root, dir:src, file:src/run.ts, or a symbol node id." },
         path: { type: "string", description: "Canonical repo-relative file or directory path to focus." },
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Stable ATLAS symbol ID/ref. Duplicated blobs may return multiple tree locations; pass path to disambiguate." },
-        refType: { type: "string", enum: ["cluster", "process"], description: "Direct leaf ref lookup type." },
+        refType: { type: "string", enum: [...ATLAS_TREE_REF_TYPES], description: "Direct leaf ref lookup type." },
         refId: { type: "string", description: "Cluster/process id for ref lookup." },
         maxDepth: { type: "integer", description: "Descendant depth from focused node(s). Default 1, max 8." },
         limit: { type: "integer", description: "Maximum nodes to return. Default 100, max 500." },
@@ -789,7 +812,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         nodeId: { type: "string", description: "Exact ATLAS tree node id, such as root, dir:src, file:src/run.ts, or a symbol node id." },
         path: { type: "string", description: "Canonical repo-relative file or directory path to focus." },
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Stable ATLAS symbol ID/ref. Duplicated blobs may return multiple tree locations; pass path to disambiguate." },
-        refType: { type: "string", enum: ["cluster", "process"], description: "Direct leaf ref lookup type." },
+        refType: { type: "string", enum: [...ATLAS_TREE_REF_TYPES], description: "Direct leaf ref lookup type." },
         refId: { type: "string", description: "Cluster/process id for ref lookup." },
         maxDepth: { type: "integer", description: "Descendant depth from focused node(s). Default 1, max 8." },
         limit: { type: "integer", description: "Maximum nodes to return. Optional: when omitted, ATLAS chooses 100-250 from indexed repository size. Max 500." },
@@ -811,7 +834,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       type: "object",
       properties: {
         taskText: { type: "string", description: "Natural-language task, bug, or planning text to score against projected tree terms." },
-        taskType: { type: "string", enum: ["debug", "review", "implement", "explain"], description: "Optional task type for test/scope hints." },
+        taskType: { type: "string", enum: [...ATLAS_TASK_TYPES], description: "Optional task type for test/scope hints." },
         paths: { type: "array", items: { type: "string" }, description: "Repo-relative file or directory seeds." },
         editedFiles: { type: "array", items: { type: "string" }, description: "Known or proposed repo-relative file scope seeds." },
         path: { type: "string", description: "Single repo-relative file or directory seed." },
@@ -823,7 +846,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           items: {
             type: "object",
             properties: {
-              refType: { type: "string", enum: ["cluster", "process"] },
+              refType: { type: "string", enum: [...ATLAS_TREE_REF_TYPES] },
               refId: { type: "string" },
             },
             required: ["refType", "refId"],
@@ -831,7 +854,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           },
           description: "Cluster/process refs as weak seeds; broad refs are rejected and reported.",
         },
-        refType: { type: "string", enum: ["cluster", "process"], description: "Single ref type." },
+        refType: { type: "string", enum: [...ATLAS_TREE_REF_TYPES], description: "Single ref type." },
         refId: { type: "string", description: "Single cluster/process ref id." },
         maxFiles: { type: "integer", description: "Maximum candidate files returned. Default 40, max 500." },
         maxBranches: { type: "integer", description: "Maximum accepted containment branches. Default 12." },
@@ -859,7 +882,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         refs: {
           type: ["object", "array"],
           properties: {
-            refType: { type: "string", enum: ["cluster", "process"] },
+            refType: { type: "string", enum: [...ATLAS_TREE_REF_TYPES] },
             refId: { type: "string" },
           },
           required: ["refType", "refId"],
@@ -867,7 +890,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           items: {
             type: "object",
             properties: {
-              refType: { type: "string", enum: ["cluster", "process"] },
+              refType: { type: "string", enum: [...ATLAS_TREE_REF_TYPES] },
               refId: { type: "string" },
             },
             required: ["refType", "refId"],
@@ -875,7 +898,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           },
           description: "One cluster or process ref or an array of refs to use as weak seeds; broad matches are reported separately.",
         },
-        refType: { type: "string", enum: ["cluster", "process"], description: "Compatibility ref selector.", internalOnly: true },
+        refType: { type: "string", enum: [...ATLAS_TREE_REF_TYPES], description: "Compatibility ref selector.", internalOnly: true },
         refId: { type: "string", description: "Compatibility ref selector.", internalOnly: true },
         maxFiles: { type: "integer", description: "Maximum candidate files returned. Default 40, max 500." },
         maxBranches: { type: "integer", description: "Maximum accepted containment branches. Default 12.", internalOnly: true },
@@ -898,7 +921,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         targetFiles: { type: "array", items: { type: "string" }, description: "Repository-relative files to scope the plan." },
         search: { type: "string", description: "Text/pattern the planned edit expects to find." },
         replace: { type: "string", description: "Replacement text for replace plans." },
-        operation: { type: "string", enum: ["replace", "insert", "delete", "inspect"], description: "Planned operation type." },
+        operation: { type: "string", enum: [...ATLAS_EDIT_OPERATIONS], description: "Planned operation type." },
         maxEdits: { type: "integer", minimum: 1, maximum: 500, description: "Maximum preview edits to return." },
       },
       required: [],
@@ -954,7 +977,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       type: "object",
       properties: {
         paths: { type: ["string", "array"], items: { type: "string" }, description: "Repository-relative directory prefix or file path, e.g. \"src/routes\" or [\"lib/a.ts\", \"lib/b.ts\"]. Resolves up to 128 indexed files." },
-        edgeKinds: { type: "array", items: { type: "string", enum: ["imports", "calls", "references", "extends", "implements", "uses_type"] }, description: "Relationships to include; defaults to imports." },
+        edgeKinds: { type: "array", items: { type: "string", enum: [...ATLAS_STRUCTURE_EDGE_KINDS] }, description: "Relationships to include; defaults to imports." },
         maxFiles: { type: "integer", description: "Optional cap on resolved indexed files. Default 64, max 128." },
         includeSymbols: { type: "boolean", description: "Include per-file symbol summaries. Default true." },
         includeEdges: { type: "boolean", description: "Include exact internal/inbound/outbound edge rows. Default true." },
@@ -1019,7 +1042,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         expectedLines: { type: "integer", description: "Desired line count for the requested file-window slice, not the total file length. Symbol and block reads use their definition bounds." },
         // Off the agent surface 2026-11-20: set in 34 of 8,849 logged calls, never by a researcher.
         autoFill: { internalOnly: true, type: "boolean", description: "Default true: keep partially new windows contiguous. False omits already-visible lines." },
-        granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "symbol: named declarations (default); block: enclosing control flow; fileWindow: broader anchored source region." },
+        granularity: { type: "string", enum: [...ATLAS_CODE_GRANULARITIES], description: "symbol: named declarations (default); block: enclosing control flow; fileWindow: broader anchored source region." },
         maxTokens: { type: "integer", minimum: 1, maximum: ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, description: "Inline token cap, clamped to the repository limit shown in the runtime contract." },
         sliceContext: { type: "object", description: "Task-slice accounting context supplied by orchestration.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
@@ -1163,7 +1186,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       properties: {
         title: { type: "string", description: "Short memory title, max 120 chars." },
         content: { type: "string", description: "Memory content, max 1200 chars. Capture why the decision/context matters." },
-        domains: { type: "array", items: { type: "string", enum: ["ux", "schema", "security", "performance"] }, description: "Domain tags for scoped retrieval. An absent value files the memory under the general category." },
+        domains: { type: "array", items: { type: "string", enum: [...ATLAS_MEMORY_SPECIFIC_DOMAINS] }, description: "Domain tags for scoped retrieval. An absent value files the memory under the general category." },
         symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Optional linked ATLAS symbol IDs." },
         fileRelPaths: { type: "array", items: { type: "string" }, description: "Optional linked repo-relative files." },
         memoryId: { type: "string", description: "Optional existing memory ID to update." },
@@ -1180,7 +1203,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       type: "object",
       properties: {
         memoryId: { type: "string", description: "Exact existing memory ID." },
-        verdict: { type: "string", enum: ["used", "stale", "wrong", "duplicate"], description: "Evidence-backed verdict. Used means the memory materially informed the work; stale, wrong, and duplicate identify a verified defect." },
+        verdict: { type: "string", enum: [...ATLAS_MEMORY_AGENT_FEEDBACK_VERDICTS], description: "Evidence-backed verdict. Used means the memory materially informed the work; stale, wrong, and duplicate identify a verified defect." },
         detail: { type: "string", description: "Optional short evidence note (one sentence)." },
       },
       required: ["memoryId", "verdict"],
@@ -1196,7 +1219,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       properties: {
         symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Symbols to probe." },
         fileRelPaths: { type: "array", items: { type: "string" }, description: "Files to probe." },
-        domains: { type: "array", items: { type: "string", enum: ["general", "ux", "schema", "security", "performance"] }, description: "Optional strict domain whitelist. General is a distinct domain, not a wildcard; omit this field to disable domain filtering." },
+        domains: { type: "array", items: { type: "string", enum: [...ATLAS_MEMORY_DOMAINS] }, description: "Optional strict domain whitelist. General is a distinct domain, not a wildcard; omit this field to disable domain filtering." },
       },
       required: [],
       additionalProperties: false,
@@ -1211,7 +1234,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       properties: {
         symbolIds: { type: "array", items: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN }, description: "Symbols whose attached memories should be fetched." },
         fileRelPaths: { type: "array", items: { type: "string" }, description: "Files whose attached memories should be fetched." },
-        domains: { type: "array", items: { type: "string", enum: ["general", "ux", "schema", "security", "performance"] }, description: "Optional strict domain whitelist. General is a distinct domain, not a wildcard; omit this field to disable domain filtering." },
+        domains: { type: "array", items: { type: "string", enum: [...ATLAS_MEMORY_DOMAINS] }, description: "Optional strict domain whitelist. General is a distinct domain, not a wildcard; omit this field to disable domain filtering." },
       },
       required: [],
       additionalProperties: false,
@@ -1273,7 +1296,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
       type: "object",
       properties: {
         repoId: { type: "string", description: "Optional repository identifier; defaults to the current ATLAS repo." },
-        scope: { type: "string", enum: ["session", "history", "both"], description: "Stats scope." },
+        scope: { type: "string", enum: [...ATLAS_USAGE_SCOPES], description: "Stats scope." },
         since: { type: "string", description: "Optional ISO timestamp lower bound." },
         limit: { type: "integer", description: "Maximum history rows." },
         aggregateLimit: { type: "integer", description: "Maximum rows scanned for aggregate totals. Default: 1000." },
@@ -1300,7 +1323,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         queryTerms: { type: "array", items: { type: "string" }, description: "Terms for intent-mode output excerpts." },
         maxResponseLines: { type: "integer", description: "Maximum lines in summary mode." },
         persistOutput: { type: "boolean", description: "Persist full redacted output for runtime.queryOutput. Defaults true." },
-        outputMode: { type: "string", enum: ["minimal", "summary", "intent"], description: "Response verbosity. Defaults to minimal." },
+        outputMode: { type: "string", enum: [...ATLAS_RUNTIME_OUTPUT_MODES], description: "Response verbosity. Defaults to minimal." },
       },
       required: ["runtime"],
       additionalProperties: false,
@@ -1317,7 +1340,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         queryTerms: { type: "array", items: { type: "string" }, description: "Keywords to search for." },
         maxExcerpts: { type: "integer", description: "Maximum excerpt windows to return." },
         contextLines: { type: "integer", description: "Context lines around each match." },
-        stream: { type: "string", enum: ["stdout", "stderr", "both"], description: "Output stream to search." },
+        stream: { type: "string", enum: [...ATLAS_RUNTIME_STREAMS], description: "Output stream to search." },
       },
       required: ["artifactHandle", "queryTerms"],
       additionalProperties: false,

@@ -234,6 +234,10 @@ export const MEANINGFUL_ATLAS_ACTIONS = readonlySet([
   "memory.feedback",
 ]);
 
+// Tools that execute the repository's tests or checks. Issuing one grants test
+// capability, so tool contracts and the test policy key on this set.
+export const DETERMINISTIC_TEST_TOOLS = readonlySet(["run_scoped_checks", "run_unit_test"]);
+
 // Legacy ToolGate compatibility vocabulary. The MCP runtime no longer
 // enforces ATLAS-first admission; native tool catalog entries use native access.
 export const GATED_NATIVE_TOOLS = readonlySet([
@@ -253,6 +257,24 @@ export const TOOL_OBSERVATION_ALIASES = Object.freeze({
   shell: "bash",
   exec_command: "bash",
 });
+
+// Actions that take the Atlas executor's per-repo write slot: they serialize
+// in-process against every other action on the repo. Broader than
+// ATLAS_MUTATING_ACTIONS (the repository-write policy): memory and feedback
+// writes also serialize here. Every entry must be a registered action.
+export const ATLAS_WRITE_SLOT_ACTIONS = readonlySet([
+  "repo.register",
+  "index.refresh",
+  "scip.ingest",
+  "workflow",
+  "buffer.push",
+  "buffer.checkpoint",
+  "agent.feedback",
+  "memory.store",
+  "memory.feedback",
+  "policy.set",
+  "runtime.execute",
+]);
 
 export const ATLAS_MUTATING_ACTIONS = readonlySet([
   "buffer.push",

@@ -1,4 +1,4 @@
-import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { TERMINAL_JOB_STATUSES, DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isTestCollateralPath } from "../../../shared/policies/functions/scope-auto-approval.js";
 
@@ -27,7 +27,7 @@ export function unfinishedTestOwners(job, payload = {}) {
 export function jobTestPermission(jobId, requestedPath) {
   if (!jobId) return null;
   const job = getDb().prepare("SELECT * FROM jobs WHERE id = ?").get(Number(jobId));
-  if (!job || !["dev", "fix"].includes(job.job_type)) return null;
+  if (!job || !DEV_ROLE_JOB_TYPES.has(job.job_type)) return null;
   const payload = JSON.parse(job.payload_json || "{}");
   const file = paths([requestedPath])[0];
   if (!jobTestPaths(payload).includes(file)) return { allowed: false, reason: "Test is outside this job's selected tests and writable scope." };

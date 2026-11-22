@@ -9,6 +9,7 @@ import {
   getAtlasUsageTelemetryStats,
 } from "../../../classes/v2/UsageTelemetry.js";
 import { openUsageStoreReadOnly } from "./usage-store.js";
+import { ATLAS_USAGE_SCOPES } from "../../../../../catalog/atlas-params.js";
 
 /**
  * @param {{
@@ -31,7 +32,7 @@ export function usageStats({ versionId, params, ledger, ledgerPath, repoId }) {
   const db = store.db;
   try {
     const effectiveRepoId = effectiveRepo(repoId, params.repoId);
-    const scope = ["session", "history", "both"].includes(String(params.scope || ""))
+    const scope = ATLAS_USAGE_SCOPES.includes(String(params.scope || ""))
       ? String(params.scope)
       : "both";
     const since = typeof params.since === "string" && params.since.trim() ? params.since.trim() : null;

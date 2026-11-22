@@ -15,6 +15,7 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getRemotePricingMap } from "../../providers/functions/model-catalog-store.js";
 import { providerLongContextRateMultipliers } from "../../../catalog/provider-economics.js";
+import { MODEL_TIERS } from "../../../catalog/model.js";
 
 // Anthropic prompt-caching: a cache write costs a TTL-dependent premium over
 // the base input rate — 1.25x for a 5-minute entry, 2.0x for a 1-hour entry.
@@ -154,7 +155,7 @@ function normalizeModel(value) {
 
 function normalizeTier(value) {
   const raw = String(value || "").trim().toLowerCase();
-  return raw === "cheap" || raw === "standard" || raw === "strong" ? raw : null;
+  return MODEL_TIERS.includes(raw) ? raw : null;
 }
 
 function normalizeRequiredRate(value) {

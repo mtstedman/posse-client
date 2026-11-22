@@ -1,3 +1,4 @@
+import { AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../catalog/handoff.js";
 // Preserve the association and snapshot identity without duplicating source bodies.
 export function projectResearchClaimEvidence(report = {}) {
   return (Array.isArray(report.claims) ? report.claims : []).map(([claim, detail], index) => ({
@@ -6,7 +7,7 @@ export function projectResearchClaimEvidence(report = {}) {
     ...(Array.isArray(detail?.unverified_evidence) && detail.unverified_evidence.length > 0 ? {
       unverified_evidence: detail.unverified_evidence.map(({ selector, code }) => ({ selector, code })),
     } : {}),
-    evidence: ["evidence", "proof", "support"].flatMap(lane => (
+    evidence: AGENT_HANDOFF_CLAIM_CITATION_FIELDS.flatMap(lane => (
       Array.isArray(detail?.[lane]) ? detail[lane] : []
     ).map(item => ({
       lane,

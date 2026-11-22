@@ -54,6 +54,8 @@ import { resolveVendoredSourcePromotions } from "../../functions/v2/retrieval/ve
 import { AtlasToolDispatchCache } from "./AtlasToolDispatchCache.js";
 import fs from "node:fs";
 import path from "node:path";
+import { ATLAS_GATEWAY_FAMILIES } from "../../../../catalog/atlas-tools.js";
+import { ATLAS_WRITE_SLOT_ACTIONS } from "../../../../catalog/tool-surface/roles.js";
 
 const DEFAULT_DEDUPE_WINDOW_MS = 1500;
 const DEFAULT_WAIT_MS = 120_000;
@@ -105,21 +107,9 @@ const ATLAS_READONLY_DEDUPE_ACTIONS = new Set([
 // (memory.feedback belongs here — it serializes in-process — but is lane-safe
 // on the reader thread). Every entry must be a registered action (pinned by
 // the parity suite).
-export const ATLAS_BLOCKING_ACTIONS = new Set([
-  "repo.register",
-  "index.refresh",
-  "scip.ingest",
-  "workflow",
-  "buffer.push",
-  "buffer.checkpoint",
-  "agent.feedback",
-  "memory.store",
-  "memory.feedback",
-  "policy.set",
-  "runtime.execute",
-]);
+export const ATLAS_BLOCKING_ACTIONS = ATLAS_WRITE_SLOT_ACTIONS;
 
-const ATLAS_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent"]);
+const ATLAS_GATEWAY_ACTIONS = new Set(ATLAS_GATEWAY_FAMILIES);
 const ATLAS_REPO_PATH_SCALAR_FIELDS = new Set([
   "file",
   "filePath",

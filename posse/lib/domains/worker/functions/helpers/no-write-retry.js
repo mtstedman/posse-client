@@ -8,6 +8,7 @@ import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.j
 import { gitExecAsync } from "../../../git/functions/utils.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 
 const SOFT_NO_WRITE_ATTEMPTS = 2;
 const NO_WRITE_RETRY_BACKOFF_MS = 30_000;
@@ -33,7 +34,7 @@ export function shouldShortCircuitNoWriteAssessment({
   satisfiedNoop = false,
   verifiedNoChange = false,
 } = {}) {
-  if (!(job?.job_type === "dev" || job?.job_type === "fix")) return false;
+  if (!DEV_ROLE_JOB_TYPES.has(job?.job_type)) return false;
   if (hasFileChanges || satisfiedNoop || verifiedNoChange) return false;
   // DB-only jobs never produce file changes; their work lives in the project
   // database and the assessor verifies it via read-lane project_db_query, so

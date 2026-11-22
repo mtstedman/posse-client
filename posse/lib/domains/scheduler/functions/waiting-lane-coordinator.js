@@ -35,11 +35,12 @@ import {
 import { ATLAS_MAIN_GENERATION_PUBLISHED_PROOF_REASONS } from "../../atlas/functions/v2/contracts/jobs.js";
 import { readBoolSetting, readPositiveIntSetting } from "./config.js";
 import { recordWaitingLaneTelemetry } from "../../observability/functions/waiting-lane-telemetry.js";
+import { ATLAS_MAIN_GENERATION_PURPOSES } from "../../../catalog/atlas.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 const LIVE_PREPARATION_JOB_STATUS_SET = new Set(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
-const MAIN_GENERATION_PURPOSE_SET = new Set(["main-incremental", "main-full", "main-merge"]);
+const MAIN_GENERATION_PURPOSE_SET = new Set(ATLAS_MAIN_GENERATION_PURPOSES);
 const SETTLED_ATLAS_PURPOSE_SET = new Set([
   WAITING_LANE_ATLAS_PURPOSES.SNAPSHOT,
   WAITING_LANE_ATLAS_PURPOSES.CATCHUP,

@@ -1,6 +1,6 @@
 import { TIER_ORDER, OUTPUT_TOKEN_CONFIGS, ROLE_ALIASES, TURN_CONFIGS } from "../../../../catalog/provider-turns.js";
 import { getSetting } from "../../../queue/functions/index.js";
-import { UP_FRONT_TURN_BUDGET_PROVIDERS } from "../../../../catalog/provider.js";
+import { NATIVE_API_PROVIDERS, UP_FRONT_TURN_BUDGET_PROVIDERS } from "../../../../catalog/provider.js";
 
 
 
@@ -99,7 +99,7 @@ export function getMaxTurnsForProvider(providerName, {
     if (role === "planner") return Math.max(1, base + (modelTier === "strong" ? 4 : 0) + (deepthink ? 8 : 0));
     if (role === "assessor") return Math.max(1, base + (modelTier === "cheap" ? -4 : 0));
   }
-  if ((providerName === "anthropic" || providerName === "openai" || providerName === "grok") && role === "assessor") {
+  if (NATIVE_API_PROVIDERS.includes(providerName) && role === "assessor") {
     return modelTier === "cheap" ? 4 : 6;
   }
   return Math.max(1, base);

@@ -8,6 +8,13 @@ import { readonlySet } from "./readonly-collections.js";
 import { NUDGE_STATES, QUESTION_STATES, REPLACEABLE_NUDGE_STATES } from "./work-item-interactions.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./tools/interaction.js";
 import { HUMAN_GATE_FEEDBACK_MAX_CHARS } from "./human-input.js";
+import {
+  TOOL_BENIGN_OBSERVATION_TYPES,
+  TOOL_HARNESS_OBSERVATION_SUFFIXES,
+  TOOL_MESSAGE_OBSERVATION_TYPES,
+  TOOL_SYSTEM_NOTICE_OBSERVATION_TYPES,
+  TOOL_SYSTEM_RECORD_OBSERVATION_TYPES,
+} from "./observation.js";
 
 // @catalog-sync id=posse.agent_conversation.vocabulary role=authority relation=strict compare=names extract=strings projection_source=posse
 // @linked_repos posse:posse/test/fixtures/agent-conversation/protocol/conversation-v1.json posse-remote:rust/catalog/control/conversation.rs posse-bossy:catalog/agent_conversation.go posse-remote-control:src/catalog/conversation.ts
@@ -109,21 +116,12 @@ export const AGENT_CONVERSATION_QUESTION_STATES = QUESTION_STATES;
 export const AGENT_CONVERSATION_GATE_KINDS = readonlySet(Object.keys(WORK_ITEM_QUESTION_CHOICE_IDS));
 
 // Rows that are represented elsewhere in the conversation (messages and
-// receipts) or are harness bookkeeping, never agent tool calls.
-export const AGENT_CONVERSATION_MESSAGE_TOOL_TYPES = readonlySet([
-  "tool.agent_feedback",
-  "tool.get_operator_feedback",
-  "tool.ack_operator_feedback",
-]);
+// receipts) or are harness bookkeeping, never agent tool calls. The
+// observation catalog owns the classification; these names are its views.
+export const AGENT_CONVERSATION_MESSAGE_TOOL_TYPES = TOOL_MESSAGE_OBSERVATION_TYPES;
 export const AGENT_CONVERSATION_NON_CALL_TOOL_TYPES = readonlySet([
-  "tool.response_control",
-  "tool.response_transform",
-  "tool.surface.issued",
-  "tool.surface.list_failed",
-  "tool.budget_advisory",
-  "tool.sub_agent.error",
-  "tool.sub_agent_next_input.error",
-  "tool.dispatch_agent.error",
+  ...TOOL_SYSTEM_NOTICE_OBSERVATION_TYPES,
+  ...TOOL_SYSTEM_RECORD_OBSERVATION_TYPES,
 ]);
-export const AGENT_CONVERSATION_HARNESS_TOOL_SUFFIXES = Object.freeze([".prefetch", ".autofeedback"]);
-export const AGENT_CONVERSATION_BENIGN_TOOL_TYPES = readonlySet(["tool.read.not_found"]);
+export const AGENT_CONVERSATION_HARNESS_TOOL_SUFFIXES = TOOL_HARNESS_OBSERVATION_SUFFIXES;
+export const AGENT_CONVERSATION_BENIGN_TOOL_TYPES = TOOL_BENIGN_OBSERVATION_TYPES;

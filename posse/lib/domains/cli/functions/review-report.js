@@ -21,6 +21,7 @@ import { resolveCanonicalCallAccounting } from "../../billing/functions/usage-se
 import { jobIsDisplayFailure, jobIsWriteStep, reviewVisibleJobs } from "../../ui/functions/display/helpers/job-status.js";
 import { FAILED_JOB_STATUSES } from "../../../catalog/job.js";
 import { getAtlas137AcceptanceTelemetry } from "../../observability/functions/atlas137-report.js";
+import { TOOL_CALL_OBSERVATION_SQL } from "../../../catalog/observation.js";
 
 export { stripAnsi };
 
@@ -414,9 +415,7 @@ export function buildReviewReportData(reviewable, {
           ) AS failed
         FROM job_observations
         WHERE work_item_id IN (${placeholders})
-          AND observation_type LIKE 'tool.%'
-          AND observation_type != 'tool.response_transform'
-          AND observation_type NOT LIKE '%.started'
+          AND ${TOOL_CALL_OBSERVATION_SQL()}
         GROUP BY work_item_id, observation_type
         ORDER BY work_item_id ASC, count DESC, observation_type ASC
       `).all(...workItemIds);

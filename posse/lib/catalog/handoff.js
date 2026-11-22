@@ -1,4 +1,5 @@
 import { readonlySet } from "./readonly-collections.js";
+import { HASH_REF_LANES } from "./hash-store.js";
 // Canonical terminal-handoff vocabulary shared by schemas and runtime policy.
 import { DEV_MODE_ORDER } from "./dev-mode.js";
 import { JOB_MODEL_TIERS, JOB_REASONING_EFFORTS } from "./job.js";
@@ -46,6 +47,14 @@ export const AGENT_HANDOFF_PLANNER_REPORT_KEYS = Object.freeze([
   ...AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS,
   "payload",
 ]);
+
+// Claim fields that hold hash-ref selectors: the generic `evidence` list and
+// one list per hash-ref lane. Citing fields leave out `decoy`, the lane for
+// refs the agent read and rejected.
+export const AGENT_HANDOFF_CLAIM_REF_FIELDS = Object.freeze(["evidence", ...HASH_REF_LANES]);
+export const AGENT_HANDOFF_CLAIM_CITATION_FIELDS = Object.freeze(
+  AGENT_HANDOFF_CLAIM_REF_FIELDS.filter((field) => field !== "decoy"),
+);
 
 export const AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES = Object.freeze(["high", "medium", "low"]);
 export const AGENT_HANDOFF_PLANNER_METADATA_ENUMS = Object.freeze({
@@ -236,6 +245,12 @@ export const AGENT_HANDOFF_PROFILE_POLICY = Object.freeze({
     maxHandoffs: 1,
   }),
 });
+
+// Outcomes a handoff tool accepts: the union of its profiles' outcomes in
+// profile order, so a tool schema cannot drift from the runtime policy.
+export function agentHandoffProfileOutcomes(...profiles) {
+  return [...new Set(profiles.flatMap((profile) => AGENT_HANDOFF_PROFILE_POLICY[profile].outcomes))];
+}
 
 // Prompt-facing disclosure for the runtime's researcher evidence rule.
 // Human-facing report claims remain assessment-grade, but an unsupported

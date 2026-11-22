@@ -18,11 +18,8 @@ import {
   AGENT_CONVERSATION_BENIGN_TOOL_TYPES,
   AGENT_CONVERSATION_BOUNDS as BOUNDS,
   AGENT_CONVERSATION_GROUP_CLOSER as CLOSER,
-  AGENT_CONVERSATION_HARNESS_TOOL_SUFFIXES,
-  AGENT_CONVERSATION_MESSAGE_TOOL_TYPES,
-  AGENT_CONVERSATION_NON_CALL_TOOL_TYPES,
 } from "../../../catalog/agent-conversation.js";
-import { AGENT_COMMENTARY_OBSERVATION_TYPE, isInternalBackgroundObservationType } from "../../../catalog/observation.js";
+import { AGENT_COMMENTARY_OBSERVATION_TYPE, isToolCallObservationType } from "../../../catalog/observation.js";
 import { boundedText, toolCallFacts } from "./tool-call-tiers.js";
 
 const STARTED_SUFFIX = ".started";
@@ -60,13 +57,7 @@ function detailObject(row) {
 
 /** True for observation types that never become conversation call items. */
 export function isExcludedConversationToolType(type) {
-  const text = String(type || "");
-  const base = text.endsWith(STARTED_SUFFIX) ? text.slice(0, -STARTED_SUFFIX.length) : text;
-  if (!base.startsWith("tool.")) return true;
-  if (AGENT_CONVERSATION_MESSAGE_TOOL_TYPES.has(base)) return true;
-  if (AGENT_CONVERSATION_NON_CALL_TOOL_TYPES.has(base)) return true;
-  if (isInternalBackgroundObservationType(base) || isInternalBackgroundObservationType(text)) return true;
-  return AGENT_CONVERSATION_HARNESS_TOOL_SUFFIXES.some((suffix) => base.endsWith(suffix));
+  return !isToolCallObservationType(type);
 }
 
 function callOutcome(detail) {

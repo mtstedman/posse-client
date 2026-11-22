@@ -29,7 +29,7 @@ const MAX_SETUP_TRANSIENT_INFRA_RETRIES = 3;
 // evicts entries idle for 4× the notice interval. Stale entries are harmless
 // (a finished job's key is simply never consulted again).
 const setupDeferNoticeLastSeen = new Map();
-import { WORKTREE_JOB_TYPES } from "../../../../catalog/job.js";
+import { WORKTREE_JOB_TYPES, DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 import { jobNeedsGitWorktreeAsync } from "../../../git/functions/policy.js";
 import { disposeWorkItemAtlasGraph, ensureWorkItemAtlasJoinAsync, getAtlasIntegrationConfig } from "../../../integrations/functions/atlas.js";
 import { atlasRuntimeDisabledReasonForRepo } from "../execution/atlas-warm-job.js";
@@ -410,7 +410,7 @@ async function rollbackCrossWiSyncPathsAsync(wtPath, paths = [], { signal = null
 // this setup merged in, and its branch may be gone.
 function dropRejectedCrossWiFileSyncs(worker, job) {
   const fresh = getJob(job.id) || job;
-  const mergesTarget = job.job_type === "dev" || job.job_type === "fix";
+  const mergesTarget = DEV_ROLE_JOB_TYPES.has(job.job_type);
   const syncSourceReason = (sync) => {
     if (mergesTarget && getWorkItem(sync.source_work_item_id)?.merge_state === "merged") return "upstream_merged";
     return crossWiSyncSourceRejection(sync.source_work_item_id, sync.path, sync.lock_kind);
@@ -1086,7 +1086,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     }, { signal });
 
     await yieldNow({ signal });
-    const rebaseEligible = job.job_type === "dev" || job.job_type === "fix";
+    const rebaseEligible = DEV_ROLE_JOB_TYPES.has(job.job_type);
     if (rebaseEligible) {
       await withPhase("target_merge", prepTrace, async () => {
         await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {

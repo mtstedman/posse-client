@@ -35,13 +35,6 @@ export const SOURCE_WINDOW_DISPLAY_FIELDS = Object.freeze({
   REUSED: "reused",
 });
 
-// Native code-window syntax navigation; not an exhaustive behavioral proof.
-export const SOURCE_DECISION_NAVIGATION = Object.freeze({
-  kinds: Object.freeze(["condition", "choice", "coalesce", "short_circuit"]),
-  maxPoints: 16,
-  maxCandidates: 64,
-});
-
 // Mirrored by the native retrieval catalog. Missing legacy provenance is
 // unknown, never implicit proof that generated content is original source.
 export const CODE_CONTENT_KINDS = Object.freeze({

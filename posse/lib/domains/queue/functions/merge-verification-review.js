@@ -58,6 +58,7 @@ import {
 } from "../../../catalog/verification.js";
 import { now, runImmediateTransaction } from "./common.js";
 import { parseJobPayload } from "./payload.js";
+import { TERMINAL_JOB_STATUSES, DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 export const MERGE_REVIEW_MIN_RISK = 4;
 // Gate payload key set when "fail" requeued the work item: that answer was
@@ -65,7 +66,7 @@ export const MERGE_REVIEW_MIN_RISK = 4;
 export const MERGE_VERIFICATION_REJECTION_KEY = "rejection_requeue";
 export const MERGE_FAILURE_RECOVERY_KEY = "merge_failure_recovery";
 
-const IMPLEMENTATION_JOB_TYPES = new Set(["dev", "fix"]);
+const IMPLEMENTATION_JOB_TYPES = DEV_ROLE_JOB_TYPES;
 const SCOPE_FIELDS = Object.freeze(["files_to_modify", "files_to_create", "files_to_delete", "create_roots"]);
 export const SENSITIVE_SCOPE_TERMS = Object.freeze([
   "auth", "authn", "authz", "authenticate", "authentication", "authorization", "authorize",
@@ -335,7 +336,7 @@ export function mergeVerificationReviewGateState(workItemId, { waivedJobIds = nu
   if (!row) return null;
   const payload = parseJobPayload(row);
   const gateState = row.gate_state || null;
-  const open = ["open", "resolving"].includes(gateState) || (gateState == null && !["succeeded", "failed", "canceled", "dead_letter"].includes(row.status));
+  const open = ["open", "resolving"].includes(gateState) || (gateState == null && !TERMINAL_JOB_STATUSES.includes(row.status));
   const passed = gateState === "resolved" && row.resolution_action === "pass";
   const requeued = !!payload[MERGE_VERIFICATION_REJECTION_KEY];
   const covered = new Set((payload.waived_job_ids || []).map(Number));

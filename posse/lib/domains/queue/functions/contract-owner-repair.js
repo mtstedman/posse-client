@@ -5,10 +5,16 @@ import { parseJobPayload, resetJobPayloadForReexecution } from "./payload.js";
 import { updateJobPayload } from "./queue-store.js";
 import { addDependency } from "./dependencies.js";
 import { FINAL_REVIEW_CONTRACT_FIELDS } from "../../../catalog/final-review.js";
+import { DEV_ROLE_JOB_TYPES, ACTIVE_LEASE_STATUSES, DEADLOCK_TERMINAL_STATUSES } from "../../../catalog/job.js";
 
 // Called inside the assessor's existing transaction after the provider stopped.
 // Authority comes from the compiled contract binding AND the owner's exact
 // planned scope. Historical prose or a shared filename alone grants nothing.
+// A repair or continuation already in flight for the same fingerprint is
+// reused rather than spawned again: not started, leased or running, awaiting
+// its assessment, or parked on review.
+const LIVE_REPAIR_JOB_STATUSES = new Set(["queued", ...ACTIVE_LEASE_STATUSES, "waiting_on_review"]);
+
 export function coordinateContractOwnerRepair({ job, paths, proposedFix, spawn }) {
   const db = getDb();
   if (!db.inTransaction) throw new Error("Contract repair requires an assessor transaction");
@@ -17,7 +23,7 @@ export function coordinateContractOwnerRepair({ job, paths, proposedFix, spawn }
   if (!paths.length || !contracts.length || consumer.oneshot_origin || consumer.oneshot) return null;
   const siblings = db.prepare("SELECT * FROM jobs WHERE work_item_id = ?").all(job.work_item_id);
   const candidates = siblings.filter((owner) => {
-    if (owner.id === job.id || !["dev", "fix"].includes(owner.job_type) || !["queued", "succeeded"].includes(owner.status)) return false;
+    if (owner.id === job.id || !DEV_ROLE_JOB_TYPES.has(owner.job_type) || !["queued", "succeeded"].includes(owner.status)) return false;
     const payload = parseJobPayload(owner);
     if (payload._contract_owner_repair) return false;
     const ownsContract = contracts.some((contract) => contract.owner_task_id === payload._plan_task_id
@@ -35,15 +41,15 @@ export function coordinateContractOwnerRepair({ job, paths, proposedFix, spawn }
   const ownerPayload = parseJobPayload(owner);
   const fingerprint = createHash("sha256").update(JSON.stringify([owner.id, [...paths].sort(), proposedFix.payload_json.fix_instructions])).digest("hex");
   const existingContinuation = siblings.find((sibling) => sibling.parent_job_id === job.id
-    && ["queued", "leased", "running", "assessing", "waiting_on_review"].includes(sibling.status)
+    && LIVE_REPAIR_JOB_STATUSES.has(sibling.status)
     && parseJobPayload(sibling)._contract_consumer_repair?.fingerprint === fingerprint);
   if (existingContinuation) {
     const repairId = parseJobPayload(existingContinuation)._contract_consumer_repair.repair_job_id;
     const existingRepair = siblings.find((sibling) => sibling.id === repairId);
-    if (existingRepair && !dependsOnConsumer(existingRepair.id) && !["failed", "canceled", "dead_letter"].includes(existingRepair.status)) return { repair: existingRepair, continuation: existingContinuation };
+    if (existingRepair && !dependsOnConsumer(existingRepair.id) && !DEADLOCK_TERMINAL_STATUSES.includes(existingRepair.status)) return { repair: existingRepair, continuation: existingContinuation };
   }
   const prior = siblings.filter((sibling) => parseJobPayload(sibling)._contract_owner_repair?.owner_job_id === owner.id);
-  let repair = prior.find((sibling) => ["queued", "leased", "running", "assessing", "waiting_on_review"].includes(sibling.status)
+  let repair = prior.find((sibling) => LIVE_REPAIR_JOB_STATUSES.has(sibling.status)
     && parseJobPayload(sibling)._contract_owner_repair.fingerprint === fingerprint);
   if (!repair && prior.length >= CONTRACT_OWNER_REPAIR_LIMIT) return null;
   if (repair && dependsOnConsumer(repair.id)) return null;

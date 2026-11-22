@@ -13,7 +13,7 @@ import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "..
 import fs from "fs";
 import path from "path";
 import { ARTIFACT_TASK_MODE_VALUES } from "../../../catalog/artifact.js";
-import { JOB_MODEL_TIERS, JOB_REASONING_EFFORTS, PLANNER_ALLOWED_JOB_TYPES, PLANNER_MODEL_TIER_ALIASES, PLANNER_REASONING_EFFORT_ALIASES } from "../../../catalog/job.js";
+import { JOB_MODEL_TIERS, JOB_REASONING_EFFORTS, PLANNER_ALLOWED_JOB_TYPES, PLANNER_MODEL_TIER_ALIASES, PLANNER_REASONING_EFFORT_ALIASES, DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 import { DEFAULT_DEV_MODE } from "../../../catalog/dev-mode.js";
 import { COMMON_WEB_ROOTS, FRONTEND_DESIGN_LOGIC_PHRASES, FRONTEND_DESIGN_UI_SURFACE_PHRASES, FRONTEND_DESIGN_VISUAL_PHRASES, SKILL_INFERENCE_BROWSER_SCRIPT_EXTENSIONS, SKILL_INFERENCE_COMPONENT_EXTENSIONS, SKILL_INFERENCE_LOGIC_BASENAME_WORDS, SKILL_INFERENCE_LOGIC_DIRECTORIES, SKILL_INFERENCE_MARKUP_EXTENSIONS, SKILL_INFERENCE_STYLESHEET_EXTENSIONS, SKILL_INFERENCE_TEST_BASENAME_PATTERN, SKILL_INFERENCE_TEST_DIRECTORIES } from "../../../catalog/skill-inference.js";
 import { DB_TASK_PRE_MERGE_POLICIES, SETTING_KEYS } from "../../../catalog/settings.js";
@@ -2800,7 +2800,7 @@ function compileJobsFromPlan(worker, planJob, tasks, {
         });
         const operationalCommands = createdIds.flatMap((jobId) => {
           const createdJob = getJob(jobId);
-          if (!createdJob || !["dev", "fix"].includes(createdJob.job_type)) return [];
+          if (!createdJob || !DEV_ROLE_JOB_TYPES.has(createdJob.job_type)) return [];
           const createdPayload = parseJobPayload(createdJob);
           const required = createdPayload?._operational_command_approval_required;
           const request = operationalCommandApprovalRequest(createdPayload?.test_command, { cwd: planReadRoot });

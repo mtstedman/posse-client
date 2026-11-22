@@ -20,6 +20,7 @@ import { realpathExistingPrefix } from "../../../../domains/runtime/functions/fs
 import { protectedMutablePathReason, relativePathFromCwd } from "../../../../domains/runtime/functions/protected-paths.js";
 import { createTestExecutionExecutors } from "./test-execution.js";
 import { createObservationWrapper } from "./factory.js";
+import { READ_FILE_LIMITS } from "../../../../catalog/tools/source-navigation.js";
 import { boundedSearchRows, renderSearchContentRows } from "./search-results.js";
 import { createTextMutationHelpers } from "./edits-mutations.js";
 import { applyBatchEdits, ambiguousExactMatchMessage, EMPTY_FIND_ERROR, resolveLineSpan } from "./edit-spans.js";
@@ -33,14 +34,6 @@ import { normPath, resolvePathWithin } from "../../../scope/functions/path.js";
 const READ_FILE_DEFAULT_LIMIT = 2000;
 const READ_FILE_STREAM_CHUNK_BYTES = 64 * 1024;
 const READ_FILE_LARGE_MAX_SIZE_BYTES = 512 * 1024 * 1024;
-// jsonPath/search/maxBytes reads parse or scan the whole file, so they get a
-// bounded ceiling above the plain-read limit: an 8.9 MB single-line JSON file
-// (2026-10-01) could not be read at all, by line paging or structured modes.
-const READ_FILE_STRUCTURED_MAX_SIZE_BYTES = 64 * 1024 * 1024;
-const READ_FILE_LARGE_STRUCTURED_CONTENT_BYTES = 2 * 1024;
-// Bound the rendered response before observation/context accounting. File-size
-// limits alone do not bound a page of minified text or structured match output.
-const READ_FILE_MAX_RESULT_BYTES = 256 * 1024;
 const LONG_LINE_READ_HINT = "use read_file with jsonPath to extract a JSON value, search to get match snippets with their columns, or maxBytes to read the first bytes";
 const HASH_FILE_MAX_SIZE_BYTES = 512 * 1024 * 1024;
 const EDIT_FILE_MAX_PATTERN_CHARS = 500;
@@ -210,12 +203,12 @@ function toNonNegativeInt(value, fallback = 0) {
 
 
 function boundedReadResult(result) {
-  return Buffer.byteLength(result, "utf8") <= READ_FILE_MAX_RESULT_BYTES
+  return Buffer.byteLength(result, "utf8") <= READ_FILE_LIMITS.maxResultBytes
     ? result
-    : `Error: Requested read result exceeds the ${READ_FILE_MAX_RESULT_BYTES}-byte response limit; request fewer lines, or ${LONG_LINE_READ_HINT}.`;
+    : `Error: Requested read result exceeds the ${READ_FILE_LIMITS.maxResultBytes}-byte response limit; request fewer lines, or ${LONG_LINE_READ_HINT}.`;
 }
 
-function readLargeFilePage(filePath, { offset, limit, maxBytes = READ_FILE_MAX_RESULT_BYTES }) {
+function readLargeFilePage(filePath, { offset, limit, maxBytes = READ_FILE_LIMITS.maxResultBytes }) {
   const firstLine = offset + 1;
   const endLine = firstLine + limit;
   const selected = [];
@@ -312,7 +305,7 @@ export function createDeterministicToolkit({
     const explicitPage = args.offset != null || args.limit != null;
     const readable = resolveDeterministicReadableFile(cwd, args.path, scopePredicates, {
       maxSizeBytes: structured
-        ? READ_FILE_STRUCTURED_MAX_SIZE_BYTES
+        ? READ_FILE_LIMITS.structuredMaxSizeBytes
         : explicitPage
           ? READ_FILE_LARGE_MAX_SIZE_BYTES
           : DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
@@ -357,8 +350,8 @@ export function createDeterministicToolkit({
         truncated: remaining > 0,
         // Above the response limit the structured result carries a bounded
         // content excerpt; the jsonPath value or search matches are the answer.
-        defaultMaxBytes: stat.size > READ_FILE_MAX_RESULT_BYTES
-          ? READ_FILE_LARGE_STRUCTURED_CONTENT_BYTES
+        defaultMaxBytes: stat.size > READ_FILE_LIMITS.maxResultBytes
+          ? READ_FILE_LIMITS.largeStructuredContentBytes
           : null,
       }));
     }

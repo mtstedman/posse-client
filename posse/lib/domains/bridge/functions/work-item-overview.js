@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES, EXECUTING_JOB_STATUSES } from "../../../catalog/job.js";
 import { BRIDGE_NON_AGENT_JOB_TYPES, BRIDGE_OPEN_GATE_STATUSES } from "../../../catalog/bridge.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
@@ -167,7 +167,7 @@ function agentStatus(job, feedback, hasLaneWait) {
   if (job.status === "canceled") return "canceled";
   if (feedback?.status) return feedback.status;
   if (hasLaneWait) return "waiting";
-  if (["leased", "running"].includes(job.status)) return "running";
+  if (EXECUTING_JOB_STATUSES.includes(job.status)) return "running";
   if (job.status === "awaiting_assessment" || job.status === "waiting_on_review") return "verifying";
   if (["blocked", "waiting_on_human", "queued"].includes(job.status)) return "waiting";
   return "unknown";

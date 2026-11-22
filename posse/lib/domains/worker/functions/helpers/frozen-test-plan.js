@@ -13,6 +13,7 @@ import { discoverUnitTestCapability, resolveUnitTestInvocation } from "../../../
 import { sha256 } from "../../../../shared/format/functions/sha256.js";
 import path from "node:path";
 import { validatePlannerTestCommand, validatePlannerTestCommandForRepository, operationalCommandApprovalRequest, safeRelativeTestDirectory, packageManagerScriptForwardedArgs } from "../../../verification/functions/planner-test-command.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 
 // A fix job's payload (verdicts/fail.js) carries its root task's test_command
 // but not the planner's tests_to_run. A fix without its own list verifies with
@@ -234,7 +235,7 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, options = {}) {
 }
 
 function resolveTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
-  if (!["dev", "fix"].includes(String(job?.job_type || ""))) return null;
+  if (!DEV_ROLE_JOB_TYPES.has(String(job?.job_type || ""))) return null;
   if (String(payload?.task_mode || "code") !== "code") return null;
   const declaredCommand = typeof payload?.test_command === "string"
     ? payload.test_command.trim()

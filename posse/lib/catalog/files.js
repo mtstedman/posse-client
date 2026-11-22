@@ -14,6 +14,11 @@ export const ATLAS_INDEXABLE_SOURCE_EXTENSIONS = readonlySet([
   ".sh", ".bash",
 ]);
 
+// Source files a JavaScript/TypeScript project's own toolchain (node, tsc,
+// eslint, its test runner) owns. `.mts`/`.cts` stay out: no runner discovery
+// recognises them yet.
+export const JS_TS_SOURCE_EXTENSIONS = readonlySet([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"]);
+
 export const HANDOFF_SOURCE_EXTENSIONS = readonlySet([
   ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs",
   ".json", ".md", ".css", ".html", ".php", ".sql", ".yml", ".yaml",

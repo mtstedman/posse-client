@@ -1,4 +1,5 @@
 import { parentPort, workerData } from "node:worker_threads";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 function post(message) {
   try { parentPort?.postMessage(message); } catch { /* worker is already closing */ }
@@ -53,12 +54,12 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
         if (otherCount > 0) parts.push(`${otherCount} other`);
         handoff.push(`\u2192 spawned: ${parts.join(", ") || "0 tasks"}`);
       } else if (job.job_type === "delegate" && job.status === "succeeded") {
-        const delegated = jobs.filter((item) => item.provider && item.provider !== "claude" && ["dev", "fix"].includes(item.job_type));
+        const delegated = jobs.filter((item) => item.provider && item.provider !== "claude" && DEV_ROLE_JOB_TYPES.has(item.job_type));
         if (delegated.length > 0) {
           const providers = [...new Set(delegated.map((item) => item.provider))];
           handoff.push(`\u2192 assigned: ${providers.join(", ")}`);
         }
-      } else if ((job.job_type === "dev" || job.job_type === "fix") && job.status === "succeeded") {
+      } else if (DEV_ROLE_JOB_TYPES.has(job.job_type) && job.status === "succeeded") {
         const payload = parseJobPayload(job);
         const files = [...(payload.files_to_modify || []), ...(payload.files_to_create || [])];
         if (files.length > 0) {
@@ -146,10 +147,18 @@ async function buildToolData({ projectDir = null, dbPath = null } = {}) {
   };
 }
 
+async function buildSystemNoticeData({ projectDir = null, dbPath = null } = {}) {
+  const { setRuntimePathOverrides } = await import("../../runtime/functions/paths.js");
+  setRuntimePathOverrides({ projectDir, dbPath });
+  const { getRecentToolSystemNotices } = await import("../../observability/functions/observations.js");
+  return getRecentToolSystemNotices({ limit: 20 });
+}
+
 async function main(task) {
   const { args = {} } = workerData || {};
   if (task === "pipeline") return buildPipelineData(args);
   if (task === "tools") return buildToolData(args);
+  if (task === "notices") return buildSystemNoticeData(args);
   throw new Error(`Unknown TUI snapshot task: ${task}`);
 }
 

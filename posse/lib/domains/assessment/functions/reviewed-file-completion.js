@@ -11,6 +11,7 @@ import { isLeaseValid } from "../../queue/functions/attempts.js";
 import { REVIEWED_COMPLETION_KEY, REVIEWED_HANDOFF_VERSION, REVIEWED_HANDOFF_REF_PREFIX } from "../../../catalog/reviewed-handoffs.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { logDurableEvent } from "../../queue/functions/events.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 // Compute while the worker owns its scoped write lease, after post-commit checks.
 // The synchronous publication below rechecks the database facts in closeout's
@@ -20,7 +21,7 @@ export async function prepareReviewedFileCompletion(job, cwd, {
 } = {}) {
   const payload = parseJobPayload(job);
   const scope = finalReviewScope(payload);
-  if (!["dev", "fix"].includes(job.job_type) || ![undefined, "code"].includes(payload.task_mode)
+  if (!DEV_ROLE_JOB_TYPES.has(job.job_type) || ![undefined, "code"].includes(payload.task_mode)
       || !scope.declared || scope.roots.length || ![...scope.files].every(exactReviewedPath)
       || (!committedHash && !verifiedNoChange)) return null;
   if (new Set([...scope.files].map(normPath)).size !== scope.files.size) return null;

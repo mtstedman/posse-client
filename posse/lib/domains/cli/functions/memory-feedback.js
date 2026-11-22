@@ -6,6 +6,7 @@
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { callAtlasMemoryAction } from "../../integrations/functions/atlas-memory.js";
 import { logEvent } from "../../queue/functions/index.js";
+import { MEMORY_FLAG_REASON_VERDICTS } from "../../../catalog/atlas.js";
 
 export const MEMORY_FEEDBACK_ACTIONS = Object.freeze(["note", "suppress", "correct", "flag"]);
 
@@ -68,11 +69,7 @@ export async function applyMemorySuppress(memoryId, { cwd = process.cwd(), detai
 }
 
 /** How human flag reasons map onto the ATLAS evidence verdicts. */
-const FLAG_REASON_TO_VERDICT = Object.freeze({
-  contradicted: "wrong",
-  wrong: "wrong",
-  duplicate: "duplicate",
-});
+const FLAG_REASON_TO_VERDICT = MEMORY_FLAG_REASON_VERDICTS;
 
 /**
  * Flag the memory stale with an evidence reason (it stops auto-surfacing but

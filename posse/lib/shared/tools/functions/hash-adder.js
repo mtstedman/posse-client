@@ -69,6 +69,7 @@ import { sourceLineDisplay } from "./source-line-display.js";
 import { contextForHashRefs, hasHashRefScope, recordHashSurfaceFailure } from "./hash-ref-context.js";
 import { boundingPolicyFor, boundedResultSlices, normalizeObjectType, overflowDigest, renderBoundedResult } from "./result-bounding.js";
 import { boundSourceWindowEnvelope, packAdditionalSourceWindows } from "./source-window-budget.js";
+import { AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../catalog/handoff.js";
 
 // Ambient-stamping experiment (2026-07-16) is FLAG-GATED after the run28
 // lesson: changing the stamp floor globally mid-experiment shifted agent
@@ -482,16 +483,6 @@ export function compactCodeWindowLensResult(toolName, result, {
   const windowDisplayPaging = pagingEnabled
     && !isDirectSymbolWindow(args, data) && !isCompleteFileWindow(data);
   let compacted = false;
-
-  // Optional syntax navigation must not trigger paging or consume the inline
-  // source budget. Omit it before computing page boundaries when over budget.
-  if (tool === "code.window" && pagingEnabled && result.length > min
-    && (Object.hasOwn(data, "decisionPoints") || Object.hasOwn(data, "decisionPointsTruncated"))) {
-    delete data.decisionPoints;
-    delete data.decisionPointsTruncated;
-    result = JSON.stringify(envelope);
-    compacted = true;
-  }
 
   // A returned anonymous callable is useful as an addressable source scope,
   // but not as a durable indexed symbol. Materialize its exact native range
@@ -1138,7 +1129,7 @@ function collectBriefEvidenceRefs(value, out, depth = 0) {
   }
   if (typeof value === "object") {
     if (value.ref != null) collectBriefEvidenceRefs(value.ref, out, depth + 1);
-    for (const key of ["evidence", "proof", "support"]) {
+    for (const key of AGENT_HANDOFF_CLAIM_CITATION_FIELDS) {
       if (value[key] != null) collectBriefEvidenceRefs(value[key], out, depth + 1);
     }
     return;
@@ -1820,14 +1811,15 @@ function fetchResultText(result, args = {}, { researchDelivery = false } = {}) {
     const paged = materializeHashRefView(fullText, args);
     const handoffLines = String(fullText).replace(/\r\n?/g, "\n").split("\n");
     if (handoffLines.length > 1 && handoffLines.at(-1) === "") handoffLines.pop();
+    // The stored digest has no model reader, and the stored size is the
+    // page's `full_size_chars`. The degraded branch below has no page, so it
+    // keeps both.
     return JSON.stringify({
       ok: true,
       ref: entry.ref,
       object_type: entry.object_type,
       source: researchDelivery ? boundedResearchFetchString(entry.source) : entry.source,
       note: researchDelivery ? boundedResearchFetchString(entry.note) : entry.note,
-      content_hash: entry.content_hash,
-      size_chars: entry.size_chars,
       handoff_line_count: handoffLines.length,
       handoff_requires_slice: handoffLines.length > 40 || fullText.length > 4000,
       text: paged.text,
@@ -1919,7 +1911,6 @@ function attachFetchedCapabilityRefs(renderedText, {
     rendered.evidence_ref.citable = false;
     rendered.evidence_ref.non_citable_reason = "search_result_view";
     if (sourceEntry?.ref) rendered.evidence_ref.parent_ref = sourceEntry.ref;
-    rendered.evidence_ref.next_action = "Use a validated coordinate or slice from parent_ref; numbered search-result rows are navigation, not citable source.";
   } else {
     const visible = materializeHashRefEvidenceForContext(hashContext, evidenceRef);
     if (visible?.ok && visible.entry?.metadata?.citable === false) {

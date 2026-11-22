@@ -47,6 +47,8 @@ import {
   getAtlasJobCacheTtlMs,
   getAtlasPrefetchCacheTtlMs,
 } from "../../settings/functions/tunables.js";
+import { ATLAS_GATEWAY_FAMILIES } from "../../../catalog/atlas-tools.js";
+import { ATLAS_WRITE_SLOT_ACTIONS } from "../../../catalog/tool-surface/roles.js";
 
 const DEFAULT_EMBEDDED_MAX_BUFFER_BYTES = 1024 * 1024 * 4;
 const ATLAS_JOB_CACHE_PER_JOB_MAX = 32;
@@ -226,20 +228,8 @@ const ATLAS_V2_VIEW_FRESHNESS_EXEMPT_ACTIONS = new Set([
   "create_ref",
   "repo.status",
 ]);
-const ATLAS_V2_GATEWAY_ACTIONS = new Set(["query", "code", "repo", "agent", "internal"]);
-const ATLAS_V2_BLOCKING_ACTIONS = new Set([
-  "repo.register",
-  "index.refresh",
-  "scip.ingest",
-  "workflow",
-  "buffer.push",
-  "buffer.checkpoint",
-  "agent.feedback",
-  "memory.store",
-  "memory.feedback",
-  "policy.set",
-  "runtime.execute",
-]);
+const ATLAS_V2_GATEWAY_ACTIONS = new Set([...ATLAS_GATEWAY_FAMILIES, "internal"]);
+const ATLAS_V2_BLOCKING_ACTIONS = ATLAS_WRITE_SLOT_ACTIONS;
 
 const ATLAS_JOB_CACHE = new Map();
 const ATLAS_PREFETCH_CACHE = new Map();

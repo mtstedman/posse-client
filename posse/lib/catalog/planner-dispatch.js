@@ -1,6 +1,6 @@
 import { MCP_TRANSPORT_TIMEOUT_MS } from "./mcp.js";
 import { SUB_AGENT_LIMITS } from "./sub-agent.js";
-import { MODEL_TIERS } from "./model.js";
+import { MODEL_TIERS, REASONING_EFFORTS } from "./model.js";
 
 // Dispatched research isolates bounded reads and fetches while the planner
 // keeps judgment. Its price depends on the configured models, which may be
@@ -17,7 +17,7 @@ export const RESEARCH_CHILD_STRONG_LIMIT = 1;
 export const PLANNER_DISPATCH_MODES = Object.freeze({ ROUTER: "router", PLANNER: "planner" });
 export const PLANNER_DISPATCH_MODE_VALUES = Object.freeze(Object.values(PLANNER_DISPATCH_MODES));
 export const RESEARCH_AGENT_TYPES = Object.freeze(["code", "web"]);
-export const PLANNER_RESEARCH_EFFORT_VALUES = Object.freeze(["low", "medium", "high", "xhigh"]);
+export const PLANNER_RESEARCH_EFFORT_VALUES = REASONING_EFFORTS;
 export const PLANNER_DISPATCH_RETURN_MARGIN_MS = 10_000;
 
 export const PLANNER_DISPATCH_SETTINGS = Object.freeze([

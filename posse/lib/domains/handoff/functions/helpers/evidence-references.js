@@ -1,3 +1,4 @@
+import { AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../../catalog/handoff.js";
 function sourceRange(evidence) {
   const provenance = evidence?.provenance;
   if (provenance?.line_semantics !== "source"
@@ -22,7 +23,7 @@ export function claimEvidenceReferences(report, renderSelector) {
   const previous = new Map();
   return (report.claims || []).map((claim, claimIndex) => {
     const detail = claim[1] || {};
-    const evidence = ["evidence", "proof", "support"].flatMap((lane) => detail[lane] || []);
+    const evidence = AGENT_HANDOFF_CLAIM_CITATION_FIELDS.flatMap((lane) => detail[lane] || []);
     const sources = evidence.map(sourceRange);
     const oneSource = sources.length > 0 && sources.every((source) => source?.key === sources[0]?.key)
       && sources[0] != null;

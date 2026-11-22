@@ -267,6 +267,7 @@
  * @property {number} [hierarchicalFileLimit] Files admitted before final symbol interleaving, 1..40.
  * @property {boolean} [withinFileSymbolRerank] Reorder symbols only within result slots belonging to the same file.
  * @property {number} [fileLexicalOverlapWeight] Native lexical file-score overlap weight, 0..1.
+ * @property {number} [vectorEvidenceWeight] Reciprocal-rank votes one vector hit casts in native fusion, 1..4.
  * @property {boolean} [monorepoPackagePriors] Reward generic package/path agreement in monorepos.
  * @property {boolean} [semanticQueryNormalization] Add a normalized semantic vector probe.
  */
@@ -299,7 +300,6 @@
  * @property {("calls" | "references" | "reads" | "writes" | "uses_type" | "imports" | "extends" | "implements")[]} [kind]
  * @property {number} [limit]
  * @property {number} [minConfidence]          0..1 or 0..100
- * @property {boolean} [includeUnresolved]
  */
 
 /**

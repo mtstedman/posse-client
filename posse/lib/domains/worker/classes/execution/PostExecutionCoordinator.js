@@ -18,7 +18,7 @@ import { gitCurrentHashAsync, gitExecAsync, gitHasChangesAsync } from "../../../
 import { gitCommitAllAsync as gitCommitAllAsyncFromModule } from "../../../git/functions/commit-scope.js";
 import { listAttemptCommittedFilesAsync } from "../../../git/functions/attempt-committed-files.js";
 import { snapshotAndResetSharedWorktreeAsync as snapshotAndResetSharedWorktreeAsyncFromModule } from "../../functions/helpers/shared-worktree-reset.js";
-import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
+import { MUTATING_JOB_TYPES, AWAITING_ANSWER_GATE_JOB_STATUSES } from "../../../../catalog/job.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { isTransientCommitInfraFailure } from "../../functions/helpers/commit-infra.js";
@@ -397,7 +397,7 @@ export async function handlePostExecutionForWorker({
         // of replacing it with a generic recovery question.
         const parkLiveRequest = agentCompletionLog.status === "BLOCKED"
           && pendingScopeRequest?.live_wait === true && !pendingScopeRequest.decision
-          && ["queued", "waiting_on_human"].includes(getJob(Number(pendingScopeRequest.approval_job_id))?.status);
+          && AWAITING_ANSWER_GATE_JOB_STATUSES.includes(getJob(Number(pendingScopeRequest.approval_job_id))?.status);
         if (
           (scopePauseJob?.status === "waiting_on_human" || (scopePauseJob?.status === "running" && parkLiveRequest))
           && pendingScopeRequest
@@ -426,7 +426,7 @@ export async function handlePostExecutionForWorker({
         // decided guard inside abandon keeps a racing human answer intact.
         if (pendingScopeRequest && !pendingScopeRequest.decision) {
           const expiredGateOpen = pendingScopeRequest.hold_expired === true
-            && ["queued", "waiting_on_human"].includes(getJob(Number(pendingScopeRequest.approval_job_id))?.status);
+            && AWAITING_ANSWER_GATE_JOB_STATUSES.includes(getJob(Number(pendingScopeRequest.approval_job_id))?.status);
           if (expiredGateOpen) {
             // The operator may still be answering a hold that aged out. Keep
             // the gate open and settle the request against this finished

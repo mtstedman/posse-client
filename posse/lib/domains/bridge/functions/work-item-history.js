@@ -3,12 +3,9 @@ import crypto from "node:crypto";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { queryRetainedEventRows } from "../../queue/functions/events.js";
 import { WORK_ITEM_BOUNDS, WORK_ITEM_HISTORY_PROTOCOL, commonEnvelope, observedAt, projectFeedEvent, resolveRangeRequest, retentionInfo, validateRepositoryBinding } from "./work-item-feed.js";
+import { WORK_ITEM_FEED_KINDS } from "../../../catalog/bridge.js";
 
-const FEED_KINDS = new Set([
-  "comment", "chat", "question", "answer", "nudge", "agent_update",
-  "work_item_state", "lane_state", "handoff", "completion", "action",
-  "error", "runtime_batch", "unknown",
-]);
+const FEED_KINDS = new Set(WORK_ITEM_FEED_KINDS);
 
 function queryIdentity(args, repoPath, range, retentionEpoch) {
   return JSON.stringify({

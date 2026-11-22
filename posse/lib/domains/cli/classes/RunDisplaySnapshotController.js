@@ -79,7 +79,18 @@ export class RunDisplaySnapshotController {
         this.log?.debug?.("display", "Tool snapshot refresh failed", { error: String(err?.message || err) });
       },
     });
-    this.caches = { dirty, pipeline, tools };
+    // Harness notices and nudge pickups recorded under tool.* feed the log's
+    // system tail, whatever pane is open, so tool history can leave them out.
+    const notices = createAsyncSnapshotCache({
+      initialValue: [],
+      minIntervalMs: 2000,
+      load: () => snapshotWorker.run("notices"),
+      onUpdate: (rows) => this.getDisplay()?.acceptToolSystemNotices?.(rows),
+      onError: (err) => {
+        this.log?.debug?.("display", "System notice refresh failed", { error: String(err?.message || err) });
+      },
+    });
+    this.caches = { dirty, pipeline, tools, notices };
     display.getDirtyState = () => dirty.get();
     display.getPipelineData = () => pipeline.get();
     display.getToolData = () => tools.get();
@@ -94,6 +105,7 @@ export class RunDisplaySnapshotController {
       // and stays invisible until the operator opens the Pipeline pane.
       if (this.pipelineVisible(currentDisplay?._rightMode, pipeline)) void pipeline.refresh();
       if (currentDisplay?._rightMode === "tools" || currentDisplay?._rightMode === "monitor") void tools.refresh();
+      void notices.refresh();
     }, 1000));
   }
 

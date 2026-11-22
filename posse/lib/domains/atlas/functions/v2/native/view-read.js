@@ -5,7 +5,7 @@ import { patchViewMetaNativeAsync } from "./storage.js";
 import { openViewDbReadOnly } from "../view-database.js";
 
 const CONTRACT_VERSION = 1;
-const UNIT_QUERIES = new Set(["meta", "stats", "edge_stats", "symbol_metrics", "edge_taxonomy_input"]);
+const UNIT_QUERIES = new Set(["meta", "stats", "edge_stats", "edge_taxonomy_input"]);
 const RESULT_BY_QUERY = Object.freeze({
   meta: "meta",
   stats: "stats",

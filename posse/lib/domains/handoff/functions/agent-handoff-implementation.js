@@ -1,7 +1,7 @@
 import { existingJobDependencyId, validExistingJobDependency } from "../../planning/functions/existing-job-dependencies.js";
 import { PLANNER_EXISTING_JOB_PREFIX } from "../../../catalog/planning.js";
 import { mergeEvidenceCatalog } from "./helpers/merged-packet-evidence.js";
-import { AGENT_HANDOFF_ALIAS_POLICY, AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY, AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES, AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS, AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PLANNER_CONTRACT_KEYS, AGENT_HANDOFF_PLANNER_CONTRACT_VERSION, AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES, AGENT_HANDOFF_PLANNER_REPORT_KEYS, AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_PROTOCOL, AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY, AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES, AGENT_HANDOFF_RESEARCH_PROSE_FIELDS, AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES, AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR } from "../../../catalog/handoff.js";
+import { AGENT_HANDOFF_ALIAS_POLICY, AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY, AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES, AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS, AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PLANNER_CONTRACT_KEYS, AGENT_HANDOFF_PLANNER_CONTRACT_VERSION, AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES, AGENT_HANDOFF_PLANNER_REPORT_KEYS, AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_PROTOCOL, AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY, AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES, AGENT_HANDOFF_RESEARCH_PROSE_FIELDS, AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES, AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR, AGENT_HANDOFF_CLAIM_REF_FIELDS, AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../catalog/handoff.js";
 import { materializedEvidenceIdentity, parseAgentHandoffEvidenceSelector, normalizedLines } from "./helpers/evidence-selector.js";
 import { fetchHashRefForContext, findFetchedHashRefViewsForContext, findVisibleHashRefSourceWindowsForContext, materializeHashRefEvidenceForContext, surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { fail, plainObject } from "./helpers/report-schema.js";
@@ -45,6 +45,7 @@ import { handoffRow } from "./agent-handoff-records.js";
 import { recordAtlasTrunkHitRate } from "./atlas-prefetch-terminal-telemetry.js";
 import { stripRedundantCodeCreateRoots, validatePlannedTask } from "../../planning/functions/plan-routing.js";
 import { sourceLineage, sourceLineSlice, deliveredSourceExcerptMatches, disjointSourceMaterialization, coalescedSourceContentWindows, refRelativeCoordinates, payloadSourceContentWindows, evidenceProvenance } from "./helpers/evidence-provenance.js";
+import { RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES } from "../../../catalog/setting-policy.js";
 
 
 export { parseAgentHandoffEvidenceSelector } from "./helpers/evidence-selector.js";
@@ -1525,12 +1526,12 @@ function normalizeClaimInput(value, claimIndex) {
   const source = exactKeys(value, uniqueKeys(
     compatibilityAliasKeys("claimName"),
     compatibilityAliasKeys("claimSummary"),
-    ["evidence", "proof", "support", "decoy"],
+    AGENT_HANDOFF_CLAIM_REF_FIELDS,
   ), label);
   const claim = compatibilityAlias(source, "claimName", label);
   const prose = compatibilityAlias(source, "claimSummary", label);
   const detail = {};
-  for (const lane of ["evidence", "proof", "support", "decoy"]) {
+  for (const lane of AGENT_HANDOFF_CLAIM_REF_FIELDS) {
     if (source[lane] != null) detail[lane] = source[lane];
   }
   if (prose != null) detail.prose = prose;
@@ -1540,12 +1541,12 @@ function normalizeClaimInput(value, claimIndex) {
 function normalizeClaimDetail(value, label) {
   const source = exactKeys(value, uniqueKeys(
     compatibilityAliasKeys("claimSummary"),
-    ["evidence", "proof", "support", "decoy"],
+    AGENT_HANDOFF_CLAIM_REF_FIELDS,
   ), label);
   const prose = compatibilityAlias(source, "claimSummary", label);
   const evidence = [];
   let hasEvidence = false;
-  for (const lane of ["evidence", "proof", "support"]) {
+  for (const lane of AGENT_HANDOFF_CLAIM_CITATION_FIELDS) {
     if (source[lane] == null) continue;
     hasEvidence = true;
     if (!Array.isArray(source[lane])) {
@@ -2175,7 +2176,7 @@ function validateNarrativeEvidenceBoundary(handoff, handoffIndex) {
   const evidence = [];
   for (const claim of handoff.report?.claims || []) {
     const detail = claim[1] || {};
-    for (const lane of ["evidence", "proof", "support"]) {
+    for (const lane of AGENT_HANDOFF_CLAIM_CITATION_FIELDS) {
       evidence.push(...(detail[lane] || []).map((entry) => entry.excerpt));
     }
     evidence.push(...(detail.decoy || []).map(([entry]) => entry.excerpt));
@@ -4220,7 +4221,7 @@ export function getTraversalCompletionSnapshotForCall(context = {}) {
         `).get(context.jobId, context.attemptId, HANDOFF_TRAVERSAL_COMPLETION_CHECK_OBSERVATION_TYPE);
     if (!row) return null;
     const detail = JSON.parse(String(row.detail_json || "{}"));
-    const mode = ["off", "shadow", "on"].includes(String(detail.mode)) ? String(detail.mode) : "off";
+    const mode = RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES.includes(String(detail.mode)) ? String(detail.mode) : "off";
     const ids = Array.isArray(detail.requirement_ids)
       ? detail.requirement_ids.map((id) => String(id || "")).filter((id) => /^R[0-9]{2}$/.test(id))
       : [];

@@ -9,6 +9,7 @@ import {
   hasSharedConductor,
 } from "../../atlas/functions/v2/parse/conductor.js";
 import { Worker } from "../../worker/classes/Worker.js";
+import { EXECUTING_JOB_STATUSES } from "../../../catalog/job.js";
 
 const POST_MERGE_ATLAS_PURPOSES = new Set([
   "main-incremental",
@@ -85,7 +86,7 @@ export async function drainPostMergeAtlasWarmJobs({
       } finally {
         clearTimeout(budgetTimer);
         const unfinished = getJob(job.id);
-        if (["leased", "running"].includes(unfinished?.status)) {
+        if (EXECUTING_JOB_STATUSES.includes(unfinished?.status)) {
           releaseLease(job.id, lease.leaseToken, "queued", {
             readyAt: new Date(Date.now() + 60_000).toISOString(),
           });

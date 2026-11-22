@@ -8,6 +8,7 @@ import { normalizeJsonText } from "../../../shared/format/functions/json-text.js
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { OPERATOR_FEEDBACK_DELIVERY_PROTOCOL } from "../../../catalog/operator-feedback.js";
+import { FEEDBACK_PHASES, FEEDBACK_STATUSES } from "../../../catalog/work-item-interactions.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { logAgentActivity, logEvent } from "./events.js";
 import { now, runImmediateTransaction } from "./common.js";
@@ -19,10 +20,6 @@ const AGENT_TO_USER = "agent_to_user";
 const ACTIVE_STATUSES = new Set(["active"]);
 const USER_GUIDANCE_KINDS = new Set(["nudge", "answer", "scope_request", "status_request"]);
 const ACK_DECISIONS = new Set(["accepted", "rejected", "deferred"]);
-const AGENT_FEEDBACK_PHASES = new Set([
-  "reading", "planning", "editing", "testing", "verifying", "blocked", "finalizing", "handoff",
-]);
-const AGENT_FEEDBACK_STATUSES = new Set(["running", "blocked", "waiting", "verifying", "done"]);
 const AGENT_FEEDBACK_SUMMARY_MAX_CHARS = 180;
 const AGENT_FEEDBACK_DETAIL_MAX_CHARS = 360;
 
@@ -454,10 +451,10 @@ export function recordAgentActivity({
   const bodyText = normalizeText(body) || [phaseText, actionText || statusText].filter(Boolean).join(": ");
   const detailText = normalizeText(detail);
   const typedFeedback = new Set(["agent_feedback", "embedded_tool", "mcp_tool"]).has(normalizeText(source));
-  if (typedFeedback && !AGENT_FEEDBACK_PHASES.has(phaseText)) {
+  if (typedFeedback && !FEEDBACK_PHASES.has(phaseText)) {
     throw new Error("recordAgentActivity requires a valid phase");
   }
-  if (typedFeedback && !AGENT_FEEDBACK_STATUSES.has(statusText)) {
+  if (typedFeedback && !FEEDBACK_STATUSES.has(statusText)) {
     throw new Error("recordAgentActivity requires a valid status");
   }
   if (!bodyText) throw new Error("recordAgentActivity requires phase, action, or body");

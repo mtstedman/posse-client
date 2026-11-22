@@ -30,6 +30,14 @@ export async function symbolUsages({ view, versionId, params }) {
       message: "symbol.overview requires a valid symbolId",
     });
   }
+  if (params.kind != null && !Array.isArray(params.kind)) {
+    return errorEnvelope({
+      action: "symbol.overview",
+      versionId,
+      code: "invalid_params",
+      message: "symbol.overview `kind` must be an array of edge kinds (e.g. [\"calls\"]); it is not a callers/callees selector.",
+    });
+  }
   const target = await view.query.getByContentLocal(parsed.content_hash, parsed.local_id);
   if (!target) {
     return errorEnvelope({
@@ -37,15 +45,6 @@ export async function symbolUsages({ view, versionId, params }) {
       versionId,
       code: "symbol_not_found",
       message: `No symbol found for ${params.symbolId}`,
-    });
-  }
-
-  if (params.kind != null && !Array.isArray(params.kind)) {
-    return errorEnvelope({
-      action: "symbol.overview",
-      versionId,
-      code: "invalid_params",
-      message: "symbol.overview `kind` must be an array of edge kinds (e.g. [\"calls\"]); it is not a callers/callees selector.",
     });
   }
   const limit = clampInt(params.limit, 50, 1, 500);
@@ -59,16 +58,7 @@ export async function symbolUsages({ view, versionId, params }) {
     if (kindFilter && !kindFilter.has(edge.kind)) continue;
     if ((Number(edge.confidence) || 0) / 100 < minConfidence) continue;
     if (!from || !isDefaultVisibleSymbol(from)) continue;
-    rows.push(usageFromEdge(edge, from, true));
-  }
-  if (params.includeUnresolved) {
-    for (const edge of await view.query.unresolvedReferencesTo(target.name)) {
-      if (kindFilter && !kindFilter.has(edge.kind)) continue;
-      if ((Number(edge.confidence) || 0) / 100 < minConfidence) continue;
-      const from = await view.query.getSymbol(edge.from_global_id);
-      if (!from || !isDefaultVisibleSymbol(from)) continue;
-      rows.push(usageFromEdge(edge, from, false));
-    }
+    rows.push(usageFromEdge(edge, from));
   }
   rows.sort((a, b) =>
     a.repo_rel_path.localeCompare(b.repo_rel_path)
@@ -92,11 +82,9 @@ export async function symbolUsages({ view, versionId, params }) {
       repoRelPath: target.repo_rel_path,
       rawOccurrenceCount: total,
       distinctFileCount: usageSummary.distinctFileCount,
-      distinctResolvedFileCount: usageSummary.distinctResolvedFileCount,
       distinctCallerFileCount: usageSummary.distinctCallerFileCount,
       callerFiles: usageSummary.callerFiles,
       callerFilesTruncated: usageSummary.callerFilesTruncated,
-      unresolvedFiles: usageSummary.unresolvedFiles,
       usages,
       total,
       indexTruncated,
@@ -177,9 +165,8 @@ export async function countIncomingCallers(view, target, { sampleLimit = 3, dist
 /**
  * @param {ViewEdge} edge
  * @param {ViewSymbol} from
- * @param {boolean} resolved
  */
-function usageFromEdge(edge, from, resolved) {
+function usageFromEdge(edge, from) {
   return {
     repo_rel_path: edge.repo_rel_path,
     startLine: Number.isInteger(edge.range_start_line) ? edge.range_start_line : 1,
@@ -192,48 +179,38 @@ function usageFromEdge(edge, from, resolved) {
     fromSymbol: symbolHit(from),
     kind: edge.kind,
     confidence: edge.confidence,
-    resolved,
   };
 }
 
 function summarizeUsageRows(rows) {
   const allFiles = new Set();
-  const resolvedFiles = new Set();
-  const callerGroups = groupUsageFiles(rows, (row) => row.resolved && row.kind === "calls");
-  const unresolvedFiles = groupUsageFiles(rows, (row) => !row.resolved).slice(0, FILE_GROUP_LIMIT);
+  const callerGroups = groupUsageFiles(rows.filter((row) => row.kind === "calls"));
   for (const row of rows) {
     const path = String(row.repo_rel_path || "").replace(/\\/g, "/");
-    if (!path) continue;
-    allFiles.add(path);
-    if (row.resolved) resolvedFiles.add(path);
+    if (path) allFiles.add(path);
   }
   return {
     distinctFileCount: allFiles.size,
-    distinctResolvedFileCount: resolvedFiles.size,
     // The count covers every grouped caller file; only the list is capped.
     distinctCallerFileCount: callerGroups.length,
     callerFiles: callerGroups.slice(0, FILE_GROUP_LIMIT),
     callerFilesTruncated: callerGroups.length > FILE_GROUP_LIMIT,
-    unresolvedFiles,
   };
 }
 
-function groupUsageFiles(rows, predicate) {
+function groupUsageFiles(rows) {
   const byPath = new Map();
   for (const row of rows) {
-    if (!predicate(row)) continue;
     const path = String(row.repo_rel_path || "").replace(/\\/g, "/");
     if (!path) continue;
     const group = byPath.get(path) || {
       repo_rel_path: path,
       occurrenceCount: 0,
       firstLine: Number.isInteger(row.startLine) ? row.startLine : 1,
-      kinds: new Set(),
       fromNames: new Set(),
     };
     group.occurrenceCount += 1;
     if (Number.isInteger(row.startLine)) group.firstLine = Math.min(group.firstLine, row.startLine);
-    if (row.kind) group.kinds.add(String(row.kind));
     if (row.fromName) group.fromNames.add(String(row.fromName));
     byPath.set(path, group);
   }
@@ -243,7 +220,6 @@ function groupUsageFiles(rows, predicate) {
       repo_rel_path: group.repo_rel_path,
       occurrenceCount: group.occurrenceCount,
       firstLine: group.firstLine,
-      kinds: [...group.kinds].sort(),
       fromNames: [...group.fromNames].sort().slice(0, 12),
     }));
 }

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { sortAgentToolDefinitions } from "../../../../shared/tools/functions/agent-schema.js";
 import path from "node:path";
 import { mcpClientToolDeadlineMs } from "../../../../catalog/mcp.js";
-import { RAW_CLI_CONTROL_OPTIONS } from "../../../../catalog/provider.js";
+import { NATIVE_API_PROVIDERS, RAW_CLI_CONTROL_OPTIONS } from "../../../../catalog/provider.js";
 import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-dispatch-policy.js";
 
 import { dispatchProvider } from "../../../../shared/native/functions/provider-dispatch-client.js";
@@ -203,7 +203,7 @@ export function buildNativeDispatchRequest(provider, promptText, {
   const outputTokens = positiveInteger(maxOutputTokens, 1, 2_000_000);
   const stallMs = positiveInteger(stallTimeoutMs, 1_000, MAX_WALL_TIMEOUT_MS);
   const tools = [...new Set(stringList(issuedToolIds))].sort();
-  const api = ["anthropic", "openai", "grok"].includes(provider);
+  const api = NATIVE_API_PROVIDERS.includes(provider);
   if (decision != null && !api && provider !== "posse-local") throw new Error("Decision turns require an API or local provider");
   if (image != null && (!["openai", "grok"].includes(provider) || decision != null || tools.length)) {
     throw new Error("Image turns require a tool-free image provider");

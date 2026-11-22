@@ -230,7 +230,7 @@
  *
  * @property {() => Promise<{ symbol_count: number, file_count: number, by_lang: Record<string, number>, by_kind: Record<string, number> }>} [stats]
  * @property {() => Promise<{ total: number, internal: number, external: number, resolved: number, call_total: number, call_resolved: number, by_kind: Record<string, number>, by_source: Record<string, { total: number, resolved: number, external: number, unresolved: number }> }>} [edgeStats]
- * @property {() => Promise<{ global_id: number, fan_in: number, fan_out: number }[]>} [symbolMetrics]
+ * @property {() => Promise<{ global_id: number, fan_in: number, fan_out: number }[]>} [symbolMetrics] every symbol, ascending by global_id
  * @property {() => Promise<{ unresolved_edges: any[], import_edges: any[], symbol_names: string[] }>} [edgeTaxonomyInput]
  *
  * @property {(name: string, opts?: SymbolSearchOptions) => Promise<ViewSymbol[]>} findSymbol

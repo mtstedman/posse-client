@@ -9,6 +9,7 @@ import {
   PROVIDER_TOOL_GRANT_PROTOCOL,
   PROVIDER_TOOL_GRANT_REQUEST_FIELD,
 } from "../../../catalog/binary.js";
+import { NATIVE_API_PROVIDERS } from "../../../catalog/provider.js";
 import {
   grantedToolIdsFromToken,
   normalizeNativeToolGrant,
@@ -238,7 +239,7 @@ export async function dispatchProvider(request, {
     const decision = isObject(request.decision) && Array.isArray(request.decision.tools)
       ? { ...request.decision, tools: sortAgentToolDefinitions(request.decision.tools) }
       : request.decision;
-    if (!["anthropic", "openai", "grok"].includes(request.provider)
+    if (!NATIVE_API_PROVIDERS.includes(request.provider)
       || !isObject(decision) || typeof decision.allowBatching !== "boolean"
       || !Array.isArray(decision.tools) || decision.tools.length > 256
       || decision.tools.length !== issuedToolIds.length

@@ -22,3 +22,16 @@ export function atlasReplacesNativeTool(name, role = "") {
   return ATLAS_REPLACED_NATIVE_TOOLS.includes(name)
     && !atlasNativeToolIsComplementary(name, role);
 }
+
+// read_file size policy, in bytes.
+export const READ_FILE_LIMITS = Object.freeze({
+  // jsonPath/search/maxBytes reads parse or scan the whole file, so they get a
+  // bounded ceiling above the plain-read limit: an 8.9 MB single-line JSON file
+  // (2026-10-01) could not be read at all, by line paging or structured modes.
+  structuredMaxSizeBytes: 64 * 1024 * 1024,
+  largeStructuredContentBytes: 2 * 1024,
+  // Bound the rendered response before observation/context accounting. File-size
+  // limits alone do not bound a page of minified text or structured match output
+  // (two research children each took a 1.6M-char page of one, 2026-10-01).
+  maxResultBytes: 128 * 1024,
+});

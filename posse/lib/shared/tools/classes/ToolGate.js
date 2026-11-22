@@ -6,6 +6,7 @@ import {
   sourceFileVersionForGate,
 } from "../../../domains/integrations/functions/deterministic-mcp/source-file-gate.js";
 import { atlasNestedAction } from "../functions/atlas-nested-action.js";
+import { ATLAS_GATEWAY_FAMILIES } from "../../../catalog/atlas-tools.js";
 
 export { ATLAS_CHAIN_READ_MAX_LINES } from "../../../domains/integrations/functions/deterministic-mcp/source-file-gate.js";
 
@@ -14,7 +15,7 @@ function stripAtlasPrefix(action) {
   return raw.startsWith("atlas.") ? raw.slice("atlas.".length) : raw;
 }
 
-const ATLAS_GATEWAY_TOOL_NAMES = new Set(["query", "code", "repo", "agent"]);
+const ATLAS_GATEWAY_TOOL_NAMES = new Set(ATLAS_GATEWAY_FAMILIES);
 // code.survey is orientation: its previews and symbol inventory do not prove
 // that the exact body of every surveyed file was supplied. Only exact-code
 // retrieval should trigger the narrower repeat-read policy.

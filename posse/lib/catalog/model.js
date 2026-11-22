@@ -6,3 +6,9 @@
 // independently of provider tier-routing semantics if needed.
 
 export const MODEL_TIERS = Object.freeze(["cheap", "standard", "strong"]);
+
+// Provider reasoning-effort scale, lowest first. Consumers clamp by index, so
+// the order is part of the contract. `JOB_REASONING_EFFORTS` (job.js) is the
+// narrower jobs.reasoning_effort CHECK set and stays separate for the same
+// reason as JOB_MODEL_TIERS.
+export const REASONING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh"]);

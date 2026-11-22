@@ -9,7 +9,7 @@ import {
   UNMERGED_WORK_ITEM_MERGE_STATES_SQL,
 } from "../../../catalog/work-item.js";
 import { Scope } from "../../../shared/scope/classes/Scope.js";
-import { DEADLOCK_TERMINAL_STATUSES, MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
+import { DEADLOCK_TERMINAL_STATUSES, MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES, EXECUTING_JOB_STATUSES_SQL } from "../../../catalog/job.js";
 import { AUTHORIZATION_GATE_KINDS } from "../../../catalog/human-input.js";
 import { isUnderRoot, rootsOverlap, normPath } from "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "./payload.js";
@@ -1633,7 +1633,7 @@ export function setupDeferredBehindLiveSibling(job, db = getDb()) {
   if (live.length === 0) return false;
   const row = db.prepare(
     `SELECT 1 FROM jobs WHERE id IN (${live.map(() => "?").join(",")})
-       AND work_item_id = ? AND status IN ('leased', 'running')
+       AND work_item_id = ? AND status IN (${EXECUTING_JOB_STATUSES_SQL})
        AND (lease_expires_at IS NULL OR lease_expires_at > ?) LIMIT 1`,
   ).get(...live, job.work_item_id, now());
   return !!row;

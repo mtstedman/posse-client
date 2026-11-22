@@ -40,7 +40,7 @@ import {
   DB_TASK_PRE_MERGE_POLICIES,
   DB_TASK_PRE_MERGE_POLICY_VALUES,
 } from "../../../catalog/settings.js";
-import { DEADLOCK_TERMINAL_STATUSES, FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES_SQL } from "../../../catalog/job.js";
+import { DEADLOCK_TERMINAL_STATUSES, FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES_SQL, DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 import { rewireDependencyChain } from "./dependencies.js";
 import { parseJobPayload } from "./payload.js";
 
@@ -339,7 +339,7 @@ export function hasActivePostMergeDbGate(heldJobId) {
 
 const SCHEMA_DEPENDENTS_SHOWN = 8;
 
-const SCHEMA_DEPENDENT_JOB_TYPES = new Set(["dev", "fix"]);
+const SCHEMA_DEPENDENT_JOB_TYPES = DEV_ROLE_JOB_TYPES;
 
 /**
  * Merged code that expects the database change `heldJob` applies: the

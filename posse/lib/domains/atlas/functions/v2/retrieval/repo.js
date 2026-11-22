@@ -36,6 +36,7 @@ import { PHP_STDLIB_FUNCTIONS } from "../resolver/php-stdlib.generated.js";
 import { parseImportModuleRef } from "../resolver/import-context.js";
 import { gitExecSafe } from "../../../../git/functions/utils.js";
 import { readAtlasMainIntakeState } from "../main-intake-state.js";
+import { iterateViewSymbolPages } from "../view-symbol-pages.js";
 
 let indexOperationCounter = 0;
 const DEFAULT_BRANCH_CACHE_TTL_MS = 60_000;
@@ -497,8 +498,9 @@ export async function repoOverview({ view, versionId, params }) {
   const includeDirectories = level === "directories" || level === "full";
   const includeHotspots = params.includeHotspots === true || level === "hotspots" || level === "full";
   const includeGraph = level === "graph" || level === "full";
-  const directories = includeDirectories ? await topDirectorySummaries(view, params) : undefined;
-  const topSymbols = includeHotspots || includeGraph ? await topSymbolMetrics(view, 10) : null;
+  const scans = overviewScans(view);
+  const directories = includeDirectories ? await topDirectorySummaries(scans, params) : undefined;
+  const topSymbols = includeHotspots || includeGraph ? await topSymbolMetrics(scans, 10) : null;
   const derivedGraph = includeGraph ? readGraphDerivedOverview(view, 10) : null;
   /** @type {RepoOverviewData} */
   const data = {
@@ -528,7 +530,7 @@ export async function repoOverview({ view, versionId, params }) {
     tokenMetrics: tokenMetricsFor(stats),
   };
   if (includeHotspots) {
-    data.hotspots = await topHotspots(view, 10);
+    data.hotspots = await topHotspots(scans, 10);
     data.graph = {
       edges,
       symbolKinds: stats.byKind,
@@ -538,7 +540,7 @@ export async function repoOverview({ view, versionId, params }) {
     };
   }
   if (includeGraph) {
-    const entryPoints = await findEntryPointPaths(view);
+    const entryPoints = await findEntryPointPaths(scans);
     const layers = directories ? identifyArchitecturalLayers(directories) : [];
     data.graph = {
       ...(data.graph || {}),
@@ -692,15 +694,23 @@ async function computeStats(view) {
 }
 
 /**
+ * Every symbol in the view. A single `allSymbols` read stops at the native
+ * page cap, so this follows the keyset pages to the end.
+ *
  * @param {View} view
  * @param {{ pathPrefix?: string }} [opts]
  * @returns {Promise<ViewSymbol[]>}
  */
 async function readAllSymbols(view, opts = {}) {
-  return await view.query.allSymbols({
-    limit: Number.MAX_SAFE_INTEGER,
+  /** @type {ViewSymbol[]} */
+  const symbols = [];
+  for await (const page of iterateViewSymbolPages({
+    view,
     ...(opts.pathPrefix ? { pathPrefix: opts.pathPrefix } : {}),
-  });
+  })) {
+    for (const symbol of page) symbols.push(symbol);
+  }
+  return symbols;
 }
 
 function tokenMetricsFor(stats) {
@@ -1950,17 +1960,39 @@ function qualityFeedback({ ledger, limit, halfLifeDays }) {
 }
 
 /**
+ * @typedef {{ symbols: () => Promise<ViewSymbol[]>, metrics: () => Promise<Map<number, { fanIn: number, fanOut: number }>> }} OverviewScans
+ */
+
+/**
+ * The overview sections rank the same complete scans, so each is read at
+ * most once per call.
+ *
  * @param {View} view
+ * @returns {OverviewScans}
+ */
+function overviewScans(view) {
+  /** @type {Promise<ViewSymbol[]> | null} */
+  let symbols = null;
+  /** @type {Promise<Map<number, { fanIn: number, fanOut: number }>> | null} */
+  let metrics = null;
+  return {
+    symbols: () => (symbols ??= readAllSymbols(view)),
+    metrics: () => (metrics ??= symbolMetrics(view)),
+  };
+}
+
+/**
+ * @param {OverviewScans} scans
  * @param {RepoOverviewParams} params
  */
-async function topDirectorySummaries(view, params) {
+async function topDirectorySummaries(scans, params) {
   const focus = params.directories || [];
   const maxDirs = params.maxDirectories || 10;
   const maxExports = params.maxExportsPerDirectory || 5;
-  const metrics = await symbolMetrics(view);
+  const metrics = await scans.metrics();
   /** @type {Map<string, { files: Set<string>, symbols: ViewSymbol[] }>} */
   const buckets = new Map();
-  for (const s of await readAllSymbols(view)) {
+  for (const s of await scans.symbols()) {
     const dir = directoryOf(s.repo_rel_path);
     if (focus.length > 0 && !focus.some((f) => dir === f || dir.startsWith(`${f}/`))) continue;
     if (!buckets.has(dir)) buckets.set(dir, { files: new Set(), symbols: [] });
@@ -1986,14 +2018,14 @@ async function topDirectorySummaries(view, params) {
 }
 
 /**
- * @param {View} view
+ * @param {OverviewScans} scans
  * @param {number} limit
  */
-async function topHotspots(view, limit) {
+async function topHotspots(scans, limit) {
   /** @type {Map<string, { inbound: number, outbound: number, symbols: Set<number> }>} */
   const byPath = new Map();
-  const metrics = await symbolMetrics(view);
-  for (const s of await readAllSymbols(view)) {
+  const metrics = await scans.metrics();
+  for (const s of await scans.symbols()) {
     if (!isDefaultVisibleSymbol(s) || isGeneratedPath(s.repo_rel_path)) continue;
     const current = byPath.get(s.repo_rel_path) || { inbound: 0, outbound: 0, symbols: new Set() };
     const m = metrics.get(s.global_id) || { fanIn: 0, fanOut: 0 };
@@ -2046,12 +2078,12 @@ async function symbolMetrics(view) {
 }
 
 /**
- * @param {View} view
+ * @param {OverviewScans} scans
  * @param {number} limit
  */
-async function topSymbolMetrics(view, limit) {
-  const metrics = await symbolMetrics(view);
-  const symbols = (await readAllSymbols(view))
+async function topSymbolMetrics(scans, limit) {
+  const metrics = await scans.metrics();
+  const symbols = (await scans.symbols())
     .filter((s) => isDefaultVisibleSymbol(s) && !isGeneratedPath(s.repo_rel_path));
   return {
     byFanIn: rankedSymbolsByMetric(symbols, metrics, "fanIn", limit),
@@ -2089,13 +2121,13 @@ function hotspotReason(inbound, outbound) {
 }
 
 /**
- * @param {View} view
+ * @param {OverviewScans} scans
  * @returns {Promise<string[]>}
  */
-async function findEntryPointPaths(view) {
+async function findEntryPointPaths(scans) {
   const names = new Set(["main", "index", "server", "app", "cli", "orchestrator"]);
   const paths = new Set();
-  for (const s of await readAllSymbols(view)) {
+  for (const s of await scans.symbols()) {
     const file = s.repo_rel_path.split("/").pop() || "";
     const stem = file.replace(/\.[^.]+$/, "");
     if (names.has(stem) || s.name === "main" || s.name === "run") paths.add(s.repo_rel_path);

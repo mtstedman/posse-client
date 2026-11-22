@@ -1,6 +1,7 @@
 import { getAgentCalls, logEvent } from "../../queue/functions/index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { SUB_AGENT_ENTRY_STATUSES, SUB_AGENT_ERROR_CODES } from "../../../catalog/sub-agent.js";
 import { getAgentHandoffRecord } from "../../handoff/functions/agent-handoff-records.js";
 
 // Dispatch attempts the runtime refused before a child could start. They are
@@ -18,7 +19,7 @@ export function listRejectedDispatchAttempts(jobId, agentCallId) {
       if (Number(detail.parent_agent_call_id) !== Number(agentCallId)) return [];
       // The dispatch failed after its child ran; that is not a rejection.
       if (detail.child_agent_call_id != null) return [];
-      return [{ code: String(detail.code || "SUB_AGENT_ERROR"), stage: detail.stage || null, at: row.created_at }];
+      return [{ code: String(detail.code || SUB_AGENT_ERROR_CODES.ERROR), stage: detail.stage || null, at: row.created_at }];
     });
   } catch {
     return [];
@@ -39,9 +40,9 @@ export function recordResearchDispatchAudit({ jobId, workItemId, agentCallId, re
   const partialCount = childResults.filter((entry) => entry.outcome === "partial").length;
   const requested = Math.max(requests.length, children.length);
   const requestRejections = requests.flatMap((entry) => (
-    entry?.status === "failed" && !entry?.childAgentCallId && !entry?.usage?.agent_call_id
+    entry?.status === SUB_AGENT_ENTRY_STATUSES.FAILED && !entry?.childAgentCallId && !entry?.usage?.agent_call_id
       ? [{
-          code: String(entry?.error?.code || "SUB_AGENT_ERROR"),
+          code: String(entry?.error?.code || SUB_AGENT_ERROR_CODES.ERROR),
           stage: entry?.error?.stage || null,
           at: null,
         }]

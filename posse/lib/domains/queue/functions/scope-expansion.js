@@ -1,5 +1,5 @@
 import { ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS, ENVIRONMENT_SETUP_RESUME_WAIT_MAX_MS } from "../../../catalog/tools/environment-setup.js";
-import { MUTATING_JOB_TYPES } from "../../../catalog/job.js";
+import { MUTATING_JOB_TYPES, DEV_ROLE_JOB_TYPES, EXECUTING_JOB_STATUSES } from "../../../catalog/job.js";
 import { parseJobPayload } from "./payload.js";
 
 export const LIVE_SCOPE_WAIT_TIMEOUT_MS = ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS;
@@ -51,7 +51,7 @@ export function grantApprovedScopeEntries(result, scopePredicates) {
 // only an exact, already planned path; roots and soft dependencies provide no
 // such proof. Every sibling that owns the path must satisfy the same barrier.
 export function dependentSiblingScopeApproval(current, requestedPath, access, jobs, dependencies) {
-  if (current.status !== "running" || !["dev", "fix"].includes(current.job_type)) return null;
+  if (current.status !== "running" || !DEV_ROLE_JOB_TYPES.has(current.job_type)) return null;
   const siblings = jobs.filter((job) => job.id !== current.id && job.work_item_id === current.work_item_id);
   const owners = siblings.filter((job) => {
     const payload = parseJobPayload(job);
@@ -65,7 +65,7 @@ export function dependentSiblingScopeApproval(current, requestedPath, access, jo
     dep.job_id === job.id && dep.depends_on_job_id === current.id && dep.dependency_kind === "hard"))) return null;
   // An active sibling with broad or unknown scope might also write this path.
   // Conservatively retain the gate until every sibling writer is idle.
-  if (siblings.some((job) => ["leased", "running", "cancel_requested"].includes(job.status)
+  if (siblings.some((job) => EXECUTING_JOB_STATUSES.includes(job.status)
     && MUTATING_JOB_TYPES.has(job.job_type))) return null;
   return { reason: "dependent_sibling_scope", sibling_job_ids: owners.map((job) => job.id) };
 }

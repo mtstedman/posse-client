@@ -74,7 +74,7 @@ export {
   TOOL_WEB_RESEARCH_HANDOFF,
 } from "../../../catalog/native-tools.js";
 
-import { ATLAS_TOOL_DEFS_RAW, normalizeAtlasCodeWindowPolicy } from "../../../catalog/atlas-tools.js";
+import { ATLAS_TOOL_DEFS_RAW, normalizeAtlasCodeWindowPolicy, ATLAS_GATEWAY_FAMILIES } from "../../../catalog/atlas-tools.js";
 import { INTERNAL_ATLAS_SURFACE_ACTION_SET } from "../../../catalog/internal-tools.js";
 
 
@@ -105,7 +105,7 @@ function withNativeAtlasSchemas(defs) {
 }
 
 function filterFallbackOnlyAtlasSchema(action, parameters) {
-  if (["query", "code", "repo", "agent"].includes(action) && Array.isArray(parameters?.properties?.action?.enum)) {
+  if (ATLAS_GATEWAY_FAMILIES.includes(action) && Array.isArray(parameters?.properties?.action?.enum)) {
     parameters.properties.action.enum = parameters.properties.action.enum
       .filter((toolName) => {
         const normalized = String(toolName || "").replace(/^atlas[._]/, "").replace(/_/g, ".");

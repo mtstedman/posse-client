@@ -5,7 +5,7 @@ import {
 } from "../../../catalog/planner-dispatch.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { subAgentRuntime } from "../../sub-agent/classes/SubAgentRuntime.js";
-import { RESEARCH_CHILD_PROFILE, SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
+import { RESEARCH_CHILD_PROFILE, RESEARCH_REPAIR_ACTIONS, SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
 // @ts-check
 
 import crypto from "node:crypto";
@@ -726,7 +726,7 @@ export async function executeDispatchAgent(args, options = {}) {
     ? {
         ...result,
         repairs: [
-          { field: "budget", action: "folded_into_requests", request_ids: foldedBudgetRequests },
+          { field: "budget", action: RESEARCH_REPAIR_ACTIONS.FOLDED_INTO_REQUESTS, request_ids: foldedBudgetRequests },
           ...(Array.isArray(result.repairs) ? result.repairs : []),
         ],
       }

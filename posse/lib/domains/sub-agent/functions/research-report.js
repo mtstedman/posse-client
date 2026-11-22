@@ -4,7 +4,8 @@
 // discarded (caps are soft; a rejection costs a whole producer turn).
 
 import { parseAgentHandoffEvidenceSelector } from "../../handoff/functions/agent-handoff.js";
-const CITED_LANES = ["evidence", "proof", "support"];
+import { AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../catalog/handoff.js";
+const CITED_LANES = AGENT_HANDOFF_CLAIM_CITATION_FIELDS;
 
 function plainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);

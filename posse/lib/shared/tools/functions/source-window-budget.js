@@ -40,7 +40,6 @@ export function boundSourceWindowEnvelope(envelope, capChars) {
   // Optional navigation cannot displace the source transport's mandatory header.
   if (JSON.stringify(envelope).length > budget) {
     delete data.map;
-    delete data.decisionPoints;
     delete data.returnedFunctionAnchors;
   }
   const omitted = [];

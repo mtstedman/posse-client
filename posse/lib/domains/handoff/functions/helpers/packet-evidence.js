@@ -1,6 +1,6 @@
 import { mergeEvidenceCatalog } from "./merged-packet-evidence.js";
 import { materializedEvidenceIdentity } from "./evidence-selector.js";
-import { AGENT_HANDOFF_LIMITS } from "../../../../catalog/handoff.js";
+import { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../../catalog/handoff.js";
 
 export function packetEvidence(packet) {
   const byIdentity = new Map();
@@ -12,7 +12,7 @@ export function packetEvidence(packet) {
   for (const handoff of packet.handoffs || []) {
     for (const claim of handoff.report?.claims || []) {
       const detail = claim[1] || {};
-      for (const lane of ["evidence", "proof", "support"]) {
+      for (const lane of AGENT_HANDOFF_CLAIM_CITATION_FIELDS) {
         for (const evidence of detail[lane] || []) add(evidence);
       }
       for (const [evidence] of detail.decoy || []) add(evidence);

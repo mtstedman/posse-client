@@ -8,20 +8,15 @@ import {
 import { ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS, normalizeAtlasCodeWindowPolicy } from "../../../../catalog/atlas-tools.js";
 import { optionalAtlasSymbolId, sanitizeAtlasSymbolIdList } from "../../../../domains/atlas/functions/v2/symbol-id.js";
 import { coerceLooseAtlasSymbolArgs, validateAtlasPayloadSymbolIds } from "../../../../domains/atlas/functions/v2/signal-extraction.js";
-import { ATLAS_TOOL_PARAM_SCHEMAS } from "../../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
+import { ATLAS_ENUM_VALUE_ALIASES, ATLAS_TOOL_PARAM_SCHEMAS } from "../../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
 import { foldAtlasUnifiedSelectors } from "../../../../domains/atlas/functions/v2/contracts/unified-selectors.js";
 import { withDescriptiveSearchSemantic } from "../../../../domains/atlas/functions/v2/contracts/search-defaults.js";
 import { normalizeAtlasIdentifierList } from "../../../../domains/atlas/functions/v2/contracts/identifiers.js";
+import { ATLAS_CALLER_MODES, ATLAS_CONTEXT_MODES, ATLAS_OVERVIEW_LEVELS, ATLAS_REPO_STATUS_DETAILS, ATLAS_TASK_TYPES, ATLAS_TREE_REF_TYPES, ATLAS_WIRE_FORMATS } from "../../../../catalog/atlas-params.js";
 
-const ATLAS_MAX_QUERY_LENGTH = 512;
-const ATLAS_MAX_LIMIT = 50;
-const ATLAS_MAX_BUDGET_CARDS = 24;
-const ATLAS_MAX_BUDGET_TOKENS = 16000;
-const ATLAS_MAX_IDENTIFIERS = 50;
 const DEFAULT_ATLAS_SCOPE_MAX_FILES = 40;
-const ATLAS_MAX_FILE_BYTES = 512 * 1024;
+// file.write only: the runtime schema leaves write ranges unbounded.
 const ATLAS_MAX_FILE_LINES = 5000;
-const ATLAS_MAX_SEARCH_CONTEXT_LINES = 20;
 const ATLAS_MAX_WRITE_CONTENT_CHARS = 512 * 1024;
 const ATLAS_ACTION_ALIASES = Object.freeze({
   "agent.context": "context",
@@ -45,6 +40,46 @@ function clampInt(value, min, max, fallback) {
 function sanitizeString(value, maxLen = 1024) {
   if (value == null) return "";
   return String(value).trim().slice(0, maxLen);
+}
+
+// The dispatcher validates every prepared payload against
+// ATLAS_TOOL_PARAM_SCHEMAS, and the agent is shown the same bounds. Clamps,
+// caps and length limits read them from that schema, so a value the agent was
+// offered is neither rejected after preparation nor silently narrowed.
+function atlasParamSchema(action, path) {
+  let schema = ATLAS_TOOL_PARAM_SCHEMAS[action];
+  for (const key of path.split(".")) schema = schema?.properties?.[key];
+  if (!schema) throw new Error(`ATLAS ${action} has no ${path} parameter schema`);
+  return schema;
+}
+
+function atlasParamLimit(action, path, keyword) {
+  const limit = atlasParamSchema(action, path)[keyword];
+  if (!Number.isFinite(limit)) throw new Error(`ATLAS ${action}.${path} schema has no ${keyword}`);
+  return limit;
+}
+
+function clampAtlasParam(value, action, path, fallback) {
+  const schema = atlasParamSchema(action, path);
+  const parsed = schema.type === "number" ? Number.parseFloat(String(value ?? "")) : Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(schema.minimum ?? -Infinity, Math.min(schema.maximum ?? Infinity, parsed));
+}
+
+const atlasTextLimit = (action, path) => atlasParamLimit(action, path, "maxLength");
+const atlasItemLimit = (action, path) => atlasParamLimit(action, path, "maxItems");
+
+// symbol.search forwards its arguments whole; clamp every bounded numeric one.
+function clampAtlasNumericParams(action, payload) {
+  const out = { ...payload };
+  for (const [field, schema] of Object.entries(ATLAS_TOOL_PARAM_SCHEMAS[action]?.properties || {})) {
+    if (out[field] == null || (schema.type !== "integer" && schema.type !== "number")) continue;
+    if (schema.minimum == null && schema.maximum == null) continue;
+    const clamped = clampAtlasParam(out[field], action, field, undefined);
+    if (clamped === undefined) continue;
+    out[field] = clamped;
+  }
+  return out;
 }
 
 function isSafeRelativePath(value) {
@@ -147,7 +182,8 @@ function boundedBatchSymbolRefs(values, maxItems = 100) {
 function normalizeAtlasWireFormat(value) {
   if (value == null) return undefined;
   const text = sanitizeString(value, 32);
-  return ["standard", "compact", "agent", "packed"].includes(text) ? text : undefined;
+  const canonical = ATLAS_ENUM_VALUE_ALIASES["$.wireFormat"]?.[text] || text;
+  return ATLAS_WIRE_FORMATS.includes(canonical) ? canonical : undefined;
 }
 
 function truncateWriteContent(value) {
@@ -306,58 +342,57 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
   validateAtlasPayloadSymbolIds(normalizedAction, payload);
 
   if (normalizedAction === "repo.status") {
-    const allowedDetail = new Set(["minimal", "standard", "full"]);
     const detail = sanitizeString(payload.detail || "", 16).toLowerCase();
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
-        ...(allowedDetail.has(detail) ? { detail } : {}),
+        ...(ATLAS_REPO_STATUS_DETAILS.includes(detail) ? { detail } : {}),
         ...(payload.surfaceMemories == null ? {} : { surfaceMemories: !!payload.surfaceMemories }),
       },
     };
   }
 
   if (normalizedAction === "repo.overview") {
-    const allowedLevels = new Set(["stats", "directories", "full"]);
     const levelRaw = sanitizeString(payload.level || "", 16).toLowerCase();
-    const directories = sanitizeRelativePathList(payload.directories, 30);
+    const directories = sanitizeRelativePathList(payload.directories, atlasItemLimit("repo.overview", "directories"));
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        level: allowedLevels.has(levelRaw) ? levelRaw : "stats",
+        level: ATLAS_OVERVIEW_LEVELS.includes(levelRaw) ? levelRaw : "stats",
         ...(payload.includeHotspots == null ? {} : { includeHotspots: !!payload.includeHotspots }),
         ...(directories.length > 0 ? { directories } : {}),
-        ...(payload.maxDirectories == null ? {} : { maxDirectories: clampInt(payload.maxDirectories, 1, 200, 25) }),
-        ...(payload.maxExportsPerDirectory == null ? {} : { maxExportsPerDirectory: clampInt(payload.maxExportsPerDirectory, 1, 50, 10) }),
-        ...(payload.ifNoneMatch ? { ifNoneMatch: sanitizeString(payload.ifNoneMatch, 256) } : {}),
+        ...(payload.maxDirectories == null ? {} : { maxDirectories: clampAtlasParam(payload.maxDirectories, "repo.overview", "maxDirectories", 25) }),
+        ...(payload.maxExportsPerDirectory == null ? {} : { maxExportsPerDirectory: clampAtlasParam(payload.maxExportsPerDirectory, "repo.overview", "maxExportsPerDirectory", 10) }),
+        ...(payload.ifNoneMatch ? { ifNoneMatch: sanitizeString(payload.ifNoneMatch, atlasTextLimit("repo.overview", "ifNoneMatch")) } : {}),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };
   }
 
   if (normalizedAction === "symbol.search") {
-    const query = sanitizeString(payload.query, ATLAS_MAX_QUERY_LENGTH);
+    const query = sanitizeString(payload.query, atlasTextLimit("symbol.search", "query"));
     if (!query) throw new Error("ATLAS symbol.search requires a non-empty query.");
+    // Unset on a query worded as a description means on; see search-defaults.
+    const searchPayload = withDescriptiveSearchSemantic({ ...payload, query });
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        ...payload,
+        ...clampAtlasNumericParams("symbol.search", searchPayload),
         query,
-        limit: clampInt(payload.limit, 1, ATLAS_MAX_LIMIT, 10),
-        // Unset on a query worded as a description means on; see search-defaults.
-        semantic: withDescriptiveSearchSemantic({ ...payload, query }).semantic === true,
+        limit: clampAtlasParam(payload.limit, "symbol.search", "limit", 10),
+        semantic: searchPayload.semantic === true,
       },
     };
   }
 
   if (normalizedAction === "tree.scope") {
     const rawPaths = [
-      ...sanitizeRelativePathList(payload.paths, 100),
-      ...sanitizeRelativePathList(payload.editedFiles, 100),
+      ...sanitizeRelativePathList(payload.paths, atlasItemLimit("tree.scope", "paths")),
+      ...sanitizeRelativePathList(payload.editedFiles, atlasItemLimit("tree.scope", "editedFiles")),
     ];
     if (payload.path != null) rawPaths.push(requireSafeRelativePath(payload.path, "tree.scope path"));
     assertNoUnsafeRelativePaths(payload.paths, "tree.scope paths");
@@ -368,35 +403,35 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
           refType: sanitizeString(ref?.refType, 32),
           refId: sanitizeString(ref?.refId, 512),
         }))
-        .filter((ref) => ["cluster", "process"].includes(ref.refType) && ref.refId)
-        .slice(0, 20)
+        .filter((ref) => ATLAS_TREE_REF_TYPES.includes(ref.refType) && ref.refId)
+        .slice(0, atlasItemLimit("tree.scope", "refs"))
       : [];
     const refType = sanitizeString(payload.refType, 32);
     const refId = sanitizeString(payload.refId, 512);
-    if (["cluster", "process"].includes(refType) && refId) refs.push({ refType, refId });
+    if (ATLAS_TREE_REF_TYPES.includes(refType) && refId) refs.push({ refType, refId });
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        taskText: payload.taskText != null ? sanitizeString(payload.taskText, ATLAS_MAX_QUERY_LENGTH) : undefined,
+        taskText: payload.taskText != null ? sanitizeString(payload.taskText, atlasTextLimit("tree.scope", "taskText")) : undefined,
         taskType: payload.taskType != null ? sanitizeString(payload.taskType, 64) : undefined,
-        paths: [...new Set(rawPaths)].slice(0, 100),
-        symbolIds: sanitizeAtlasSymbolIdList(payload.symbolIds || (payload.symbolId ? [payload.symbolId] : []), 100, "tree.scope symbolIds"),
-        nodeIds: sanitizeShortStringList(payload.nodeIds, 100, 2000),
+        paths: [...new Set(rawPaths)].slice(0, atlasItemLimit("tree.scope", "paths")),
+        symbolIds: sanitizeAtlasSymbolIdList(payload.symbolIds || (payload.symbolId ? [payload.symbolId] : []), atlasItemLimit("tree.scope", "symbolIds"), "tree.scope symbolIds"),
+        nodeIds: sanitizeShortStringList(payload.nodeIds, atlasItemLimit("tree.scope", "nodeIds"), 2000),
         refs,
-        ...(payload.maxFiles == null ? {} : { maxFiles: clampInt(payload.maxFiles, 1, 500, DEFAULT_ATLAS_SCOPE_MAX_FILES) }),
-        ...(payload.maxBranches == null ? {} : { maxBranches: clampInt(payload.maxBranches, 1, 100, 12) }),
-        ...(payload.branchFileCap == null ? {} : { branchFileCap: clampInt(payload.branchFileCap, 1, 500, 40) }),
-        ...(payload.refMatchLimit == null ? {} : { refMatchLimit: clampInt(payload.refMatchLimit, 1, 500, 50) }),
-        ...(payload.siblingNumericFamilyCap == null ? {} : { siblingNumericFamilyCap: clampInt(payload.siblingNumericFamilyCap, 1, 500, 100) }),
+        ...(payload.maxFiles == null ? {} : { maxFiles: clampAtlasParam(payload.maxFiles, "tree.scope", "maxFiles", DEFAULT_ATLAS_SCOPE_MAX_FILES) }),
+        ...(payload.maxBranches == null ? {} : { maxBranches: clampAtlasParam(payload.maxBranches, "tree.scope", "maxBranches", 12) }),
+        ...(payload.branchFileCap == null ? {} : { branchFileCap: clampAtlasParam(payload.branchFileCap, "tree.scope", "branchFileCap", 40) }),
+        ...(payload.refMatchLimit == null ? {} : { refMatchLimit: clampAtlasParam(payload.refMatchLimit, "tree.scope", "refMatchLimit", 50) }),
+        ...(payload.siblingNumericFamilyCap == null ? {} : { siblingNumericFamilyCap: clampAtlasParam(payload.siblingNumericFamilyCap, "tree.scope", "siblingNumericFamilyCap", 100) }),
       },
     };
   }
 
   if (normalizedAction === "tree.expand") {
     const rawPaths = [
-      ...sanitizeRelativePathList(payload.paths, 100),
-      ...sanitizeRelativePathList(payload.editedFiles, 100),
+      ...sanitizeRelativePathList(payload.paths, atlasItemLimit("tree.expand", "paths")),
+      ...sanitizeRelativePathList(payload.editedFiles, atlasItemLimit("tree.expand", "editedFiles")),
     ];
     if (payload.path != null) rawPaths.push(requireSafeRelativePath(payload.path, "tree.expand path"));
     assertNoUnsafeRelativePaths(payload.paths, "tree.expand paths");
@@ -407,24 +442,24 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
           refType: sanitizeString(ref?.refType, 32),
           refId: sanitizeString(ref?.refId, 512),
         }))
-        .filter((ref) => ["cluster", "process"].includes(ref.refType) && ref.refId)
-        .slice(0, 20)
+        .filter((ref) => ATLAS_TREE_REF_TYPES.includes(ref.refType) && ref.refId)
+        .slice(0, atlasItemLimit("tree.expand", "refs"))
       : [];
     const refType = sanitizeString(payload.refType, 32);
     const refId = sanitizeString(payload.refId, 512);
-    if (["cluster", "process"].includes(refType) && refId) refs.push({ refType, refId });
+    if (ATLAS_TREE_REF_TYPES.includes(refType) && refId) refs.push({ refType, refId });
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        paths: [...new Set(rawPaths)].slice(0, 100),
-        symbolIds: sanitizeAtlasSymbolIdList(payload.symbolIds || (payload.symbolId ? [payload.symbolId] : []), 100, "tree.expand symbolIds"),
-        nodeIds: sanitizeShortStringList(payload.nodeIds, 100, 2000),
+        paths: [...new Set(rawPaths)].slice(0, atlasItemLimit("tree.expand", "paths")),
+        symbolIds: sanitizeAtlasSymbolIdList(payload.symbolIds || (payload.symbolId ? [payload.symbolId] : []), atlasItemLimit("tree.expand", "symbolIds"), "tree.expand symbolIds"),
+        nodeIds: sanitizeShortStringList(payload.nodeIds, atlasItemLimit("tree.expand", "nodeIds"), 2000),
         refs,
-        ...(payload.maxFiles == null ? {} : { maxFiles: clampInt(payload.maxFiles, 1, 500, DEFAULT_ATLAS_SCOPE_MAX_FILES) }),
-        ...(payload.maxBranches == null ? {} : { maxBranches: clampInt(payload.maxBranches, 1, 100, 12) }),
-        ...(payload.branchFileCap == null ? {} : { branchFileCap: clampInt(payload.branchFileCap, 1, 500, 40) }),
-        ...(payload.refMatchLimit == null ? {} : { refMatchLimit: clampInt(payload.refMatchLimit, 1, 500, 50) }),
+        ...(payload.maxFiles == null ? {} : { maxFiles: clampAtlasParam(payload.maxFiles, "tree.expand", "maxFiles", DEFAULT_ATLAS_SCOPE_MAX_FILES) }),
+        ...(payload.maxBranches == null ? {} : { maxBranches: clampAtlasParam(payload.maxBranches, "tree.expand", "maxBranches", 12) }),
+        ...(payload.branchFileCap == null ? {} : { branchFileCap: clampAtlasParam(payload.branchFileCap, "tree.expand", "branchFileCap", 40) }),
+        ...(payload.refMatchLimit == null ? {} : { refMatchLimit: clampAtlasParam(payload.refMatchLimit, "tree.expand", "refMatchLimit", 50) }),
       },
     };
   }
@@ -434,22 +469,22 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
     assertNoUnsafeRelativePaths(rawFocusPaths, "focusPaths");
     const taskText = sanitizeString(
       payload.taskText || payload.task || payload.description || payload.query || "",
-      ATLAS_MAX_QUERY_LENGTH,
+      atlasTextLimit("context", "taskText"),
     );
     if (!taskText) throw new Error("ATLAS context requires taskText.");
     const taskTypeRaw = sanitizeString(payload.taskType || "explain", 64);
-    const taskType = new Set(["debug", "review", "implement", "explain"]).has(taskTypeRaw)
+    const taskType = ATLAS_TASK_TYPES.includes(taskTypeRaw)
       ? taskTypeRaw
       : "explain";
     const contextModeRaw = sanitizeString(payload.contextMode || payload.options?.contextMode || "", 16).toLowerCase();
-    const entrySymbols = sanitizeAtlasSymbolIdList(payload.focusSymbols || payload.entrySymbols || payload.options?.focusSymbols, 100, "context focusSymbols");
-    const editedFiles = sanitizeRelativePathList(rawFocusPaths);
+    const entrySymbols = sanitizeAtlasSymbolIdList(payload.focusSymbols || payload.entrySymbols || payload.options?.focusSymbols, atlasItemLimit("context", "focusSymbols"), "context focusSymbols");
+    const editedFiles = sanitizeRelativePathList(rawFocusPaths, atlasItemLimit("context", "focusPaths"));
     const options = {
-      ...(contextModeRaw === "precise" || contextModeRaw === "broad" ? { contextMode: contextModeRaw } : {}),
+      ...(ATLAS_CONTEXT_MODES.includes(contextModeRaw) ? { contextMode: contextModeRaw } : {}),
       ...(entrySymbols.length > 0 ? { focusSymbols: entrySymbols } : {}),
       ...(editedFiles.length > 0 ? { focusPaths: editedFiles } : {}),
     };
-    const maxTokens = clampInt(payload.maxTokens ?? payload.budget?.maxTokens, 128, ATLAS_MAX_BUDGET_TOKENS, 1600);
+    const maxTokens = clampAtlasParam(payload.maxTokens ?? payload.budget?.maxTokens, "context", "maxTokens", 1600);
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
@@ -475,22 +510,22 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        taskText: payload.taskText != null ? sanitizeString(payload.taskText, ATLAS_MAX_QUERY_LENGTH) : undefined,
+        taskText: payload.taskText != null ? sanitizeString(payload.taskText, atlasTextLimit("slice.build", "taskText")) : undefined,
         semantic: payload.semantic == null ? undefined : !!payload.semantic,
         taskType: payload.taskType != null ? sanitizeString(payload.taskType, 64) : undefined,
-        entrySymbols: sanitizeAtlasSymbolIdList(payload.entrySymbols, 100, "slice.build entrySymbols"),
-        editedFiles: sanitizeRelativePathList(payload.editedFiles),
-        stackTrace: payload.stackTrace != null ? sanitizeString(payload.stackTrace, 8192) : undefined,
+        entrySymbols: sanitizeAtlasSymbolIdList(payload.entrySymbols, atlasItemLimit("slice.build", "entrySymbols"), "slice.build entrySymbols"),
+        editedFiles: sanitizeRelativePathList(payload.editedFiles, atlasItemLimit("slice.build", "editedFiles")),
+        stackTrace: payload.stackTrace != null ? sanitizeString(payload.stackTrace, atlasTextLimit("slice.build", "stackTrace")) : undefined,
         failingTestPath: payload.failingTestPath && isSafeRelativePath(payload.failingTestPath)
           ? sanitizeString(payload.failingTestPath, 512)
           : undefined,
         cardDetail: payload.cardDetail != null ? sanitizeString(payload.cardDetail, 64) : undefined,
-        ifNoneMatch: payload.ifNoneMatch != null ? sanitizeString(payload.ifNoneMatch, 512) : undefined,
+        ifNoneMatch: payload.ifNoneMatch != null ? sanitizeString(payload.ifNoneMatch, atlasTextLimit("slice.build", "ifNoneMatch")) : undefined,
         wireFormat: normalizeAtlasWireFormat(payload.wireFormat),
-        wireFormatVersion: payload.wireFormatVersion == null ? undefined : clampInt(payload.wireFormatVersion, 1, 3, 2),
+        wireFormatVersion: payload.wireFormatVersion == null ? undefined : clampAtlasParam(payload.wireFormatVersion, "slice.build", "wireFormatVersion", 2),
         budget: {
-          maxCards: clampInt(payload.maxCards, 1, ATLAS_MAX_BUDGET_CARDS, 12),
-          maxEstimatedTokens: clampInt(payload.maxTokens, 128, ATLAS_MAX_BUDGET_TOKENS, 2000),
+          maxCards: clampAtlasParam(payload.maxCards, "slice.build", "budget.maxCards", 12),
+          maxEstimatedTokens: clampAtlasParam(payload.maxTokens, "slice.build", "budget.maxEstimatedTokens", 2000),
         },
         ...(knownCardEtags ? { knownCardEtags } : {}),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
@@ -499,15 +534,15 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
   }
 
   if (normalizedAction === "slice.spillover.get") {
-    const spilloverHandle = sanitizeString(payload.spilloverHandle || payload.spillover_handle || payload.handle || "", 256);
+    const spilloverHandle = sanitizeString(payload.spilloverHandle || payload.spillover_handle || payload.handle || "", atlasTextLimit("slice.spillover.get", "spilloverHandle"));
     if (!spilloverHandle) throw new Error("ATLAS slice.spillover.get requires spilloverHandle.");
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
         spilloverHandle,
-        ...(payload.cursor ? { cursor: sanitizeString(payload.cursor, 256) } : {}),
-        ...(payload.pageSize == null ? {} : { pageSize: clampInt(payload.pageSize, 1, 100, 20) }),
+        ...(payload.cursor ? { cursor: sanitizeString(payload.cursor, atlasTextLimit("slice.spillover.get", "cursor")) } : {}),
+        ...(payload.pageSize == null ? {} : { pageSize: clampAtlasParam(payload.pageSize, "slice.spillover.get", "pageSize", 20) }),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };
@@ -521,10 +556,10 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        fromVersion: sanitizeString(payload.fromVersion, 128),
-        toVersion: sanitizeString(payload.toVersion, 128),
-        _budgetMaxCards: clampInt(payload.maxCards, 1, ATLAS_MAX_BUDGET_CARDS, 12),
-        _budgetMaxTokens: clampInt(payload.maxTokens, 128, ATLAS_MAX_BUDGET_TOKENS, 2000),
+        fromVersion: sanitizeString(payload.fromVersion, atlasTextLimit("review.delta", "fromVersion")),
+        toVersion: sanitizeString(payload.toVersion, atlasTextLimit("review.delta", "toVersion")),
+        _budgetMaxCards: clampAtlasParam(payload.maxCards, "review.delta", "maxCards", 12),
+        _budgetMaxTokens: clampAtlasParam(payload.maxTokens, "review.delta", "maxTokens", 2000),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };
@@ -533,8 +568,8 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
   if (normalizedAction === "symbol.card") {
     const symbolId = optionalAtlasSymbolId(payload.symbolId, "symbol.card symbolId");
     const symbolRef = sanitizeSymbolRef(payload.symbolRef);
-    const symbolIds = sanitizeAtlasSymbolIdList(payload.symbolIds, 100, "symbol.card symbolIds");
-    const symbolRefs = boundedBatchSymbolRefs(payload.symbolRefs, 100);
+    const symbolIds = sanitizeAtlasSymbolIdList(payload.symbolIds, atlasItemLimit("symbol.card", "symbolIds"), "symbol.card symbolIds");
+    const symbolRefs = boundedBatchSymbolRefs(payload.symbolRefs, atlasItemLimit("symbol.card", "symbolRefs"));
     if (!symbolId && !symbolRef?.name && symbolIds.length === 0 && symbolRefs.length === 0) {
       throw new Error("ATLAS symbol.card requires symbolId, symbolRef, symbolIds, or symbolRefs.");
     }
@@ -546,10 +581,10 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
         ...(symbolRef?.name ? { symbolRef } : {}),
         ...(symbolIds.length > 0 ? { symbolIds } : {}),
         ...(symbolRefs.length > 0 ? { symbolRefs } : {}),
-        ...(payload.ifNoneMatch ? { ifNoneMatch: sanitizeString(payload.ifNoneMatch, 256) } : {}),
+        ...(payload.ifNoneMatch ? { ifNoneMatch: sanitizeString(payload.ifNoneMatch, atlasTextLimit("symbol.card", "ifNoneMatch")) } : {}),
         ...(payload.minCallConfidence == null ? {} : { minCallConfidence: Number(payload.minCallConfidence) }),
         ...(payload.includeResolutionMetadata == null ? {} : { includeResolutionMetadata: !!payload.includeResolutionMetadata }),
-        ...(payload.sessionId ? { sessionId: sanitizeString(payload.sessionId, 256) } : {}),
+        ...(payload.sessionId ? { sessionId: sanitizeString(payload.sessionId, atlasTextLimit("symbol.card", "sessionId")) } : {}),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };
@@ -559,8 +594,8 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
     const symbolId = optionalAtlasSymbolId(payload.symbolId, "symbol.callers symbolId");
     const mode = sanitizeString(payload.mode || "caller", 16).toLowerCase();
     if (!symbolId) throw new Error("ATLAS symbol.callers requires symbols.");
-    if (!["caller", "reference", "all"].includes(mode)) {
-      throw new Error("ATLAS symbol.callers mode must be caller, reference, or all.");
+    if (!ATLAS_CALLER_MODES.includes(mode)) {
+      throw new Error(`ATLAS symbol.callers mode must be one of: ${ATLAS_CALLER_MODES.join(", ")}.`);
     }
     return {
       action: normalizedAction,
@@ -568,8 +603,8 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
       payload: {
         symbolId,
         mode,
-        limit: clampInt(payload.limit, 1, 100, 20),
-        offset: clampInt(payload.offset, 0, 100_000, 0),
+        limit: clampAtlasParam(payload.limit, "symbol.callers", "limit", 20),
+        offset: clampAtlasParam(payload.offset, "symbol.callers", "offset", 0),
         ...(payload.minConfidence == null ? {} : { minConfidence: Number(payload.minConfidence) }),
         projection: COMPACT_RELATIONSHIP_PROJECTION,
       },
@@ -588,13 +623,13 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
     if (payload.symbolRef?.file != null && !isSafeRelativePath(payload.symbolRef.file)) {
       throw new Error("ATLAS symbol.get symbolRef.file must be a safe relative path.");
     }
-    const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind, ATLAS_MAX_IDENTIFIERS);
+    const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind, atlasItemLimit("symbol.get", "identifiersToFind"));
     return {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
         ...(symbolId ? { symbolId } : { symbolRef }),
-        ...(payload.file ? { file: sanitizeString(payload.file, 4000) } : {}),
+        ...(payload.file ? { file: sanitizeString(payload.file, atlasTextLimit("symbol.get", "file")) } : {}),
         ...(identifiersToFind.length > 0 ? { identifiersToFind } : {}),
         ...(payload.maxTokens == null ? {} : {
           maxTokens: clampInt(
@@ -633,7 +668,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
       ? sanitizeString(payload.file, 512)
       : null;
     if (!symbolId && !file) throw new Error("ATLAS code.lens requires file or symbols.");
-    const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind || payload.identifiers, ATLAS_MAX_IDENTIFIERS);
+    const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind || payload.identifiers, atlasItemLimit("code.lens", "identifiersToFind"));
     if (identifiersToFind.length === 0) {
       throw new Error("ATLAS code.lens requires names.");
     }
@@ -643,7 +678,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
       payload: {
         ...(symbolId ? { symbolId } : { file }),
         identifiersToFind,
-        ...(payload.contextLines == null ? {} : { contextLines: clampInt(payload.contextLines, 0, 30, 3) }),
+        ...(payload.contextLines == null ? {} : { contextLines: clampAtlasParam(payload.contextLines, "code.lens", "contextLines", 3) }),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };
@@ -653,14 +688,14 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
     if (Array.isArray(payload.items)) {
       throw new Error("ATLAS code.window multi-selection is disabled; issue independent scalar calls together.");
     }
-    const reason = sanitizeString(payload.reason || payload.justification || "", ATLAS_MAX_QUERY_LENGTH);
+    const reason = sanitizeString(payload.reason || payload.justification || "", atlasTextLimit("code.window", "reason"));
     const symbolId = optionalAtlasSymbolId(payload.symbolId, "code.window symbolId");
     const file = payload.file && isSafeRelativePath(payload.file)
       ? sanitizeString(payload.file, 512)
       : null;
     if (!symbolId && !file) throw new Error("ATLAS code.window requires file or symbols.");
     if (!reason) throw new Error("ATLAS code.window requires reason.");
-    const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind, ATLAS_MAX_IDENTIFIERS);
+    const identifiersToFind = normalizeAtlasIdentifierList(payload.identifiersToFind, atlasItemLimit("code.window", "identifiersToFind"));
     if (file && identifiersToFind.length === 0) {
       throw new Error("ATLAS code.window file mode requires names.");
     }
@@ -671,7 +706,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
         ...(symbolId ? { symbolId } : { file }),
         reason,
         identifiersToFind,
-        expectedLines: clampInt(payload.expectedLines, 1, 2000, 120),
+        expectedLines: clampAtlasParam(payload.expectedLines, "code.window", "expectedLines", 120),
         ...(payload.maxTokens == null ? {} : {
           maxTokens: clampInt(
             payload.maxTokens,
@@ -697,11 +732,11 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
         ...(sliceHandle ? { sliceHandle } : {}),
-        usefulSymbols: sanitizeAtlasSymbolIdList(payload.usefulSymbols, 40, "agent.feedback usefulSymbols"),
-        missingSymbols: sanitizeAtlasSymbolIdList(payload.missingSymbols, 40, "agent.feedback missingSymbols"),
+        usefulSymbols: sanitizeAtlasSymbolIdList(payload.usefulSymbols, atlasItemLimit("agent.feedback", "usefulSymbols"), "agent.feedback usefulSymbols"),
+        missingSymbols: sanitizeAtlasSymbolIdList(payload.missingSymbols, atlasItemLimit("agent.feedback", "missingSymbols"), "agent.feedback missingSymbols"),
         ...(payload.taskType ? { taskType: sanitizeString(payload.taskType, 64) } : {}),
-        ...(payload.taskText ? { taskText: sanitizeString(payload.taskText, ATLAS_MAX_QUERY_LENGTH) } : {}),
-        ...(Array.isArray(payload.taskTags) ? { taskTags: sanitizeShortStringList(payload.taskTags, 12, 64) } : {}),
+        ...(payload.taskText ? { taskText: sanitizeString(payload.taskText, atlasTextLimit("agent.feedback", "taskText")) } : {}),
+        ...(Array.isArray(payload.taskTags) ? { taskTags: sanitizeShortStringList(payload.taskTags, atlasItemLimit("agent.feedback", "taskTags"), atlasParamSchema("agent.feedback", "taskTags").items.maxLength) } : {}),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };
@@ -715,9 +750,9 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        fromVersion: sanitizeString(payload.fromVersion, 128),
-        toVersion: sanitizeString(payload.toVersion, 128),
-        ...(payload.riskThreshold == null ? {} : { riskThreshold: clampInt(payload.riskThreshold, 0, 100, 50) }),
+        fromVersion: sanitizeString(payload.fromVersion, atlasTextLimit("review.analyze", "fromVersion")),
+        toVersion: sanitizeString(payload.toVersion, atlasTextLimit("review.analyze", "toVersion")),
+        ...(payload.riskThreshold == null ? {} : { riskThreshold: clampAtlasParam(payload.riskThreshold, "review.analyze", "riskThreshold", 50) }),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };
@@ -731,11 +766,11 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
       action: normalizedAction,
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
-        fromVersion: sanitizeString(payload.fromVersion, 128),
-        toVersion: sanitizeString(payload.toVersion, 128),
-        _budgetMaxCards: clampInt(payload.maxCards, 1, ATLAS_MAX_BUDGET_CARDS, 12),
-        _budgetMaxTokens: clampInt(payload.maxTokens, 128, ATLAS_MAX_BUDGET_TOKENS, 2000),
-        ...(payload.riskThreshold == null ? {} : { riskThreshold: clampInt(payload.riskThreshold, 0, 100, 50) }),
+        fromVersion: sanitizeString(payload.fromVersion, atlasTextLimit("review.risk", "fromVersion")),
+        toVersion: sanitizeString(payload.toVersion, atlasTextLimit("review.risk", "toVersion")),
+        _budgetMaxCards: clampAtlasParam(payload.maxCards, "review.risk", "maxCards", 12),
+        _budgetMaxTokens: clampAtlasParam(payload.maxTokens, "review.risk", "maxTokens", 2000),
+        ...(payload.riskThreshold == null ? {} : { riskThreshold: clampAtlasParam(payload.riskThreshold, "review.risk", "riskThreshold", 50) }),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },
     };
@@ -749,11 +784,11 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
       cliAction: resolveAtlasDeterministicCliAction(normalizedAction),
       payload: {
         filePath,
-        ...(payload.maxBytes == null ? {} : { maxBytes: clampInt(payload.maxBytes, 1, ATLAS_MAX_FILE_BYTES, ATLAS_MAX_FILE_BYTES) }),
-        ...(payload.offset == null ? {} : { offset: clampInt(payload.offset, 0, Number.MAX_SAFE_INTEGER, 0) }),
-        ...(payload.limit == null ? {} : { limit: clampInt(payload.limit, 1, ATLAS_MAX_FILE_LINES, 200) }),
-        ...(payload.search ? { search: sanitizeString(payload.search, 500) } : {}),
-        ...(payload.searchContext == null ? {} : { searchContext: clampInt(payload.searchContext, 0, ATLAS_MAX_SEARCH_CONTEXT_LINES, 2) }),
+        ...(payload.maxBytes == null ? {} : { maxBytes: clampAtlasParam(payload.maxBytes, "file.read", "maxBytes", 512 * 1024) }),
+        ...(payload.offset == null ? {} : { offset: clampAtlasParam(payload.offset, "file.read", "offset", 0) }),
+        ...(payload.limit == null ? {} : { limit: clampAtlasParam(payload.limit, "file.read", "limit", 200) }),
+        ...(payload.search ? { search: sanitizeString(payload.search, atlasTextLimit("file.read", "search")) } : {}),
+        ...(payload.searchContext == null ? {} : { searchContext: clampAtlasParam(payload.searchContext, "file.read", "searchContext", 2) }),
         ...(jsonPath ? { jsonPath } : {}),
         ...(payload.repoId ? { repoId: payload.repoId } : {}),
       },

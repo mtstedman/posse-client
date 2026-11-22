@@ -358,11 +358,42 @@ export class View {
       });
     };
 
+    // Every symbol's metrics, read in native keyset pages. A page that does
+    // not advance past the previous cursor fails instead of looping or
+    // returning a partial list.
+    const symbolMetrics = async () => {
+      /** @type {{ global_id: number, fan_in: number, fan_out: number }[]} */
+      const metrics = [];
+      /** @type {number | null} */
+      let afterGlobalId = null;
+      for (;;) {
+        const response = await readResponse(
+          "symbol_metrics",
+          afterGlobalId == null ? {} : { after_global_id: afterGlobalId },
+        );
+        if (!Array.isArray(response.value)) {
+          throw new Error("ATLAS symbolMetrics returned a non-array metrics page");
+        }
+        for (const row of response.value) {
+          const globalId = row?.global_id;
+          if (!Number.isSafeInteger(globalId) || (afterGlobalId != null && globalId <= afterGlobalId)) {
+            throw new Error(`ATLAS symbolMetrics page did not advance beyond global_id ${afterGlobalId}`);
+          }
+          afterGlobalId = globalId;
+          metrics.push(row);
+        }
+        if (!response.truncated) return metrics;
+        if (response.value.length === 0) {
+          throw new Error("ATLAS symbolMetrics reported truncation on an empty page");
+        }
+      }
+    };
+
     /** @type {ViewQuery} */
     const api = {
       stats: () => read("stats"),
       edgeStats: () => read("edge_stats"),
-      symbolMetrics: () => read("symbol_metrics"),
+      symbolMetrics,
       edgeTaxonomyInput: () => read("edge_taxonomy_input"),
 
       findSymbol: (name, opts = {}) => {

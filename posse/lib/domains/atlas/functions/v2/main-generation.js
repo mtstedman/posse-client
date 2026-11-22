@@ -23,8 +23,9 @@ import {
 } from "./contracts/jobs.js";
 import { normalizeTreeCompressionMode } from "./tree-compression-policy.js";
 import { inspectViewMaterialization } from "./view-health.js";
+import { ATLAS_MAIN_GENERATION_PURPOSES } from "../../../../catalog/atlas.js";
 
-const MAIN_GENERATION_PURPOSES = new Set(["main-incremental", "main-full", "main-merge"]);
+const MAIN_GENERATION_PURPOSES = new Set(ATLAS_MAIN_GENERATION_PURPOSES);
 const ACCOUNTED_SKIP_REASONS = new Set(ATLAS_MAIN_GENERATION_ACCOUNTED_SKIP_REASONS);
 const [PUBLISHED_REASON, PUBLISHED_ON_RETRY_REASON] = ATLAS_MAIN_GENERATION_PUBLISHED_PROOF_REASONS;
 

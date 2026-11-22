@@ -10,6 +10,7 @@ import { scopeJobTestPlan } from "./job-test-plan.js";
 import { JOB_TESTS_DEFERRED_TO_INTEGRATION, TEST_EXECUTION_RECEIPT_SCHEMA_VERSION as RECEIPT_SCHEMA_VERSION, REUSABLE_RECEIPT_STATUSES, SCOPE_ATTRIBUTABLE_DELTAS } from "../../../../catalog/verification.js";
 import { sha256 } from "../../../../shared/format/functions/sha256.js";
 import { validatePlannerTestCommandForRepository } from "../../../verification/functions/planner-test-command.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 export { validatePlannerTestCommand, validatePlannerTestCommandForRepository, operationalCommandApprovalRequest } from "../../../verification/functions/planner-test-command.js";
 import { classifyNestedRunnerInfrastructureFailure, classifyPackageManagerTestPlanFailure } from "../../../verification/functions/test-runner-failure.js";
 export { classifyNestedRunnerInfrastructureFailure } from "../../../verification/functions/test-runner-failure.js";
@@ -1219,7 +1220,7 @@ export async function lineageChangedTestPaths({
   exclude = [],
 } = {}) {
   const none = { base: null, paths: [], scopePaths: [], addedPaths: [] };
-  if (!cwd || !["dev", "fix"].includes(String(job?.job_type || ""))
+  if (!cwd || !DEV_ROLE_JOB_TYPES.has(String(job?.job_type || ""))
     || String(payload?.task_mode || "code") !== "code") return none;
   const base = lineageBaseCommit(job, payload) || String(fallbackBase || "").trim();
   if (!base) return none;

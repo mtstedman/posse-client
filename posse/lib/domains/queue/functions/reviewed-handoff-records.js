@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { REVIEWED_COMPLETION_KEY, REVIEWED_HANDOFF_VERSION, REVIEWED_HANDOFF_TRANSITIONS, REVIEWED_SOURCE_MERGE_KEY } from "../../../catalog/reviewed-handoffs.js";
 import { parseJobPayload } from "./payload.js";
 import { FINAL_REVIEW_CONTRACT_FIELDS } from "../../../catalog/final-review.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 export function reviewedAuthorityFingerprint(payload) {
   return createHash("sha256").update(JSON.stringify([
@@ -44,7 +45,7 @@ export function transitionReviewedTransfer(entry, state, details = {}) {
 export function reviewedCompletion(job, workItem) {
   const receipt = parseJobPayload(job)[REVIEWED_COMPLETION_KEY];
   if (job?.status !== "succeeded" || !receipt || receipt.version !== REVIEWED_HANDOFF_VERSION
-      || !["dev", "fix"].includes(job.job_type)
+      || !DEV_ROLE_JOB_TYPES.has(job.job_type)
       || receipt.source_job_id !== job.id || receipt.source_work_item_id !== workItem?.id
       || receipt.source_generation !== workItemBranchGeneration(workItem)
       || receipt.attempt_count !== job.attempt_count

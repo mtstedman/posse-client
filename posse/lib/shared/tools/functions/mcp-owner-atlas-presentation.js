@@ -1,6 +1,6 @@
 import { COMPACT_STRUCTURE_DEFAULT_MAX_CHARS, COMPACT_STRUCTURE_DEFAULT_MAX_FILES, COMPACT_STRUCTURE_PROJECTION } from "../../../catalog/atlas-presentation.js";
 import { ATLAS_COMPACT_STRUCTURE_MAX_CHARS, ATLAS_COMPACT_STRUCTURE_SMALL_PAGE_ROLES } from "../../../catalog/atlas.js";
-import { compactSkeletonSymbolHandles, compactResearcherTypedAtlasText, normalizeResearcherTypedAtlasFieldNames } from "./researcher-typed-result-compaction.js";
+import { compactSkeletonOutlineText, compactSkeletonSymbolHandles, compactResearcherTypedAtlasText, normalizeResearcherTypedAtlasFieldNames } from "./researcher-typed-result-compaction.js";
 import { usesResearcherAtlasReadSurface, sessionToolPolicy, requestedToolPolicyName } from "./mcp-owner-tool-policy.js";
 import { atlasSymbolHandleForId, rememberAtlasSymbolSourcePaths } from "./mcp-owner-symbol-handles.js";
 import { annotateOwnerResultTransform, preserveOwnerModelControlNotices } from "./mcp-owner-source-transport.js";
@@ -54,25 +54,14 @@ export function appendSymbolHandles(result, session, action, { atlasCall = true 
   if (!session || result?.isError === true) return result;
   const first = result?.content?.[0];
   if (!first || first.type !== "text" || typeof first.text !== "string") return result;
-  if (!usesResearcherAtlasReadSurface(sessionToolPolicy(session))) {
-    // Only an Atlas result names symbols; a file read may legitimately quote
-    // text that merely looks like an ID.
-    if (!atlasCall) return result;
-    const replaced = replaceCanonicalSymbolIds(first.text, session);
-    if (replaced.issued === 0) return result;
-    return annotateOwnerResultTransform({
-      ...result,
-      content: [{ ...first, text: replaced.text }, ...result.content.slice(1)],
-    }, {
-      kind: "atlas_symbol_handles",
-      issued: replaced.issued,
-      scope: "job_bound_agent_session",
-      before_chars: first.text.length,
-      after_chars: replaced.text.length,
-    });
-  }
+  const researcher = usesResearcherAtlasReadSurface(sessionToolPolicy(session));
+  // Only an Atlas result names symbols; a file read may legitimately quote
+  // text that merely looks like an ID.
+  if (!researcher && !atlasCall) return result;
   let issued = 0;
   let text = first.text;
+  // A skeleton row's [symbolId=…] selector is unquoted, so the quoted-ID pass
+  // below never sees it; every role gets the short handle here.
   if (action === "code.skeleton") {
     const skeleton = compactSkeletonSymbolHandles(text, (symbolId, file) => {
       const handle = atlasSymbolHandleForId(session, symbolId);
@@ -84,21 +73,29 @@ export function appendSymbolHandles(result, session, action, { atlasCall = true 
       issued += skeleton.issued;
     }
   }
-  text = text.replace(
-    /("symbolId"\s*:\s*")([0-9a-f]{64}:[0-9]+)(")/g,
-    (match, prefix, symbolId, suffix) => {
+  if (!researcher) {
+    const replaced = replaceCanonicalSymbolIds(text, session);
+    text = replaced.text;
+    issued += replaced.issued;
+  } else {
+    text = text.replace(
+      /("symbolId"\s*:\s*")([0-9a-f]{64}:[0-9]+)(")/g,
+      (match, prefix, symbolId, suffix) => {
+        const handle = atlasSymbolHandleForId(session, symbolId);
+        if (!handle) return match;
+        issued += 1;
+        return `${prefix}${symbolId}${suffix},"symbolHandle":"${handle}"`;
+      },
+    );
+    text = text.replace(/"([0-9a-f]{64}:[0-9]+)"\s*:/gu, (match, symbolId) => {
       const handle = atlasSymbolHandleForId(session, symbolId);
       if (!handle) return match;
       issued += 1;
-      return `${prefix}${symbolId}${suffix},"symbolHandle":"${handle}"`;
-    },
-  );
-  text = text.replace(/"([0-9a-f]{64}:[0-9]+)"\s*:/gu, (match, symbolId) => {
-    const handle = atlasSymbolHandleForId(session, symbolId);
-    if (!handle) return match;
-    issued += 1;
-    return `"${handle}":`;
-  });
+      return `"${handle}":`;
+    });
+  }
+  // An exhausted session strips skeleton selectors without issuing a handle,
+  // so a changed text, not the issued count, decides whether to replace.
   if (text === first.text) return result;
   return annotateOwnerResultTransform({
     ...result,
@@ -154,6 +151,30 @@ export function compactResearcherTypedAtlasResult(result, session, toolName, too
       removed_canonical_symbol_ids: compacted.removedCanonicalSymbolIds,
       removed_digest_fields: compacted.removedDigestFields,
       removed_default_fields: compacted.removedDefaultFields,
+      before_chars: first.text.length,
+      after_chars: compacted.text.length,
+    },
+  );
+}
+
+// A generated code.skeleton outline's routine metadata, for every role. Runs
+// after the researcher compaction, whose cardinality pass reads the native
+// outline fields, and before source transport lifts the outline into a block.
+export function compactSkeletonOutlineResult(result, action, toolArgs = {}) {
+  if (action !== "code.skeleton" || result?.isError === true) return result;
+  const first = result?.content?.[0];
+  if (!first || first.type !== "text" || typeof first.text !== "string") return result;
+  const compacted = compactSkeletonOutlineText(first.text, { args: toolArgs });
+  if (!compacted) return result;
+  const projected = {
+    ...result,
+    content: [{ ...first, text: compacted.text }, ...result.content.slice(1)],
+  };
+  return annotateOwnerResultTransform(
+    preserveOwnerModelControlNotices(result, projected),
+    {
+      kind: "atlas_skeleton_outline",
+      removed_fields: compacted.removedFields,
       before_chars: first.text.length,
       after_chars: compacted.text.length,
     },

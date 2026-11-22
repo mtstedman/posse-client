@@ -8,6 +8,7 @@ import { projectProviderToolDefinition } from "../functions/provider-schema.js";
 import { ProviderToolRenderer } from "./ProviderToolRenderer.js";
 import { ToolCatalog } from "./ToolCatalog.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
+import { DETERMINISTIC_TEST_TOOLS } from "../../../catalog/tool-surface/roles.js";
 
 // Tool names can arrive from surfaces newer than this build: the remote
 // gateway rolls the issued tool catalog forward independently of the shipped
@@ -37,10 +38,7 @@ function warnUnknownContractTool(name, err) {
   });
 }
 
-const TEST_CAPABILITY_TOOL_NAMES = new Set([
-  "run_scoped_checks",
-  "run_unit_test",
-]);
+const TEST_CAPABILITY_TOOL_NAMES = DETERMINISTIC_TEST_TOOLS;
 
 function canonicalToolName(tool = {}) {
   return String(tool?.canonicalName || tool?.name || "").trim();

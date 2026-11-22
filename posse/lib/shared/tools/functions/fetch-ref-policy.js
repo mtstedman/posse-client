@@ -2,6 +2,7 @@ import {
   CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS,
   CONTEXT_FETCH_REF_MAX_LIMIT_CHARS,
 } from "../../../catalog/context.js";
+import { ATLAS_FETCH_REF_SEARCH_MODES } from "../../../catalog/atlas-params.js";
 
 const VISIBILITY_RANK = Object.freeze({ hidden: 0, partial: 1, full: 2 });
 
@@ -116,7 +117,7 @@ function normalizeSearchSignature(args = {}) {
   const requestedMode = String(args.search_mode ?? args.searchMode ?? "auto").trim().toLowerCase();
   return {
     search: search.toLowerCase(),
-    requested_search_mode: ["auto", "literal", "regex"].includes(requestedMode)
+    requested_search_mode: ATLAS_FETCH_REF_SEARCH_MODES.includes(requestedMode)
       ? requestedMode
       : "auto",
     offset: positiveInt(args.offset, 0),

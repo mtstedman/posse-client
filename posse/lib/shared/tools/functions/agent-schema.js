@@ -209,3 +209,14 @@ export function projectAgentToolDefinition(definition = {}) {
   }
   return projected;
 }
+
+// Characters of an MCP tools/list surface as a provider forwards it to the
+// model: each tool's name, description and input schema. The MCP annotations
+// (title and behavior hints) are client metadata and are not counted.
+export function providerToolSchemaChars(tools = []) {
+  return JSON.stringify((Array.isArray(tools) ? tools : []).map((tool) => ({
+    name: tool?.name,
+    description: tool?.description,
+    inputSchema: tool?.inputSchema,
+  }))).length;
+}

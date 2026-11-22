@@ -145,21 +145,6 @@ export function compactSkeletonSymbolHandles(text, issueHandle) {
 }
 
 /**
- * Remove transport-only or invariant fields from one typed Atlas JSON result.
- * Exact source, relationships, identifiers found, non-empty exceptions, short
- * handles, and the model-control suffix remain intact.
- *
- * @param {string} text
- * @param {{ action?: string | null, args?: Record<string, unknown> | null, metadataOnly?: boolean }} [options]
- * @returns {{
- *   text: string,
- *   removedCanonicalSymbolIds: number,
- *   removedDigestFields: number,
- *   removedDefaultFields: number,
- * } | null}
- */
-
-/**
  * Identifiers a code.skeleton request narrowed its outline to.
  *
  * @param {Record<string, any> | null} args
@@ -173,6 +158,84 @@ function skeletonIdentifierFilter(args) {
   return values.map((value) => String(value || "").trim()).filter(Boolean);
 }
 
+/**
+ * Model-visible header of a generated code.skeleton outline, for every role.
+ * Its `startLine`/`endLine` address rows of the generated map, not source
+ * (each row carries its own source range); a live `summary` and a `matched`
+ * filter are the defaults; the ETag only feeds runtime conditional fetches;
+ * and a complete outline's counts restate its rows. An incomplete outline
+ * keeps its counts and `complete:false`, and `truncated:true`, a nonzero
+ * `omittedSymbols`, `degradedReason`, `indexed_signatures` provenance and a
+ * fallback or missed match always remain. Exact-source skeletons, errors and
+ * the model-control suffix are untouched.
+ *
+ * @param {string} text
+ * @param {{ args?: Record<string, unknown> | null }} [options]
+ * @returns {{ text: string, removedFields: number } | null}
+ */
+export function compactSkeletonOutlineText(text, { args = null } = {}) {
+  if (typeof text !== "string") return null;
+  const suffixAt = text.indexOf("\n\n[");
+  const jsonText = suffixAt >= 0 ? text.slice(0, suffixAt) : text;
+  const suffix = suffixAt >= 0 ? text.slice(suffixAt) : "";
+  let parsed;
+  try { parsed = JSON.parse(jsonText); } catch { return null; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || parsed.ok === false || parsed.error) return null;
+  const map = parsed.data || parsed;
+  if (!map || typeof map !== "object"
+    || ![CODE_CONTENT_KINDS.SUMMARY, CODE_CONTENT_KINDS.INDEXED_SIGNATURES].includes(map.contentKind)) return null;
+  let removedFields = 0;
+  const drop = (owner, field) => {
+    if (!Object.hasOwn(owner, field)) return;
+    delete owner[field];
+    removedFields += 1;
+  };
+  // A paged outline shows one page; the rest is behind its traversal_ref.
+  const paged = !!map.traversal_ref
+    || Number(map.pagination?.pages) > Number(map.pagination?.page)
+    || Number(map.pagination?.omittedPages) > 0;
+  const truncated = map.truncated === true || map.outputTruncated === true
+    || map.omittedSymbols > 0
+    || (map.complete === false && !map.degradedReason)
+    || paged
+    || !!map.next_traversal_ref || !!map.nextTraversalRef;  // legacy stored payloads
+  const complete = map.complete === true && !truncated && !map.degradedReason;
+  for (const field of ["startLine", "endLine", "etag", "outputTruncated"]) drop(map, field);
+  if (map.contentKind === CODE_CONTENT_KINDS.SUMMARY) drop(map, "contentKind");
+  if (map.matchStatus === "matched") drop(map, "matchStatus");
+  if (complete) for (const field of ["complete", "totalSymbols", "returnedSymbols"]) drop(map, field);
+  if (truncated) map.truncated = true;
+  else drop(map, "truncated");
+  if (!(map.omittedSymbols > 0)) drop(map, "omittedSymbols");
+  // An outline narrowed to requested identifiers lists only matching rows,
+  // so without this it reads as the file's complete declaration set and a
+  // caller can conclude the rest of the file holds nothing.
+  const filtered = skeletonIdentifierFilter(args).length > 0;
+  if (filtered) map.filtered_to_identifiers = true;
+  for (const [owner, key] of [[map, "_meta"], [parsed, "meta"]]) {
+    const meta = owner[key];
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) continue;
+    drop(meta, "etag");
+    if (Object.keys(meta).length === 0) drop(owner, key);
+  }
+  if (removedFields === 0 && !filtered) return null;
+  return { text: `${JSON.stringify(parsed)}${suffix}`, removedFields };
+}
+
+/**
+ * Remove transport-only or invariant fields from one typed Atlas JSON result.
+ * Exact source, relationships, identifiers found, non-empty exceptions, short
+ * handles, and the model-control suffix remain intact.
+ *
+ * @param {string} text
+ * @param {{ action?: string | null, args?: Record<string, unknown> | null, metadataOnly?: boolean }} [options]
+ * @returns {{
+ *   text: string,
+ *   removedCanonicalSymbolIds: number,
+ *   removedDigestFields: number,
+ *   removedDefaultFields: number,
+ * } | null}
+ */
 export function compactResearcherTypedAtlasText(text, { action = null, args = null, metadataOnly = false } = {}) {
   if (typeof text !== "string") return null;
   const suffixAt = text.indexOf("\n\n[");
@@ -215,50 +278,6 @@ export function compactResearcherTypedAtlasText(text, { action = null, args = nu
   if (!metadataOnly) visit(parsed);
 
   let removedDefaultFields = 0;
-  if (action === "code.skeleton" && parsed.ok !== false && !parsed.error) {
-    const map = parsed.data || parsed;
-    // Only generated outlines lose their map-row coordinates and provenance.
-    // Legacy exact-source responses still need those fields for source display.
-    if ([CODE_CONTENT_KINDS.SUMMARY, CODE_CONTENT_KINDS.INDEXED_SIGNATURES].includes(map.contentKind)) {
-      const truncated = map.truncated === true || map.outputTruncated === true
-        || map.omittedSymbols > 0
-        || (map.complete === false && !map.degradedReason)
-        || !!map.next_traversal_ref || !!map.nextTraversalRef;  // legacy stored payloads
-      for (const field of [
-        "contentKind", "startLine", "endLine", "matchStatus", "complete",
-        "totalSymbols", "returnedSymbols", "etag", "outputTruncated",
-      ]) {
-        if (!Object.hasOwn(map, field)) continue;
-        delete map[field];
-        removedDefaultFields += 1;
-      }
-      if (truncated) map.truncated = true;
-      else if (Object.hasOwn(map, "truncated")) {
-        delete map.truncated;
-        removedDefaultFields += 1;
-      }
-      if (Object.hasOwn(map, "omittedSymbols") && !(map.omittedSymbols > 0)) {
-        delete map.omittedSymbols;
-        removedDefaultFields += 1;
-      }
-      // An outline narrowed to requested identifiers lists only matching rows,
-      // so without this it reads as the file's complete declaration set and a
-      // caller can conclude the rest of the file holds nothing.
-      if (skeletonIdentifierFilter(args).length > 0) map.filtered_to_identifiers = true;
-      for (const [owner, key] of [[map, "_meta"], [parsed, "meta"]]) {
-        const meta = owner[key];
-        if (!meta || typeof meta !== "object" || Array.isArray(meta)) continue;
-        if (Object.hasOwn(meta, "etag")) {
-          delete meta.etag;
-          removedDefaultFields += 1;
-        }
-        if (Object.keys(meta).length === 0) {
-          delete owner[key];
-          removedDefaultFields += 1;
-        }
-      }
-    }
-  }
   if (!metadataOnly && action === "symbol.search") {
     const query = String(args?.query || "").trim();
     // A result that found nothing should say what was searched, so the reader

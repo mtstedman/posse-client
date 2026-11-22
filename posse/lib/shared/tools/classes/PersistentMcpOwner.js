@@ -3,7 +3,7 @@
 
 import { COMPACT_RELATIONSHIP_PROJECTION } from "../../../catalog/atlas-presentation.js";
 import { filterToolsListMessage, toolsListError, recordToolsListFailure, recordProviderIssuedToolSurface } from "../functions/mcp-owner-tool-surface.js";
-import { appendSymbolHandles, labelSymbolHandles, researcherStructureExecutorArgs, structureProjection, structureMaxChars, compactResearcherTypedAtlasResult, normalizeResearcherTypedAtlasResultFieldNames } from "../functions/mcp-owner-atlas-presentation.js";
+import { appendSymbolHandles, labelSymbolHandles, researcherStructureExecutorArgs, structureProjection, structureMaxChars, compactResearcherTypedAtlasResult, compactSkeletonOutlineResult, normalizeResearcherTypedAtlasResultFieldNames } from "../functions/mcp-owner-atlas-presentation.js";
 import "../functions/ref-surface.js";
 export { __testResearcherStructureExecutorArgs, __testStructureProjection, __testStructureMaxChars } from "../functions/mcp-owner-atlas-presentation.js";
 import { routeResearcherDispatcherCall, noteResearcherTypedTraversalPromotion } from "../functions/mcp-owner-atlas-routing.js";
@@ -42,6 +42,7 @@ import { addSearchSymbolHints } from "../functions/mcp-owner-search-hints.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
 import { ContextMeter } from "../../classes/ContextMeter.js";
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
+import { SUB_AGENT_ERROR_CODES } from "../../../catalog/sub-agent.js";
 import { agentHandoffTerminator } from "../../../domains/handoff/classes/AgentHandoffTerminator.js";
 import { acknowledgeWebResearchHandoffReceipt } from "../../../domains/web-research/classes/WebResearchRuntime.js";
 import { teamManagedToolAdmitted } from "../../../domains/pairing/functions/team-managed-write.js";
@@ -62,7 +63,7 @@ import { observeAtlasExecution } from "../functions/atlas-result-status.js";
 import { roleUsesBoundedRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
 import { sourceSelectorFingerprint } from "../../../domains/research/classes/SourceCoverageOwner.js";
 import { admitSourceContextHeadroom, releaseSourceContextHeadroomReservation } from "../../../domains/research/functions/context-headroom.js";
-import { compactResearchSearchResult, compactResearchSearchRows } from "../functions/research-search-presentation.js";
+import { compactResearchSearchResult, compactSearchRows } from "../functions/research-search-presentation.js";
 import { ATLAS_MUTATION_PATH_FIELDS } from "../../../catalog/tools/filesystem-mutations.js";
 import { usesResearcherAtlasReadSurface, sessionToolPolicy, requestedToolPolicyName, toolAllowedByPolicy, stripGatewaySessionTokenFields, nestedAtlasActionDenial, deniedToolCallMessage, deniedToolCallResult, hasSuiteToolAllowlist, delegatedEvidenceRequestAllowed } from "../functions/mcp-owner-tool-policy.js";
 import { resolveAtlasSymbolHandle, atlasSymbolSourcePath, atlasSymbolHandleForId } from "../functions/mcp-owner-symbol-handles.js";
@@ -2464,10 +2465,10 @@ export class PersistentMcpOwner {
               },
             });
           } catch (error) {
-            const rawCode = String(error?.code || "SUB_AGENT_ERROR").trim();
+            const rawCode = String(error?.code || SUB_AGENT_ERROR_CODES.ERROR).trim();
             const errorCode = /^[A-Z0-9_]{3,80}$/.test(rawCode)
               ? rawCode
-              : "SUB_AGENT_ERROR";
+              : SUB_AGENT_ERROR_CODES.ERROR;
             recordObservation({
               work_item_id: session?.bootConfig?.workItemId ?? null,
               job_id: session?.bootConfig?.jobId ?? null,
@@ -2661,10 +2662,10 @@ export class PersistentMcpOwner {
               },
             });
           } catch (error) {
-            const rawCode = String(error?.code || "SUB_AGENT_ERROR").trim();
+            const rawCode = String(error?.code || SUB_AGENT_ERROR_CODES.ERROR).trim();
             const errorCode = /^[A-Z0-9_]{3,80}$/.test(rawCode)
               ? rawCode
-              : "SUB_AGENT_ERROR";
+              : SUB_AGENT_ERROR_CODES.ERROR;
             recordObservation({
               work_item_id: session?.bootConfig?.workItemId ?? null,
               job_id: session?.bootConfig?.jobId ?? null,
@@ -2681,7 +2682,7 @@ export class PersistentMcpOwner {
                 request_count: Array.isArray(toolArgs?.requests) ? toolArgs.requests.length : null,
                 stage: String(error?.stage || "runtime").slice(0, 40),
                 retryable: error?.retryable === true,
-                ...(errorCode === "SUB_AGENT_INPUT_TOOL_FORBIDDEN" && error?.inputTool
+                ...(errorCode === SUB_AGENT_ERROR_CODES.INPUT_TOOL_FORBIDDEN && error?.inputTool
                   ? { input_tool: String(error.inputTool).slice(0, 160) }
                   : {}),
                 // A child that ran before the dispatch failed has its own row.
@@ -4351,6 +4352,7 @@ export class PersistentMcpOwner {
         evidenceResult,
       ));
       result = composed("compaction", compactResearcherTypedAtlasResult(result, session, toolName, toolArgs));
+      result = composed("skeleton_outline", compactSkeletonOutlineResult(result, requested.name, toolArgs));
       result = composed("source_transport_finalize", finalizeSourceTransport(result, hashRefToolContext(session)));
       result = composed("field_names", projectAtlasModelResult(
         result,
@@ -4358,8 +4360,10 @@ export class PersistentMcpOwner {
         toolName,
         toolArgs,
       ));
-      if (String(session?.bootConfig?.role || "") === "researcher" && requested.name === "symbol.search") {
-        result = composed("search_rows", compactResearchSearchRows(result));
+      if (requested.name === "symbol.search") {
+        result = composed("search_rows", compactSearchRows(result, {
+          researcher: String(session?.bootConfig?.role || "") === "researcher",
+        }));
       }
       for (const transform of providerTransforms) {
         result = composed("transform_annotations", annotateOwnerResultTransform(result, transform));

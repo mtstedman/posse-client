@@ -29,7 +29,7 @@ import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS, TOOL_CUSTOM_TOOLS } from "../../
 import { MCP_REQUEST_DEFERRED_NOTIFICATION, MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../catalog/artifact.js";
 import { JOB_TOOL_USAGE_COUNTERS } from "../../../catalog/job.js";
-import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
+import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE, RESEARCH_NATIVE_EXPLORATION_TOOLS, RESEARCH_NATIVE_SYNTHESIS_GATED_TOOLS } from "../../../catalog/observation.js";
 import { discoverUnitTestCapability, declaredUnitTestPaths } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { roleUsesCanonicalRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
 import { assessorFallbackReadCallKey, isAssessorFallbackReadKey } from "../../assessment/functions/fallback-read-tools.js";
@@ -81,11 +81,13 @@ import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 import { sanitizeAbsolutePathsInText } from "../../../shared/format/functions/display-paths.js";
 import { parseEnvBool, parseBoolOverride, bootString, nonNegativeIntegerOrNull } from "./deterministic-mcp/boot-config-parse.js";
 import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
-import { projectAgentToolSchema, sortAgentToolDefinitions } from "../../../shared/tools/functions/agent-schema.js";
+import { projectAgentToolSchema, providerToolSchemaChars, sortAgentToolDefinitions } from "../../../shared/tools/functions/agent-schema.js";
 import { resolveAgentFileAuthority } from "./deterministic-mcp/agent-file-authority.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
 import { RESEARCH_CITATION_FETCH_GATE_ENABLED, RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS, NATIVE_DUPLICATE_READ_SUPPRESSED_PREFIX, RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS, RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS, RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS, buildResearchCitationFetchGateText, buildResearchCurtainCallText, buildResearchSynthesisRequiredText, isResearchAtlasCitationFetchAction, isResearchAtlasExplorationAction, researchSynthesisDecision, researchSynthesisExplorationCeiling } from "./deterministic-mcp/research-synthesis.js";
 import { jsonRpcSuccess, jsonRpcError, hiddenSessionFromParams, stripHiddenSessionParam, classifyNativeToolResult, isSuccessfulNativeToolResult } from "./deterministic-mcp/json-rpc.js";
+import { DETERMINISTIC_TEST_TOOLS } from "../../../catalog/tool-surface/roles.js";
+import { ATLAS_GATEWAY_FAMILIES } from "../../../catalog/atlas-tools.js";
 
 /** Safe wrapper — recording must never break tool execution in the MCP subprocess. */
 
@@ -178,6 +180,7 @@ function recordIssuedToolSurfaceObservation({
       action_enum_source: "atlas_tool_names",
       schema_sha256: schemaSha256,
       schema_chars: canonical.length,
+      provider_schema_chars: providerToolSchemaChars(tools),
       effective_policy: effectivePolicy,
       limits: { ...currentResearchSynthesisPolicySnapshot() },
       projections,
@@ -399,25 +402,6 @@ let remoteToolCatalogConfig = bootConfig.remoteCatalog && typeof bootConfig.remo
 let remoteToolCatalogPreload = bootConfig.remoteToolSurface && typeof bootConfig.remoteToolSurface === "object"
   ? bootConfig.remoteToolSurface
   : null;
-const RESEARCH_NATIVE_EXPLORATION_TOOLS = new Set([
-  "read_file",
-  "chain_verdict",
-  "list_files",
-  "search_files",
-  "git_history",
-  "inspect_file",
-  "hash_file",
-]);
-const RESEARCH_NATIVE_SYNTHESIS_GATED_TOOLS = new Set([
-  "read_file",
-  "chain_read",
-  "chain_verdict",
-  "list_files",
-  "search_files",
-  "git_history",
-  "inspect_file",
-  "hash_file",
-]);
 
 if (mcpDbPath) {
   setRuntimePathOverrides({ dbPath: mcpDbPath });
@@ -734,7 +718,7 @@ function isStaticAtlasToolName(toolName) {
   return STATIC_ATLAS_TOOL_NAMES.has(String(toolName || ""));
 }
 
-const ATLAS_GATEWAY_TOOL_NAMES = new Set(["query", "code", "repo", "agent"]);
+const ATLAS_GATEWAY_TOOL_NAMES = new Set(ATLAS_GATEWAY_FAMILIES);
 const RESEARCHER_TYPED_DISPATCHER_QUALIFIED_ZERO_CALL_NATIVE_TOOLS = new Set([
   "git_history",
   "hash_file",
@@ -1479,10 +1463,7 @@ const IMAGE_HELPER_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_HELPER_TOOLS);
 const IMAGE_GENERATION_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_TOOLS);
 const OCR_TOOL_NAMES = new Set(DETERMINISTIC_OCR_TOOLS);
 const IMAGE_VIEW_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_VIEW_TOOLS);
-const TEST_TOOL_NAMES = new Set([
-  "run_scoped_checks",
-  "run_unit_test",
-]);
+const TEST_TOOL_NAMES = DETERMINISTIC_TEST_TOOLS;
 
 // Discovery invokes synchronous Git. Defer it until authorization is ready,
 // then freeze it within the runtime session; session switches invalidate it.

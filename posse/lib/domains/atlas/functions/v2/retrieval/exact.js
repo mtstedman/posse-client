@@ -9,6 +9,7 @@ import { errorEnvelope, okEnvelope } from "./envelope.js";
 import { nativePathEvidence } from "./native-evidence.js";
 import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 import { codeSurveyPathError, surveyPaths } from "./survey.js";
+import { ATLAS_STRUCTURE_EDGE_KINDS } from "../../../../../catalog/atlas-params.js";
 
 const MAX_STRUCTURE_FILES = 128;
 
@@ -133,7 +134,7 @@ async function materializedStructureEdges(view, files, edgeKinds) {
 }
 
 function normalizedStructureEdgeKinds(value) {
-  const allowed = new Set(["imports", "calls", "references", "extends", "implements", "uses_type"]);
+  const allowed = new Set(ATLAS_STRUCTURE_EDGE_KINDS);
   const selected = arrayValue(value)
     .map((kind) => String(kind || "").trim())
     .filter((kind) => allowed.has(kind));

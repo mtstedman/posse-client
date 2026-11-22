@@ -9,7 +9,6 @@
 
 import { CONTEXT_BOUNDING_POLICIES } from "../../../../../catalog/context.js";
 import { CODE_CONTENT_KINDS } from "../../../../../catalog/source-display.js";
-import { sourceDecisionNavigation } from "../../../../../shared/tools/functions/source-decision-points.js";
 import { parseSymbolId, symbolHit } from "./cards.js";
 import { okEnvelope, errorEnvelope, notModifiedEnvelope } from "./envelope.js";
 import { isCanonicalRepoPath } from "../paths.js";
@@ -952,11 +951,6 @@ async function codeNeedWindowWithNative({ view, versionId, params, readFile, rep
     ...(redirect ? { redirect, identifierRedirects } : {}),
     ...(codeMap ? { map: codeMap } : {}),
     ...(additionalWindows.length > 0 ? { additionalWindows } : {}),
-    ...sourceDecisionNavigation({
-      repo_rel_path: targetPath, content, startLine, endLine, additionalWindows,
-      decisionPoints: result.decisionPoints,
-      decisionPointsTruncated: result.decisionPointsTruncated,
-    }, source),
     // Private native-to-owner transport. The hash-ref pager removes this
     // before model delivery and exposes a traversal_ref instead.
     ...(continuationWindows.length > 0 ? { _continuationWindows: continuationWindows } : {}),

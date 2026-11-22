@@ -52,6 +52,7 @@ import {
 } from "../../../../../shared/policies/functions/provider-affinity.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
 import { operationalCommandApprovalRequest } from "../../../../verification/functions/planner-test-command.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../../../catalog/job.js";
 
 function _positiveFixEditTargets(instructions = "", paths = []) {
   const source = String(instructions || "").toLowerCase();
@@ -603,7 +604,7 @@ function _buildMarkFailed(job, ctx) {
 }
 
 function _shouldRerouteZeroScopeCodeRecovery(job, currentPayload, desiredOutputs) {
-  return (job.job_type === "dev" || job.job_type === "fix")
+  return DEV_ROLE_JOB_TYPES.has(job.job_type)
     && (currentPayload.task_mode || "code") === "code"
     && !hasWritableScope(currentPayload)
     && desiredOutputs.includes("repo");

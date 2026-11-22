@@ -4,6 +4,7 @@ import {
   applyMemoryNote,
   applyMemorySuppress,
 } from "./memory-feedback.js";
+import { MEMORY_FLAG_REASONS } from "../../../catalog/atlas.js";
 
 function usage() {
   return [
@@ -12,7 +13,7 @@ function usage() {
     "    posse admin memory note <memoryId>",
     "    posse admin memory suppress <memoryId>",
     "    posse admin memory correct <memoryId> <replacement guidance>",
-    "    posse admin memory flag <memoryId> [contradicted|anchors_missing|manual] [detail...]",
+    `    posse admin memory flag <memoryId> [${MEMORY_FLAG_REASONS.join("|")}] [detail...]`,
     "",
     "  Aliases:",
     "    reinforce -> note",
@@ -21,7 +22,7 @@ function usage() {
   ].join("\n");
 }
 
-const FLAG_REASONS = new Set(["contradicted", "anchors_missing", "manual"]);
+const FLAG_REASONS = new Set(MEMORY_FLAG_REASONS);
 
 export async function runMemoryAdminCommand(args = [], { cwd = process.cwd(), C = { green: "", yellow: "", red: "", dim: "", reset: "" } } = {}) {
   const [actionRaw, memoryIdRaw, ...rest] = args;

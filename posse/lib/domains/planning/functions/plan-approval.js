@@ -51,15 +51,11 @@ import {
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { operationalCommandApprovalRequest } from "../../verification/functions/planner-test-command.js";
+import { WORK_ITEM_PLAN_APPROVAL_STATES } from "../../../catalog/work-item.js";
 
-// Document allowed plan_approval_state values. The DB column is untyped for
-// migration simplicity; this set is the authoritative list.
-export const PLAN_APPROVAL_STATES = Object.freeze([
-  "not_required",
-  "pending",
-  "approved",
-  "rejected",
-]);
+// work_items.plan_approval_state values; the CHECK constraint is built from
+// the same catalog list.
+export const PLAN_APPROVAL_STATES = WORK_ITEM_PLAN_APPROVAL_STATES;
 
 let _planApprovalOverride = null;
 

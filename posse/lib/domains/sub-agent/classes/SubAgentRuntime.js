@@ -1,6 +1,10 @@
 import { mergeOverlappingResearchBriefs } from "../functions/research-brief-overlap.js";
 import { expandResearchChildHandoff, researchChildHandoffMismatch } from "../../handoff/functions/helpers/runtime-handoff-input.js";
-import { RESEARCH_CHILD_PROFILE, RESEARCH_REPORT_OBJECT_TYPE, SUB_AGENT_OBSERVATION_TYPES } from "../../../catalog/sub-agent.js";
+import {
+  RESEARCH_BUDGET_KEYS, RESEARCH_CHILD_PROFILE, RESEARCH_REPAIR_ACTIONS, RESEARCH_REPAIR_REASONS, RESEARCH_REPORT_OBJECT_TYPE,
+  SUB_AGENT_ACTIVE_ENTRY_STATUSES, SUB_AGENT_BATCH_STATUSES, SUB_AGENT_ENTRY_STATUSES,
+  SUB_AGENT_ERROR_CODES, SUB_AGENT_FORBIDDEN_CURSOR_TOOLS, SUB_AGENT_OBSERVATION_TYPES,
+} from "../../../catalog/sub-agent.js";
 import {
   PLANNER_DISPATCH_RETURN_MARGIN_MS,
   PLANNER_DISPATCH_SETTINGS,
@@ -15,7 +19,7 @@ import {
 
 import crypto from "node:crypto";
 
-import { AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
+import { AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_PROTOCOL, AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../catalog/handoff.js";
 import { mcpClientToolDeadlineMs } from "../../../catalog/mcp.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import {
@@ -66,20 +70,7 @@ import {
 export { SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
 export { researchFindingHasEvidence } from "../functions/research-report.js";
 
-const DEFAULT_REGISTRY_TTL_MS = 8 * 60 * 60 * 1000;
-const DEFAULT_SETTLED_BATCH_RETENTION_MS = 60_000;
-const MAX_CURSOR_RETRIES_PER_POSITION = 1;
-// Codex middle-clips tool results at roughly 48k characters. Leave room for
-// the MCP envelope and move only whole reports when a batch approaches it.
-export const SUB_AGENT_TRANSPORT_RESULT_TARGET_CHARS = 46_000;
-
-const FORBIDDEN_CURSOR_TOOLS = new Set([
-  "tools.agent_handoff",
-  "tools.sub_agent",
-  "tools.sub_agent_next_input",
-  "atlas.create_ref",
-  "atlas.memory.feedback",
-].map(canonicalToolName));
+const FORBIDDEN_CURSOR_TOOLS = new Set(SUB_AGENT_FORBIDDEN_CURSOR_TOOLS.map(canonicalToolName));
 
 function runtimeError(code, message, { retryable = false, stage = "runtime", detail = null } = {}) {
   const error = /** @type {Error & { code: string, retryable: boolean, stage: string, inputTool?: string, detail?: object }} */ (new Error(message));
@@ -98,11 +89,11 @@ function exactObject(value, keys, label) {
     || typeof value !== "object"
     || Array.isArray(value)
     || (prototype !== Object.prototype && prototype !== null)) {
-    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label} must be an object`, { stage: "validation" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `${label} must be an object`, { stage: "validation" });
   }
   for (const key of Object.keys(value)) {
     if (!keys.includes(key)) {
-      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}.${key} is not allowed`, { stage: "validation" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `${label}.${key} is not allowed`, { stage: "validation" });
     }
   }
   return value;
@@ -110,8 +101,8 @@ function exactObject(value, keys, label) {
 
 function boundedString(value, label, max) {
   const text = typeof value === "string" ? value.trim() : "";
-  if (!text) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label} is required`, { stage: "validation" });
-  if (text.length > max) throw runtimeError("SUB_AGENT_TOO_LARGE", `${label} exceeds ${max} characters`, { stage: "validation" });
+  if (!text) throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `${label} is required`, { stage: "validation" });
+  if (text.length > max) throw runtimeError(SUB_AGENT_ERROR_CODES.TOO_LARGE, `${label} exceeds ${max} characters`, { stage: "validation" });
   return text;
 }
 
@@ -120,7 +111,7 @@ function boundedString(value, label, max) {
 // hundred input tokens by making the parent regenerate its whole call.
 function softCappedIntent(value, label, overages) {
   const text = typeof value === "string" ? value.trim() : "";
-  if (!text) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label} is required`, { stage: "validation" });
+  if (!text) throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `${label} is required`, { stage: "validation" });
   if (text.length > SUB_AGENT_LIMITS.maxIntentChars) {
     overages.push({ field: label, chars: text.length, soft_cap: SUB_AGENT_LIMITS.maxIntentChars });
   }
@@ -182,7 +173,7 @@ function packetEvidence(packet) {
         : claim && typeof claim === "object"
           ? claim
           : {};
-      for (const lane of ["evidence", "proof", "support"]) {
+      for (const lane of AGENT_HANDOFF_CLAIM_CITATION_FIELDS) {
         for (const item of detail[lane] || []) evidence.push(item);
       }
       for (const item of detail.decoy || []) {
@@ -223,7 +214,7 @@ function authorizedEvidenceContains(input, start, end, sourcePath = null) {
 function validateChildEvidenceScope(packet, authorizedEvidence) {
   const cited = packetEvidence(packet);
   if (cited.length === 0 && packet?.outcome !== "failed") {
-    throw runtimeError("SUB_AGENT_EVIDENCE_REQUIRED", "Citation child returned no evidence selectors", { stage: "terminal" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.EVIDENCE_REQUIRED, "Citation child returned no evidence selectors", { stage: "terminal" });
   }
   const authorized = authorizedEvidence.map((item) => item.evidence);
   for (const evidence of cited) {
@@ -236,7 +227,7 @@ function validateChildEvidenceScope(packet, authorizedEvidence) {
         || authorizedEvidenceContains(input, selector.start, selector.end, sourcePath))
     ));
     if (!permitted) {
-      throw runtimeError("SUB_AGENT_EVIDENCE_SCOPE_VIOLATION", `Citation child referenced undelegated evidence ${evidence.selector || evidence.ref || "unknown"}`, { stage: "terminal" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.EVIDENCE_SCOPE_VIOLATION, `Citation child referenced undelegated evidence ${evidence.selector || evidence.ref || "unknown"}`, { stage: "terminal" });
     }
   }
   return cited;
@@ -251,7 +242,7 @@ function surfaceChildPacketEvidenceToParent(packet, parentContext, sourceContext
     const source = resolveChildEvidenceSource(sourceContext, ref);
     if (!source || source.entry_kind !== "materialized" || source.payload_text == null) {
       throw runtimeError(
-        "SUB_AGENT_EVIDENCE_SURFACE_FAILED",
+        SUB_AGENT_ERROR_CODES.EVIDENCE_SURFACE_FAILED,
         `Could not return child evidence ${ref} to the parent call`,
         { stage: "terminal" },
       );
@@ -282,7 +273,7 @@ function surfaceChildPacketEvidenceToParent(packet, parentContext, sourceContext
     }, { ownerScope: "work_item" });
     if (!surfaced?.ok || !surfaced.entry?.ref) {
       throw runtimeError(
-        "SUB_AGENT_EVIDENCE_SURFACE_FAILED",
+        SUB_AGENT_ERROR_CODES.EVIDENCE_SURFACE_FAILED,
         `Could not return child evidence ${ref} to the parent call`,
         { stage: "terminal" },
       );
@@ -302,7 +293,7 @@ function surfaceChildPacketEvidenceToParent(packet, parentContext, sourceContext
     });
     if (!attemptSurfaced?.ok) {
       throw runtimeError(
-        "SUB_AGENT_EVIDENCE_SURFACE_FAILED",
+        SUB_AGENT_ERROR_CODES.EVIDENCE_SURFACE_FAILED,
         `Could not return child evidence ${ref} to the parent attempt`,
         { stage: "terminal" },
       );
@@ -408,7 +399,7 @@ function deliverableResearchPacket(entry, compact, childAgentCallId) {
 // closing) never reached the model, so they must not spend the planner's
 // bounded research allowance; only children that actually ran count.
 function entryCountsTowardResearchLimit(entry) {
-  if (entry.status !== "failed") return true;
+  if (entry.status !== SUB_AGENT_ENTRY_STATUSES.FAILED) return true;
   return !["admission", "control", "validation"].includes(String(entry.error?.stage || ""));
 }
 
@@ -424,13 +415,13 @@ function delay(ms) {
 function capacityError({ requested, active, limit, waitedMs }) {
   if (requested > limit) {
     return runtimeError(
-      "SUB_AGENT_CAPACITY",
+      SUB_AGENT_ERROR_CODES.CAPACITY,
       `SUB_AGENT_CAPACITY: a batch of ${requested} children can never fit the ${limit}-child inline lane; retrying it unchanged cannot succeed. Send at most ${limit} requests.`,
       { stage: "admission" },
     );
   }
   return runtimeError(
-    "SUB_AGENT_CAPACITY",
+    SUB_AGENT_ERROR_CODES.CAPACITY,
     `SUB_AGENT_CAPACITY: the inline child lane shared with other running agents stayed full (${active} of ${limit} slots busy, ${requested} requested) after waiting ${Math.round(waitedMs / 1000)}s. An immediate retry will fail the same way. If the research is still needed, do other work first and retry once later; a batch with fewer requests is admitted sooner. Otherwise continue without it.`,
     { retryable: true, stage: "admission" },
   );
@@ -710,7 +701,7 @@ function delegatedRefMaterializationError(error, ref) {
   const tooLarge = error?.code === "AGENT_HANDOFF_EVIDENCE_TOO_LARGE"
     || /through 2000\b|exceeds 2000 (?:lines|characters)/i.test(message);
   return runtimeError(
-    tooLarge ? "SUB_AGENT_INPUT_TOO_LARGE" : "SUB_AGENT_INPUT_INVALID",
+    tooLarge ? SUB_AGENT_ERROR_CODES.INPUT_TOO_LARGE : SUB_AGENT_ERROR_CODES.INPUT_INVALID,
     `Delegated evidence ${ref} could not be materialized: ${message}`,
     { stage: "validation" },
   );
@@ -720,7 +711,7 @@ function materializeDelegatedRef(selectorValue, context) {
   const selector = parseAgentHandoffEvidenceSelector(selectorValue);
   if (!("ref" in selector)) {
     throw runtimeError(
-      "SUB_AGENT_INPUT_PATH_SELECTOR_UNSUPPORTED",
+      SUB_AGENT_ERROR_CODES.INPUT_PATH_SELECTOR_UNSUPPORTED,
       "Citation children are ref-only; delegate the surfaced immutable #ref instead of a file path selector",
       { stage: "validation" },
     );
@@ -737,8 +728,6 @@ function materializeDelegatedRef(selectorValue, context) {
   }
 }
 
-const RESEARCH_BUDGET_KEYS = Object.freeze(["timeout_ms", "max_turns", "reasoning_effort", "model_tier"]);
-
 // A research budget arrives from a model. A stray key, a numeric string, or an
 // unknown effort is repaired and noted instead of rejected: a rejection costs
 // the planner a whole turn, and every repaired value falls back to (or stays
@@ -748,12 +737,12 @@ function normalizeResearchBudget(value, policy, requestId, repairs, { agentType 
   const note = (field, action, detail = {}) => repairs.push({ request_id: requestId, field, action, ...detail });
   const prototype = value && typeof value === "object" ? Object.getPrototypeOf(value) : null;
   if (typeof value !== "object" || Array.isArray(value) || (prototype !== Object.prototype && prototype !== null)) {
-    note("budget", "ignored", { reason: "not_an_object" });
+    note("budget", RESEARCH_REPAIR_ACTIONS.IGNORED, { reason: RESEARCH_REPAIR_REASONS.NOT_AN_OBJECT });
     return {};
   }
   const budget = {};
   for (const key of Object.keys(value)) {
-    if (!RESEARCH_BUDGET_KEYS.includes(key)) note(`budget.${String(key).slice(0, 60)}`, "ignored", { reason: "unknown_key" });
+    if (!RESEARCH_BUDGET_KEYS.includes(key)) note(`budget.${String(key).slice(0, 60)}`, RESEARCH_REPAIR_ACTIONS.IGNORED, { reason: RESEARCH_REPAIR_REASONS.UNKNOWN_KEY });
   }
   for (const field of ["timeout_ms", "max_turns"]) {
     const raw = value[field];
@@ -767,9 +756,9 @@ function normalizeResearchBudget(value, policy, requestId, repairs, { agentType 
     const integer = Math.floor(number);
     if (Number.isSafeInteger(integer) && integer > 0) {
       budget[field] = integer;
-      note(`budget.${field}`, "coerced", { to: integer });
+      note(`budget.${field}`, RESEARCH_REPAIR_ACTIONS.COERCED, { to: integer });
     } else {
-      note(`budget.${field}`, "ignored", { reason: "invalid_number" });
+      note(`budget.${field}`, RESEARCH_REPAIR_ACTIONS.IGNORED, { reason: RESEARCH_REPAIR_REASONS.INVALID_NUMBER });
     }
   }
   const effort = value.reasoning_effort;
@@ -777,10 +766,10 @@ function normalizeResearchBudget(value, policy, requestId, repairs, { agentType 
     const normalized = typeof effort === "string" ? effort.trim().toLowerCase() : "";
     if (PLANNER_RESEARCH_EFFORT_VALUES.includes(normalized)) {
       budget.reasoning_effort = normalized;
-      if (normalized !== effort) note("budget.reasoning_effort", "coerced", { to: normalized });
+      if (normalized !== effort) note("budget.reasoning_effort", RESEARCH_REPAIR_ACTIONS.COERCED, { to: normalized });
     } else {
-      note("budget.reasoning_effort", "defaulted", {
-        reason: "invalid_effort",
+      note("budget.reasoning_effort", RESEARCH_REPAIR_ACTIONS.DEFAULTED, {
+        reason: RESEARCH_REPAIR_REASONS.INVALID_EFFORT,
         to: policy?.childReasoningEffort || "medium",
       });
     }
@@ -793,12 +782,12 @@ function normalizeResearchBudget(value, policy, requestId, repairs, { agentType 
     const normalized = typeof tier === "string" ? tier.trim().toLowerCase() : "";
     const fallback = policy?.childModelTier || RESEARCH_CHILD_FALLBACK_MODEL_TIER;
     if (!RESEARCH_CHILD_REQUEST_MODEL_TIERS.includes(normalized)) {
-      note("budget.model_tier", "defaulted", { reason: "invalid_model_tier", to: fallback });
+      note("budget.model_tier", RESEARCH_REPAIR_ACTIONS.DEFAULTED, { reason: RESEARCH_REPAIR_REASONS.INVALID_MODEL_TIER, to: fallback });
     } else if (agentType === "web" && !RESEARCH_CHILD_DEFAULT_MODEL_TIERS.includes(normalized)) {
-      note("budget.model_tier", "defaulted", { reason: "web_children_use_cheaper_tiers", to: fallback });
+      note("budget.model_tier", RESEARCH_REPAIR_ACTIONS.DEFAULTED, { reason: RESEARCH_REPAIR_REASONS.WEB_CHILD_TIER, to: fallback });
     } else {
       budget.model_tier = normalized;
-      if (normalized !== tier) note("budget.model_tier", "coerced", { to: normalized });
+      if (normalized !== tier) note("budget.model_tier", RESEARCH_REPAIR_ACTIONS.COERCED, { to: normalized });
     }
   }
   return budget;
@@ -822,8 +811,8 @@ function capStrongResearchChildren(entries, priorEntries, policy, repairs) {
     repairs.push({
       request_id: entry.id,
       field: "budget.model_tier",
-      action: "defaulted",
-      reason: "strong_child_limit_per_planner_call",
+      action: RESEARCH_REPAIR_ACTIONS.DEFAULTED,
+      reason: RESEARCH_REPAIR_REASONS.STRONG_CHILD_LIMIT,
       limit: RESEARCH_CHILD_STRONG_LIMIT,
       to: fallback,
     });
@@ -838,13 +827,13 @@ function normalizeResearchAnchors(value, context, label, { requestId = null, rep
   if (value == null) return [];
   const note = (field, action, detail = {}) => repairs.push({ request_id: requestId, field, action, ...detail });
   if (!Array.isArray(value)) {
-    note(label, "ignored", { reason: "not_an_array" });
+    note(label, RESEARCH_REPAIR_ACTIONS.IGNORED, { reason: RESEARCH_REPAIR_REASONS.NOT_AN_ARRAY });
     return [];
   }
   let entries = value;
-  if (entries.length > 8) {
-    note(label, "truncated", { reason: "at_most_eight_anchors", dropped: entries.length - 8 });
-    entries = entries.slice(0, 8);
+  if (entries.length > SUB_AGENT_LIMITS.maxResearchAnchors) {
+    note(label, RESEARCH_REPAIR_ACTIONS.TRUNCATED, { reason: RESEARCH_REPAIR_REASONS.ANCHOR_LIMIT, dropped: entries.length - SUB_AGENT_LIMITS.maxResearchAnchors });
+    entries = entries.slice(0, SUB_AGENT_LIMITS.maxResearchAnchors);
   }
   const anchors = [];
   entries.forEach((raw, index) => {
@@ -854,7 +843,7 @@ function normalizeResearchAnchors(value, context, label, { requestId = null, rep
       // Any sub-agent validation or ref-materialization error here belongs
       // to this one anchor; anything else is a runtime fault and propagates.
       if (!String(error?.code || "").startsWith("SUB_AGENT_")) throw error;
-      note(`${label}[${index}]`, "dropped", { reason: String(error.message || error.code).slice(0, 240) });
+      note(`${label}[${index}]`, RESEARCH_REPAIR_ACTIONS.DROPPED, { reason: String(error.message || error.code).slice(0, 240) });
     }
   });
   return anchors;
@@ -865,13 +854,13 @@ function normalizeResearchAnchor(raw, context, label) {
   const hasPath = anchor.path != null;
   const hasRef = anchor.ref != null;
   if (hasPath === hasRef) {
-    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label} must contain exactly one of path or ref`, { stage: "validation" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `${label} must contain exactly one of path or ref`, { stage: "validation" });
   }
   const lines = anchor.lines == null ? null : exactObject(anchor.lines, ["start", "end"], `${label}.lines`);
   if (lines && (!Number.isSafeInteger(lines.start) || !Number.isSafeInteger(lines.end)
     || lines.start < 1 || lines.end < lines.start
     || lines.end - lines.start + 1 > SUB_AGENT_LIMITS.maxEvidenceLines)) {
-    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}.lines must select one to ${SUB_AGENT_LIMITS.maxEvidenceLines} lines`, { stage: "validation" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `${label}.lines must select one to ${SUB_AGENT_LIMITS.maxEvidenceLines} lines`, { stage: "validation" });
   }
   if (hasPath) {
     const sanitized = sanitizeResearcherFileList(
@@ -882,7 +871,7 @@ function normalizeResearchAnchor(raw, context, label) {
     if (sanitized.files.length !== 1) {
       const reason = sanitized.dropped?.[0]?.reason;
       throw runtimeError(
-        "SUB_AGENT_SCHEMA_INVALID",
+        SUB_AGENT_ERROR_CODES.SCHEMA_INVALID,
         `${label}.path is not an allowed repo-relative path${reason ? ` (${reason})` : ""}`,
         { stage: "validation" },
       );
@@ -895,10 +884,10 @@ function normalizeResearchAnchor(raw, context, label) {
     };
   }
   if (anchor.symbol != null) {
-    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}.symbol requires a path anchor`, { stage: "validation" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `${label}.symbol requires a path anchor`, { stage: "validation" });
   }
   if (lines) {
-    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}.lines is valid only for a path anchor`, { stage: "validation" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `${label}.lines is valid only for a path anchor`, { stage: "validation" });
   }
   const evidence = validateMaterializedCursorEvidence(
     materializeDelegatedRef({ ref: anchor.ref }, context),
@@ -928,7 +917,7 @@ function materializeResearchAnchorsForChild(entry, childContext) {
       },
     }, { ownerScope: "work_item" });
     if (!surfaced?.ok || !surfaced.entry?.ref) {
-      throw runtimeError("SUB_AGENT_EVIDENCE_SURFACE_FAILED", `Could not delegate research anchor ${anchor.ref}`, { stage: "admission" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.EVIDENCE_SURFACE_FAILED, `Could not delegate research anchor ${anchor.ref}`, { stage: "admission" });
     }
     issueHashRefTraversalForContext(childContext, {
       ref: surfaced.entry.ref,
@@ -942,11 +931,11 @@ function materializeResearchAnchorsForChild(entry, childContext) {
 function validateMaterializedCursorEvidence(sourceEvidence, label) {
   const bounded = delegatedEvidenceBounds(sourceEvidence?.excerpt);
   if (bounded.empty) {
-    throw runtimeError("SUB_AGENT_INPUT_EMPTY", `${label} returned no evidence`, { stage: "cursor" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.INPUT_EMPTY, `${label} returned no evidence`, { stage: "cursor" });
   }
   if (!bounded.withinLimits) {
     throw runtimeError(
-      "SUB_AGENT_INPUT_TOO_LARGE",
+      SUB_AGENT_ERROR_CODES.INPUT_TOO_LARGE,
       `${label} returned ${bounded.text.length} characters across ${bounded.lines.length} lines; parent must request a narrower result`,
       { stage: "cursor" },
     );
@@ -957,25 +946,25 @@ function validateMaterializedCursorEvidence(sourceEvidence, label) {
 function delegatedOutcomeError(outcome, tool) {
   const reason = String(outcome?.reason || outcome?.outcome || "not_evidence").slice(0, 160);
   const code = outcome?.outcome === SUB_AGENT_EVIDENCE_OUTCOMES.ERROR
-    ? "SUB_AGENT_INPUT_TOOL_ERROR"
-    : "SUB_AGENT_INPUT_NOT_EVIDENCE";
+    ? SUB_AGENT_ERROR_CODES.INPUT_TOOL_ERROR
+    : SUB_AGENT_ERROR_CODES.INPUT_NOT_EVIDENCE;
   return runtimeError(code, `${tool} returned ${reason} instead of evidence`, { stage: "cursor" });
 }
 
 function boundedJsonValue(value, label, depth = 0) {
   if (depth > SUB_AGENT_LIMITS.maxInputDepth) {
-    throw runtimeError("SUB_AGENT_INPUT_INVALID", `${label} exceeds the maximum nesting depth`, { stage: "validation" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.INPUT_INVALID, `${label} exceeds the maximum nesting depth`, { stage: "validation" });
   }
   if (value == null || typeof value === "boolean" || typeof value === "number") return;
   if (typeof value === "string") {
     if (value.length > SUB_AGENT_LIMITS.maxInputStringChars) {
-      throw runtimeError("SUB_AGENT_INPUT_INVALID", `${label} contains a string longer than ${SUB_AGENT_LIMITS.maxInputStringChars} characters`, { stage: "validation" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.INPUT_INVALID, `${label} contains a string longer than ${SUB_AGENT_LIMITS.maxInputStringChars} characters`, { stage: "validation" });
     }
     return;
   }
   if (Array.isArray(value)) {
     if (value.length > SUB_AGENT_LIMITS.maxInputArrayItems) {
-      throw runtimeError("SUB_AGENT_INPUT_INVALID", `${label} contains more than ${SUB_AGENT_LIMITS.maxInputArrayItems} array items`, { stage: "validation" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.INPUT_INVALID, `${label} contains more than ${SUB_AGENT_LIMITS.maxInputArrayItems} array items`, { stage: "validation" });
     }
     value.forEach((entry, index) => boundedJsonValue(entry, `${label}[${index}]`, depth + 1));
     return;
@@ -984,7 +973,7 @@ function boundedJsonValue(value, label, depth = 0) {
     Object.entries(value).forEach(([key, entry]) => boundedJsonValue(entry, `${label}.${key}`, depth + 1));
     return;
   }
-  throw runtimeError("SUB_AGENT_INPUT_INVALID", `${label} contains an unsupported value`, { stage: "validation" });
+  throw runtimeError(SUB_AGENT_ERROR_CODES.INPUT_INVALID, `${label} contains an unsupported value`, { stage: "validation" });
 }
 
 function normalizedToolEntries(value) {
@@ -1008,12 +997,12 @@ function normalizeCursorToolInput(rawInput, label, authorizedTools) {
   const inferredKind = selected.kind || (selected.ref != null ? "ref" : (selected.tool != null ? "call" : ""));
   if (inferredKind === "ref") {
     if (selected.tool != null || selected.arguments != null || selected.ref == null) {
-      throw runtimeError("SUB_AGENT_INPUT_INVALID", `${label} ref input must contain only id, kind, and ref`, { stage: "validation" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.INPUT_INVALID, `${label} ref input must contain only id, kind, and ref`, { stage: "validation" });
     }
     return { id, kind: "ref", ref: selected.ref };
   }
   if (inferredKind !== "call" || selected.ref != null) {
-    throw runtimeError("SUB_AGENT_INPUT_INVALID", `${label}.kind must be ref or call`, { stage: "validation" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.INPUT_INVALID, `${label}.kind must be ref or call`, { stage: "validation" });
   }
   const tool = canonicalToolName(boundedString(selected.tool, `${label}.tool`, 120));
   const entry = authorizedTools.get(tool);
@@ -1023,7 +1012,7 @@ function normalizeCursorToolInput(rawInput, label, authorizedTools) {
       || isSubAgentEvidenceSafeAtlasTool(tool)
     );
   if (!readOnly || FORBIDDEN_CURSOR_TOOLS.has(tool)) {
-    const error = runtimeError("SUB_AGENT_INPUT_TOOL_FORBIDDEN", `${tool} is not an issued read-only parent tool`, { stage: "validation" });
+    const error = runtimeError(SUB_AGENT_ERROR_CODES.INPUT_TOOL_FORBIDDEN, `${tool} is not an issued read-only parent tool`, { stage: "validation" });
     error.inputTool = tool;
     throw error;
   }
@@ -1032,7 +1021,7 @@ function normalizeCursorToolInput(rawInput, label, authorizedTools) {
     : exactObject(selected.arguments, Object.keys(selected.arguments || {}), `${label}.arguments`);
   boundedJsonValue(args, `${label}.arguments`);
   if (Buffer.byteLength(JSON.stringify(args), "utf8") > SUB_AGENT_LIMITS.maxInputArgumentBytes) {
-    throw runtimeError("SUB_AGENT_INPUT_INVALID", `${label}.arguments exceeds ${SUB_AGENT_LIMITS.maxInputArgumentBytes} bytes`, { stage: "validation" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.INPUT_INVALID, `${label}.arguments exceeds ${SUB_AGENT_LIMITS.maxInputArgumentBytes} bytes`, { stage: "validation" });
   }
   if (tool === "atlas.code.window") {
     const { expectedLines, maxTokens } = args;
@@ -1040,7 +1029,7 @@ function normalizeCursorToolInput(rawInput, label, authorizedTools) {
       || expectedLines < 1
       || expectedLines > SUB_AGENT_LIMITS.maxEvidenceLines) {
       throw runtimeError(
-        "SUB_AGENT_INPUT_INVALID",
+        SUB_AGENT_ERROR_CODES.INPUT_INVALID,
         `${label}.arguments.expectedLines must be an integer from 1 through ${SUB_AGENT_LIMITS.maxEvidenceLines}`,
         { stage: "validation" },
       );
@@ -1049,7 +1038,7 @@ function normalizeCursorToolInput(rawInput, label, authorizedTools) {
       || maxTokens < 1
       || maxTokens > SUB_AGENT_LIMITS.maxAtlasWindowTokens) {
       throw runtimeError(
-        "SUB_AGENT_INPUT_INVALID",
+        SUB_AGENT_ERROR_CODES.INPUT_INVALID,
         `${label}.arguments.maxTokens must be an integer from 1 through ${SUB_AGENT_LIMITS.maxAtlasWindowTokens}`,
         { stage: "validation" },
       );
@@ -1091,9 +1080,9 @@ function surfaceResearchPacketForTransport(entry) {
 function transportSafePublicBatch(batch, response) {
   if (!Array.isArray(response?.results)) return response;
   const resultChars = () => JSON.stringify(response).length;
-  if (resultChars() <= SUB_AGENT_TRANSPORT_RESULT_TARGET_CHARS) return response;
+  if (resultChars() <= SUB_AGENT_LIMITS.transportResultTargetChars) return response;
   const candidates = batch.entries
-    .filter((entry) => entry.status === "completed"
+    .filter((entry) => entry.status === SUB_AGENT_ENTRY_STATUSES.COMPLETED
       && entry.profile === RESEARCH_CHILD_PROFILE
       && entry.packet)
     .sort((left, right) => JSON.stringify(right.packet).length - JSON.stringify(left.packet).length);
@@ -1108,7 +1097,7 @@ function transportSafePublicBatch(batch, response) {
       outcome: entry.packet.outcome,
       transport_guard: guard,
     };
-    if (resultChars() <= SUB_AGENT_TRANSPORT_RESULT_TARGET_CHARS) break;
+    if (resultChars() <= SUB_AGENT_LIMITS.transportResultTargetChars) break;
   }
   return response;
 }
@@ -1127,7 +1116,7 @@ function publicBatch(batch, { includeResults = false } = {}) {
       ...batch.entries.map((entry) => ({ input_index: entry.inputIndex, ...publicEntry(entry) })),
       // One row per original request: an absorbed brief points at the survivor
       // instead of duplicating its result (one handle, one status/cancel owner).
-      ...(batch.mergedRequests || []).map((merged) => ({ input_index: merged.inputIndex, id: merged.id, status: "merged", merged_into: merged.mergedInto })),
+      ...(batch.mergedRequests || []).map((merged) => ({ input_index: merged.inputIndex, id: merged.id, status: SUB_AGENT_ENTRY_STATUSES.MERGED, merged_into: merged.mergedInto })),
     ].sort((left, right) => left.input_index - right.input_index) } : {}),
     ...(includeResults && batch.researchExpansion ? { research_expansion: batch.researchExpansion } : {}),
     ...(batch.repairs?.length > 0 ? { repairs: batch.repairs } : {}),
@@ -1162,8 +1151,8 @@ export class SubAgentRuntime {
     readSetting = getSetting,
     maxActiveChildren = null,
     admissionWaitMs = SUB_AGENT_LIMITS.admissionWaitMs,
-    registryTtlMs = DEFAULT_REGISTRY_TTL_MS,
-    settledBatchRetentionMs = DEFAULT_SETTLED_BATCH_RETENTION_MS,
+    registryTtlMs = SUB_AGENT_LIMITS.registryTtlMs,
+    settledBatchRetentionMs = SUB_AGENT_LIMITS.settledBatchRetentionMs,
   } = {}) {
     this.readSetting = readSetting;
     // An explicit constructor value pins the lane; otherwise the admin
@@ -1178,11 +1167,11 @@ export class SubAgentRuntime {
     const configuredBatchRetentionMs = Number(settledBatchRetentionMs);
     this.registryTtlMs = Number.isFinite(configuredRegistryTtlMs) && configuredRegistryTtlMs > 0
       ? configuredRegistryTtlMs
-      : DEFAULT_REGISTRY_TTL_MS;
+      : SUB_AGENT_LIMITS.registryTtlMs;
     this.settledBatchRetentionMs = Number.isFinite(configuredBatchRetentionMs)
       && configuredBatchRetentionMs >= 0
       ? configuredBatchRetentionMs
-      : DEFAULT_SETTLED_BATCH_RETENTION_MS;
+      : SUB_AGENT_LIMITS.settledBatchRetentionMs;
     this.parents = new Map();
     this.batches = new Map();
     this.batchByParent = new Map();
@@ -1230,7 +1219,7 @@ export class SubAgentRuntime {
       registration.accepting = false;
       for (const waiter of this.admissionQueue.filter((item) => item.registration === registration)) {
         waiter.cancel(runtimeError(
-          "SUB_AGENT_PARENT_CLOSED",
+          SUB_AGENT_ERROR_CODES.PARENT_CLOSED,
           "Parent closed while its batch waited for lane capacity",
           { stage: "control" },
         ));
@@ -1240,7 +1229,7 @@ export class SubAgentRuntime {
       for (const batch of [...this.batches.values()].filter((item) => item.parentCallId === id)) {
         batch.parentClosed = true;
         this.#abortBatch(batch, (entry) => runtimeError(
-          "SUB_AGENT_PARENT_CLOSED",
+          SUB_AGENT_ERROR_CODES.PARENT_CLOSED,
           `Parent closed while child ${entry.id} was running`,
           { stage: "control" },
         ));
@@ -1268,7 +1257,7 @@ export class SubAgentRuntime {
     if (this.admissionQueue.some((waiter) => waiter.parentCallId === id)) return true;
     for (const batch of this.batches.values()) {
       if (batch.parentCallId !== id || batch.parentClosed) continue;
-      if (batch.entries.some((entry) => ["admitted", "running"].includes(entry.status))) return true;
+      if (batch.entries.some((entry) => SUB_AGENT_ACTIVE_ENTRY_STATUSES.includes(entry.status))) return true;
     }
     return false;
   }
@@ -1277,11 +1266,11 @@ export class SubAgentRuntime {
     const id = positiveId(agentCallId);
     const batch = this.batches.get(String(batchId || ""));
     const entry = batch?.entries.find((candidate) => candidate.handle === dispatchId);
-    if (!id || !entry || !["admitted", "running"].includes(entry.status)) {
-      throw runtimeError("SUB_AGENT_CHILD_BINDING_INVALID", "Citation child could not bind to its admitted dispatch", { stage: "admission" });
+    if (!id || !entry || !SUB_AGENT_ACTIVE_ENTRY_STATUSES.includes(entry.status)) {
+      throw runtimeError(SUB_AGENT_ERROR_CODES.CHILD_BINDING_INVALID, "Citation child could not bind to its admitted dispatch", { stage: "admission" });
     }
     if (entry.childAgentCallId && entry.childAgentCallId !== id) {
-      throw runtimeError("SUB_AGENT_CHILD_BINDING_CONFLICT", "Citation dispatch is already bound to another child call", { stage: "admission" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.CHILD_BINDING_CONFLICT, "Citation dispatch is already bound to another child call", { stage: "admission" });
     }
     materializeResearchAnchorsForChild(entry, {
       ...entry.parentContext,
@@ -1308,21 +1297,21 @@ export class SubAgentRuntime {
   async nextInput(args, { context = {} } = {}) {
     const childCallId = positiveId(context.agentCallId ?? context.agent_call_id);
     const binding = this.childBindings.get(childCallId);
-    if (!binding) throw runtimeError("SUB_AGENT_CURSOR_UNBOUND", "sub_agent_next_input requires an active citation child", { stage: "cursor" });
+    if (!binding) throw runtimeError(SUB_AGENT_ERROR_CODES.CURSOR_UNBOUND, "sub_agent_next_input requires an active citation child", { stage: "cursor" });
     const { entry } = binding;
     if (entry.controller.signal.aborted) {
       throw entry.controller.signal.reason
-        || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled", { stage: "cursor" });
+        || runtimeError(SUB_AGENT_ERROR_CODES.CANCELLED, "Citation child was cancelled", { stage: "cursor" });
     }
     const input = exactObject(args, ["position", "count"], "sub_agent_next_input");
     const position = Number(input.position);
     if (!Number.isInteger(position) || position < 0) {
-      throw runtimeError("SUB_AGENT_CURSOR_INVALID", "position must be a nonnegative integer", { stage: "cursor" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.CURSOR_INVALID, "position must be a nonnegative integer", { stage: "cursor" });
     }
     const count = input.count == null ? 1 : Number(input.count);
     if (!Number.isInteger(count) || count < 1 || count > SUB_AGENT_LIMITS.maxInputs) {
       throw runtimeError(
-        "SUB_AGENT_CURSOR_INVALID",
+        SUB_AGENT_ERROR_CODES.CURSOR_INVALID,
         `count must be an integer from 1 to ${SUB_AGENT_LIMITS.maxInputs}`,
         { stage: "cursor" },
       );
@@ -1355,20 +1344,20 @@ export class SubAgentRuntime {
         next_position: nextPosition,
       };
     }
-    if (entry.sealed) throw runtimeError("SUB_AGENT_CURSOR_SEALED", "Citation child cursor is sealed after terminal handoff", { stage: "cursor" });
+    if (entry.sealed) throw runtimeError(SUB_AGENT_ERROR_CODES.CURSOR_SEALED, "Citation child cursor is sealed after terminal handoff", { stage: "cursor" });
     if (entry.cursorResults.has(position)) return entry.cursorResults.get(position);
     if (entry.cursorClaim != null) {
-      throw runtimeError("SUB_AGENT_CURSOR_CONFLICT", "A cursor input is already being materialized", { retryable: true, stage: "cursor" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.CURSOR_CONFLICT, "A cursor input is already being materialized", { retryable: true, stage: "cursor" });
     }
     if (position !== entry.cursorPosition) {
       entry.cursorAttempts += 1;
-      throw runtimeError("SUB_AGENT_CURSOR_OUT_OF_ORDER", `Expected position ${entry.cursorPosition}, received ${position}`, { stage: "cursor" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.CURSOR_OUT_OF_ORDER, `Expected position ${entry.cursorPosition}, received ${position}`, { stage: "cursor" });
     }
     if (entry.cursorAttempts >= SUB_AGENT_LIMITS.maxCursorAttempts) {
-      throw runtimeError("SUB_AGENT_CURSOR_ATTEMPTS_EXHAUSTED", "Citation child exhausted its cursor attempt budget", { stage: "cursor" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.CURSOR_ATTEMPTS_EXHAUSTED, "Citation child exhausted its cursor attempt budget", { stage: "cursor" });
     }
     if (entry.cursorPosition >= entry.maxInputs || position >= entry.inputs.length) {
-      throw runtimeError("SUB_AGENT_CURSOR_BUDGET_EXHAUSTED", "Citation child has no remaining authorized input", { stage: "cursor" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.CURSOR_BUDGET_EXHAUSTED, "Citation child has no remaining authorized input", { stage: "cursor" });
     }
 
     entry.cursorAttempts += 1;
@@ -1382,11 +1371,11 @@ export class SubAgentRuntime {
         sourceEvidence = materializeDelegatedRef(selected.ref, entry.parentContext);
         if (sourceEvidence.source_content_sha256 !== selected.sourceContentSha256
           || sourceEvidence.excerpt_sha256 !== selected.excerptSha256) {
-          throw runtimeError("SUB_AGENT_INPUT_CHANGED", `Delegated evidence ${selected.id} changed after admission`, { stage: "cursor" });
+          throw runtimeError(SUB_AGENT_ERROR_CODES.INPUT_CHANGED, `Delegated evidence ${selected.id} changed after admission`, { stage: "cursor" });
         }
       } else {
         if (typeof entry.executeInput !== "function") {
-          throw runtimeError("SUB_AGENT_INPUT_EXECUTOR_UNAVAILABLE", "Parent deterministic tool executor is unavailable", { stage: "cursor" });
+          throw runtimeError(SUB_AGENT_ERROR_CODES.INPUT_EXECUTOR_UNAVAILABLE, "Parent deterministic tool executor is unavailable", { stage: "cursor" });
         }
         let raw = await entry.executeInput({
           tool: selected.tool,
@@ -1395,7 +1384,7 @@ export class SubAgentRuntime {
         });
         if (entry.controller.signal.aborted) {
           throw entry.controller.signal.reason
-            || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled", { stage: "cursor" });
+            || runtimeError(SUB_AGENT_ERROR_CODES.CANCELLED, "Citation child was cancelled", { stage: "cursor" });
         }
         let outcome = classifyDelegatedToolResult(raw);
         let evidenceTool = selected.tool;
@@ -1413,7 +1402,7 @@ export class SubAgentRuntime {
           });
           if (entry.controller.signal.aborted) {
             throw entry.controller.signal.reason
-              || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled", { stage: "cursor" });
+              || runtimeError(SUB_AGENT_ERROR_CODES.CANCELLED, "Citation child was cancelled", { stage: "cursor" });
           }
           outcome = classifyDelegatedToolResult(raw);
         }
@@ -1512,7 +1501,7 @@ export class SubAgentRuntime {
         },
       }, { ownerScope: "work_item" });
       if (!surfaced?.ok || !surfaced.entry?.ref) {
-        throw runtimeError("SUB_AGENT_EVIDENCE_SURFACE_FAILED", "Could not mint child-scoped evidence selector", { stage: "cursor" });
+        throw runtimeError(SUB_AGENT_ERROR_CODES.EVIDENCE_SURFACE_FAILED, "Could not mint child-scoped evidence selector", { stage: "cursor" });
       }
       const evidence = materializeAgentHandoffEvidenceSelector(surfaced.entry.ref, context);
       entry.cursorPosition += 1;
@@ -1522,7 +1511,7 @@ export class SubAgentRuntime {
       const retries = entry.cursorRetries.get(position) || 0;
       if (error?.retryable === true
         && !entry.controller.signal.aborted
-        && retries < MAX_CURSOR_RETRIES_PER_POSITION) {
+        && retries < SUB_AGENT_LIMITS.maxCursorRetriesPerPosition) {
         entry.cursorRetries.set(position, retries + 1);
         cacheResponse = false;
       } else {
@@ -1539,18 +1528,18 @@ export class SubAgentRuntime {
   prepareChildHandoff(agentCallId, packet) {
     const binding = this.childBindings.get(positiveId(agentCallId));
     if (!binding) {
-      if (packet?.profile === RESEARCH_CHILD_PROFILE) throw runtimeError("SUB_AGENT_RESEARCH_UNBOUND", "Research reports require an active investigating child", { stage: "terminal" });
+      if (packet?.profile === RESEARCH_CHILD_PROFILE) throw runtimeError(SUB_AGENT_ERROR_CODES.RESEARCH_UNBOUND, "Research reports require an active investigating child", { stage: "terminal" });
       return false;
     }
     const { entry } = binding;
     if (entry.controller.signal.aborted) {
       throw entry.controller.signal.reason
-        || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled", { stage: "terminal" });
+        || runtimeError(SUB_AGENT_ERROR_CODES.CANCELLED, "Citation child was cancelled", { stage: "terminal" });
     }
-    if (entry.sealed) throw runtimeError("SUB_AGENT_CURSOR_SEALED", "Citation child already submitted its terminal handoff", { stage: "terminal" });
+    if (entry.sealed) throw runtimeError(SUB_AGENT_ERROR_CODES.CURSOR_SEALED, "Citation child already submitted its terminal handoff", { stage: "terminal" });
     if (entry.profile === RESEARCH_CHILD_PROFILE) {
       packet = expandResearchChildHandoff(packet);
-      if (packet?.profile !== RESEARCH_CHILD_PROFILE) throw runtimeError("SUB_AGENT_PROFILE_INVALID", researchChildHandoffMismatch(packet), { stage: "terminal" });
+      if (packet?.profile !== RESEARCH_CHILD_PROFILE) throw runtimeError(SUB_AGENT_ERROR_CODES.PROFILE_INVALID, researchChildHandoffMismatch(packet), { stage: "terminal" });
       // Citation and size are settled on the committed report after the child
       // exits, never here: these raw arguments precede selector validation,
       // and a rejection costs the child a whole full-context turn. Uncited
@@ -1559,13 +1548,13 @@ export class SubAgentRuntime {
       return true;
     }
     if (entry.consumedEvidence.length === 0 && packet?.outcome !== "failed") {
-      throw runtimeError("SUB_AGENT_EVIDENCE_REQUIRED", "Citation child must consume at least one successful cursor input", { stage: "terminal" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.EVIDENCE_REQUIRED, "Citation child must consume at least one successful cursor input", { stage: "terminal" });
     }
     const authorized = entry.consumedEvidence.map((item) => item.evidence);
     const selectedEvidence = packetEvidence(packet);
     entry.selectedEvidenceCount = selectedEvidence.length;
     if (selectedEvidence.length === 0 && packet?.outcome !== "failed") {
-      throw runtimeError("SUB_AGENT_EVIDENCE_REQUIRED", "Citation child terminal report must cite consumed cursor evidence", { stage: "terminal" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.EVIDENCE_REQUIRED, "Citation child terminal report must cite consumed cursor evidence", { stage: "terminal" });
     }
     for (const selectorValue of selectedEvidence) {
       const selector = parseAgentHandoffEvidenceSelector(selectorValue);
@@ -1584,7 +1573,7 @@ export class SubAgentRuntime {
           ));
       if (!permitted) {
         throw runtimeError(
-          "SUB_AGENT_EVIDENCE_SCOPE_VIOLATION",
+          SUB_AGENT_ERROR_CODES.EVIDENCE_SCOPE_VIOLATION,
           `Citation child referenced unconsumed evidence ${selectorRef || `${selector.path}:${selector.start}-${selector.end}`}`,
           { stage: "terminal" },
         );
@@ -1602,14 +1591,14 @@ export class SubAgentRuntime {
 
   hasOpenBatch(agentCallId) {
     return [...this.batches.values()].some((batch) => batch.parentCallId === positiveId(agentCallId)
-      && (batch.status === "running" || batch.acknowledged !== true));
+      && (batch.status === SUB_AGENT_BATCH_STATUSES.RUNNING || batch.acknowledged !== true));
   }
 
   completionSignal(agentCallId, toolName = "") {
     if (toolName === "sub_agent") return "";
     const batchId = this.batchByParent.get(positiveId(agentCallId));
     const batch = batchId ? this.batches.get(batchId) : null;
-    if (!batch || batch.status === "running" || batch.acknowledged === true || batch.signalled) return "";
+    if (!batch || batch.status === SUB_AGENT_BATCH_STATUSES.RUNNING || batch.acknowledged === true || batch.signalled) return "";
     batch.signalled = true;
     return `\nSUB_AGENT_SIGNAL:\n${JSON.stringify({ batch_id: batch.id, status: batch.status, next_tool: "sub_agent", op: "status" })}`;
   }
@@ -1621,18 +1610,18 @@ export class SubAgentRuntime {
    */
   async execute(args, { context = {}, admissionSignal = null } = {}) {
     const parentCallId = positiveId(context.agentCallId ?? context.agent_call_id);
-    if (!parentCallId) throw runtimeError("SUB_AGENT_CONTEXT_INVALID", "sub_agent requires an active parent agent call", { stage: "admission" });
+    if (!parentCallId) throw runtimeError(SUB_AGENT_ERROR_CODES.CONTEXT_INVALID, "sub_agent requires an active parent agent call", { stage: "admission" });
     // Research questions are soft-capped (softCappedIntent), so a research
     // batch is not refused for its total size either.
     const requestBytes = Buffer.byteLength(JSON.stringify(args ?? null), "utf8");
     const researchOnly = Array.isArray(args?.requests) && args.requests.length > 0
       && args.requests.every((item) => item?.profile === RESEARCH_CHILD_PROFILE);
     if (requestBytes > SUB_AGENT_LIMITS.maxRequestBytes && !researchOnly) {
-      throw runtimeError("SUB_AGENT_TOO_LARGE", `sub_agent exceeds ${SUB_AGENT_LIMITS.maxRequestBytes} bytes`, { stage: "validation" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.TOO_LARGE, `sub_agent exceeds ${SUB_AGENT_LIMITS.maxRequestBytes} bytes`, { stage: "validation" });
     }
     const input = exactObject(args, ["op", "protocol", "requests", "completion", "batch_id", "wait_ms"], "sub_agent");
     if (input.protocol !== SUB_AGENT_PROTOCOL) {
-      throw runtimeError("SUB_AGENT_PROTOCOL_INVALID", `protocol must be ${SUB_AGENT_PROTOCOL}`, { stage: "validation" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.PROTOCOL_INVALID, `protocol must be ${SUB_AGENT_PROTOCOL}`, { stage: "validation" });
     }
     if (input.op === "dispatch") {
       // The coordination mode gates citation sub-agents. A planner registered
@@ -1645,13 +1634,13 @@ export class SubAgentRuntime {
         && input.requests.every((item) => item?.profile === RESEARCH_CHILD_PROFILE)
         && this.parents.get(parentCallId)?.researchPolicy?.enabled === true;
       if (coordinationMode !== "subagents" && !plannerResearchBatch) {
-        throw runtimeError("SUB_AGENT_ADMIN_DISABLED", "sub_agent is disabled by the repository administrator", { stage: "admission" });
+        throw runtimeError(SUB_AGENT_ERROR_CODES.ADMIN_DISABLED, "sub_agent is disabled by the repository administrator", { stage: "admission" });
       }
       return await this.#dispatch(input, parentCallId, context, admissionSignal);
     }
     if (input.op === "status") return await this.#status(input, parentCallId);
     if (input.op === "cancel") return await this.#cancel(input, parentCallId);
-    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "op must be dispatch, status, or cancel", { stage: "validation" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, "op must be dispatch, status, or cancel", { stage: "validation" });
   }
 
   // The batch this dispatch replays, or null when it is new. Throws when the
@@ -1674,14 +1663,14 @@ export class SubAgentRuntime {
         // Admission stays all-or-nothing; the refusal names the headroom so
         // the planner can resubmit a batch that fits instead of guessing.
         throw runtimeError(
-          "SUB_AGENT_BATCH_LIMIT",
+          SUB_AGENT_ERROR_CODES.BATCH_LIMIT,
           `Planner research child limit reached: ${requestCount} requested, ${remaining} of ${limit} remaining`,
           { stage: "admission", detail: { limit, used, requested: requestCount, remaining } },
         );
       }
     }
     if (existingBatch && existingBatch.requestDigest !== digest) {
-      throw runtimeError("SUB_AGENT_BATCH_LIMIT", "Only one sub_agent batch is allowed per parent agent call", { stage: "admission" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.BATCH_LIMIT, "Only one sub_agent batch is allowed per parent agent call", { stage: "admission" });
     }
     return existingBatch || null;
   }
@@ -1692,7 +1681,7 @@ export class SubAgentRuntime {
       existingBatch.acknowledged = true;
       return publicBatch(existingBatch, { includeResults: true });
     }
-    const includeResults = existingBatch.status !== "running";
+    const includeResults = existingBatch.status !== SUB_AGENT_BATCH_STATUSES.RUNNING;
     if (includeResults) existingBatch.acknowledged = true;
     return publicBatch(existingBatch, { includeResults });
   }
@@ -1709,7 +1698,7 @@ export class SubAgentRuntime {
       return null;
     }
     if (signal?.aborted) {
-      throw signal.reason || runtimeError("SUB_AGENT_CANCELLED", "Dispatch was cancelled while waiting for lane capacity", { stage: "control" });
+      throw signal.reason || runtimeError(SUB_AGENT_ERROR_CODES.CANCELLED, "Dispatch was cancelled while waiting for lane capacity", { stage: "control" });
     }
     if (!(waitMs > 0)) {
       throw capacityError({ requested: count, active: this.activeChildren, limit: this.maxActiveChildren, waitedMs: 0 });
@@ -1734,7 +1723,7 @@ export class SubAgentRuntime {
         this.#pumpAdmissions();
       };
       const onAbort = () => finish(signal.reason
-        || runtimeError("SUB_AGENT_CANCELLED", "Dispatch was cancelled while waiting for lane capacity", { stage: "control" }));
+        || runtimeError(SUB_AGENT_ERROR_CODES.CANCELLED, "Dispatch was cancelled while waiting for lane capacity", { stage: "control" }));
       const waiter = {
         registration,
         parentCallId,
@@ -1774,17 +1763,17 @@ export class SubAgentRuntime {
     exactObject(input, ["op", "protocol", "requests", "completion"], "sub_agent.dispatch");
     const registration = this.parents.get(parentCallId);
     if (!registration?.accepting) {
-      throw runtimeError("SUB_AGENT_PARENT_UNAVAILABLE", "The parent provider call cannot dispatch citation children", { stage: "admission" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.PARENT_UNAVAILABLE, "The parent provider call cannot dispatch citation children", { stage: "admission" });
     }
     const researchRequest = Array.isArray(input.requests) && input.requests.some((item) => item?.profile === RESEARCH_CHILD_PROFILE);
     const researchOnly = researchRequest && input.requests.every((item) => item?.profile === RESEARCH_CHILD_PROFILE);
     const maxBatch = researchOnly ? SUB_AGENT_LIMITS.maxResearchBatch : SUB_AGENT_LIMITS.maxBatch;
     if (!Array.isArray(input.requests) || input.requests.length < 1 || input.requests.length > maxBatch) {
-      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `requests must contain one to ${maxBatch} entries`, { stage: "validation" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `requests must contain one to ${maxBatch} entries`, { stage: "validation" });
     }
     const completion = exactObject(input.completion, ["mode"], "completion");
     if (!["async", "wait_all"].includes(completion.mode)) {
-      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "completion.mode must be async or wait_all", { stage: "validation" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, "completion.mode must be async or wait_all", { stage: "validation" });
     }
     const digest = requestDigest(input);
     const replay = [...this.batches.values()].find((batch) => batch.parentCallId === parentCallId && batch.requestDigest === digest);
@@ -1796,17 +1785,17 @@ export class SubAgentRuntime {
     const normalizeRequest = (raw, requestIndex) => {
       const request = exactObject(raw, ["id", "profile", "intent", "inputs", "anchors", "budget", "agent_type"], `requests[${requestIndex}]`);
       const id = boundedString(request.id, `requests[${requestIndex}].id`, 40);
-      if (seenRequests.has(id)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "request ids must be unique", { stage: "validation" });
+      if (seenRequests.has(id)) throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, "request ids must be unique", { stage: "validation" });
       seenRequests.add(id);
       if (request.profile === RESEARCH_CHILD_PROFILE) {
         if (!registration.researchPolicy?.enabled || typeof registration.runResearchChild !== "function") {
-          throw runtimeError("SUB_AGENT_RESEARCH_DISABLED", "Investigating children require an eligible gated planner", { stage: "admission" });
+          throw runtimeError(SUB_AGENT_ERROR_CODES.RESEARCH_DISABLED, "Investigating children require an eligible gated planner", { stage: "admission" });
         }
-        if (!RESEARCH_AGENT_TYPES.includes(request.agent_type)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Invalid research agent_type", { stage: "validation" });
+        if (!RESEARCH_AGENT_TYPES.includes(request.agent_type)) throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, "Invalid research agent_type", { stage: "validation" });
         const policy = registration.researchPolicy;
         if (completion.mode !== "wait_all"
           || input.requests.some((item) => item?.profile === AGENT_HANDOFF_PROFILES.CITATION_SYNTHESIS)) {
-          throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Research requires one bounded wait_all batch of research requests", { stage: "validation" });
+          throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, "Research requires one bounded wait_all batch of research requests", { stage: "validation" });
         }
         exactObject(request, ["id", "profile", "intent", "anchors", "budget", "agent_type"], `requests[${requestIndex}]`);
         // The model-facing context carries identities only; the project root
@@ -1820,8 +1809,8 @@ export class SubAgentRuntime {
           repairs.push({
             request_id: id,
             field: `requests[${requestIndex}].anchors`,
-            action: "ignored",
-            reason: "repository anchors are supported only for code research children",
+            action: RESEARCH_REPAIR_ACTIONS.IGNORED,
+            reason: RESEARCH_REPAIR_REASONS.ANCHORS_CODE_ONLY,
           });
         } else {
           anchors = normalizeResearchAnchors(request.anchors, anchorContext, `requests[${requestIndex}].anchors`, { requestId: id, repairs });
@@ -1847,11 +1836,11 @@ export class SubAgentRuntime {
         };
       }
       if (request.profile !== AGENT_HANDOFF_PROFILES.CITATION_SYNTHESIS) {
-        throw runtimeError("SUB_AGENT_PROFILE_INVALID", "Only citation_synthesis.v1 is supported", { stage: "validation" });
+        throw runtimeError(SUB_AGENT_ERROR_CODES.PROFILE_INVALID, "Only citation_synthesis.v1 is supported", { stage: "validation" });
       }
       const intent = softCappedIntent(request.intent, `requests[${requestIndex}].intent`, intentOverages);
       if (!Array.isArray(request.inputs) || request.inputs.length < 1 || request.inputs.length > SUB_AGENT_LIMITS.maxInputs) {
-        throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `requests[${requestIndex}].inputs must contain one to three entries`, { stage: "validation" });
+        throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `requests[${requestIndex}].inputs must contain one to three entries`, { stage: "validation" });
       }
       const seenInputs = new Set();
       const inputs = request.inputs.map((rawInput, inputIndex) => {
@@ -1860,7 +1849,7 @@ export class SubAgentRuntime {
           `requests[${requestIndex}].inputs[${inputIndex}]`,
           registration.authorizedTools,
         );
-        if (seenInputs.has(selected.id)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `input ids must be unique within request ${id}`, { stage: "validation" });
+        if (seenInputs.has(selected.id)) throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `input ids must be unique within request ${id}`, { stage: "validation" });
         seenInputs.add(selected.id);
         if (selected.kind !== "ref") return selected;
         const evidence = materializeDelegatedRef(selected.ref, context);
@@ -1878,7 +1867,7 @@ export class SubAgentRuntime {
         : SUB_AGENT_LIMITS.defaultTimeoutMs;
       const requestedMaxInputs = Number(budget.max_inputs ?? inputs.length);
       if (!Number.isInteger(requestedMaxInputs) || requestedMaxInputs < 1 || requestedMaxInputs > SUB_AGENT_LIMITS.maxInputs) {
-        throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `requests[${requestIndex}].budget.max_inputs must be one to three`, { stage: "validation" });
+        throw runtimeError(SUB_AGENT_ERROR_CODES.SCHEMA_INVALID, `requests[${requestIndex}].budget.max_inputs must be one to three`, { stage: "validation" });
       }
       return {
         id,
@@ -1947,7 +1936,7 @@ export class SubAgentRuntime {
       let replay = null;
       try {
         if (!registration.accepting) {
-          throw runtimeError("SUB_AGENT_PARENT_UNAVAILABLE", "The parent provider call cannot dispatch citation children", { stage: "admission" });
+          throw runtimeError(SUB_AGENT_ERROR_CODES.PARENT_UNAVAILABLE, "The parent provider call cannot dispatch citation children", { stage: "admission" });
         }
         replay = this.#priorBatch(parentCallId, registration, digest, researchRequest, runnable.length);
       } catch (error) {
@@ -1974,7 +1963,7 @@ export class SubAgentRuntime {
       op: "dispatch",
       parentCallId,
       mode: completion.mode,
-      status: "running",
+      status: SUB_AGENT_BATCH_STATUSES.RUNNING,
       signalled: false,
       acknowledged: false,
       requestDigest: digest,
@@ -1984,7 +1973,7 @@ export class SubAgentRuntime {
       entries: normalized.map((request) => ({
         ...request,
         handle: `sad_${crypto.randomUUID().replaceAll("-", "")}`,
-        status: request.validationError ? "failed" : "admitted",
+        status: request.validationError ? SUB_AGENT_ENTRY_STATUSES.FAILED : SUB_AGENT_ENTRY_STATUSES.ADMITTED,
         controller: new AbortController(),
         packet: null,
         coverage: null,
@@ -2007,11 +1996,11 @@ export class SubAgentRuntime {
 
     const tasks = batch.entries.filter((entry) => !entry.validationError).map((entry) => this.#runEntry(batch, entry, entry.profile === RESEARCH_CHILD_PROFILE ? registration.runResearchChild : registration.runChild));
     batch.settledPromise = Promise.allSettled(tasks).then(() => {
-      batch.status = batch.entries.every((entry) => entry.status === "timed_out")
-        ? "timed_out"
-        : batch.entries.every((entry) => entry.status === "cancelled")
-          ? "cancelled"
-          : "settled";
+      batch.status = batch.entries.every((entry) => entry.status === SUB_AGENT_ENTRY_STATUSES.TIMED_OUT)
+        ? SUB_AGENT_BATCH_STATUSES.TIMED_OUT
+        : batch.entries.every((entry) => entry.status === SUB_AGENT_ENTRY_STATUSES.CANCELLED)
+          ? SUB_AGENT_BATCH_STATUSES.CANCELLED
+          : SUB_AGENT_BATCH_STATUSES.SETTLED;
       try {
         const expandChars = registration.researchPolicy?.expandChars || 0;
         const expansion = expandChars > 0
@@ -2037,7 +2026,7 @@ export class SubAgentRuntime {
   }
 
   async #runEntry(batch, entry, runChild) {
-    entry.status = "running";
+    entry.status = SUB_AGENT_ENTRY_STATUSES.RUNNING;
     let hardReject = null;
     const hardSettlement = new Promise((_, reject) => {
       hardReject = reject;
@@ -2045,7 +2034,7 @@ export class SubAgentRuntime {
     entry.hardSettle = (reason) => hardReject?.(reason);
     const timeout = setTimeout(() => this.#abortEntry(
       entry,
-      runtimeError("SUB_AGENT_TIMEOUT", `Child ${entry.id} exceeded ${entry.timeoutMs}ms`, { stage: "child" }),
+      runtimeError(SUB_AGENT_ERROR_CODES.TIMEOUT, `Child ${entry.id} exceeded ${entry.timeoutMs}ms`, { stage: "child" }),
     ), entry.timeoutMs);
     timeout.unref?.();
     let result = null;
@@ -2053,7 +2042,7 @@ export class SubAgentRuntime {
       const childRun = Promise.resolve().then(() => {
         if (entry.controller.signal.aborted) {
           throw entry.controller.signal.reason
-            || runtimeError("SUB_AGENT_CANCELLED", "Citation child was cancelled before dispatch", { stage: "control" });
+            || runtimeError(SUB_AGENT_ERROR_CODES.CANCELLED, "Citation child was cancelled before dispatch", { stage: "control" });
         }
         return runChild({
           batchId: batch.id,
@@ -2076,7 +2065,7 @@ export class SubAgentRuntime {
       result = await Promise.race([childRun, hardSettlement]);
       const record = result?.webPacket ? { status: "committed", packet: result.webPacket } : getAgentHandoffRecord(result?.agentCallId);
       if (!record || record.status !== "committed" || record.packet?.profile !== entry.profile) {
-        throw runtimeError("SUB_AGENT_TERMINAL_REPORT_MISSING", `Child ${entry.id} did not commit its terminal report`, { stage: "terminal" });
+        throw runtimeError(SUB_AGENT_ERROR_CODES.TERMINAL_REPORT_MISSING, `Child ${entry.id} did not commit its terminal report`, { stage: "terminal" });
       }
       const research = entry.profile === RESEARCH_CHILD_PROFILE;
       const cited = research ? packetEvidence(record.packet) : validateChildEvidenceScope(record.packet, entry.consumedEvidence);
@@ -2088,14 +2077,14 @@ export class SubAgentRuntime {
       entry.sourceContext = research && !result.webPacket ? childContext : entry.parentContext;
       entry.coverage = coverageForEntry(entry, cited.length);
       entry.usage = usageFromChild(result);
-      entry.status = "completed";
+      entry.status = SUB_AGENT_ENTRY_STATUSES.COMPLETED;
     } catch (error) {
       const failure = entry.controller.signal.reason || error;
-      entry.status = failure?.code === "SUB_AGENT_TIMEOUT"
-        ? "timed_out"
+      entry.status = failure?.code === SUB_AGENT_ERROR_CODES.TIMEOUT
+        ? SUB_AGENT_ENTRY_STATUSES.TIMED_OUT
         : entry.controller.signal.aborted
-          ? "cancelled"
-          : "failed";
+          ? SUB_AGENT_ENTRY_STATUSES.CANCELLED
+          : SUB_AGENT_ENTRY_STATUSES.FAILED;
       entry.error = safeError(failure);
       entry.coverage = coverageForEntry(entry);
       // A child that ran keeps its call id and usage even when it failed, so
@@ -2110,7 +2099,7 @@ export class SubAgentRuntime {
   }
 
   #abortEntry(entry, reason) {
-    if (!["admitted", "running"].includes(entry.status)) return;
+    if (!SUB_AGENT_ACTIVE_ENTRY_STATUSES.includes(entry.status)) return;
     if (!entry.controller.signal.aborted) entry.controller.abort(reason);
     entry.hardSettle?.(entry.controller.signal.reason || reason);
   }
@@ -2125,7 +2114,7 @@ export class SubAgentRuntime {
     const batchId = boundedString(input.batch_id, "batch_id", 80);
     const batch = this.batches.get(batchId);
     if (!batch || batch.parentCallId !== parentCallId) {
-      throw runtimeError("SUB_AGENT_BATCH_NOT_FOUND", "The sub_agent batch is not visible to this parent call", { stage: "control" });
+      throw runtimeError(SUB_AGENT_ERROR_CODES.BATCH_NOT_FOUND, "The sub_agent batch is not visible to this parent call", { stage: "control" });
     }
     return batch;
   }
@@ -2136,18 +2125,18 @@ export class SubAgentRuntime {
     const waitMs = input.wait_ms == null
       ? 1000
       : Math.max(0, Math.min(SUB_AGENT_LIMITS.maxStatusWaitMs, Number(input.wait_ms) || 0));
-    if (batch.status === "running" && waitMs > 0) {
+    if (batch.status === SUB_AGENT_BATCH_STATUSES.RUNNING && waitMs > 0) {
       await Promise.race([batch.settledPromise, delay(waitMs)]);
     }
-    if (batch.status !== "running") batch.acknowledged = true;
-    return publicBatch(batch, { includeResults: batch.status !== "running" });
+    if (batch.status !== SUB_AGENT_BATCH_STATUSES.RUNNING) batch.acknowledged = true;
+    return publicBatch(batch, { includeResults: batch.status !== SUB_AGENT_BATCH_STATUSES.RUNNING });
   }
 
   async #cancel(input, parentCallId) {
     exactObject(input, ["op", "protocol", "batch_id"], "sub_agent.cancel");
     const batch = this.#ownedBatch(input, parentCallId);
     this.#abortBatch(batch, (entry) => runtimeError(
-      "SUB_AGENT_CANCELLED",
+      SUB_AGENT_ERROR_CODES.CANCELLED,
       `Child ${entry.id} was cancelled by its parent`,
       { stage: "control" },
     ));
@@ -2181,6 +2170,6 @@ export function subAgentCompletionSignal(agentCallId, toolName = "") {
 
 export function assertSubAgentParentReady(agentCallId) {
   if (subAgentRuntime.hasOpenBatch(agentCallId)) {
-    throw runtimeError("SUB_AGENT_CHILDREN_PENDING", "A sub_agent batch is still running; collect or cancel it before the terminal handoff", { stage: "terminal" });
+    throw runtimeError(SUB_AGENT_ERROR_CODES.CHILDREN_PENDING, "A sub_agent batch is still running; collect or cancel it before the terminal handoff", { stage: "terminal" });
   }
 }

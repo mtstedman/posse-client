@@ -12,6 +12,7 @@ import { atlasDir } from "../runtime-paths.js";
 import { parseBuffer } from "../parser/adapter.js";
 import { recordLiveBufferEvent, recordLiveCheckpoint } from "../live-reconciliation.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
+import { ATLAS_BUFFER_EVENT_TYPES } from "../../../../../catalog/atlas-params.js";
 
 /** @typedef {import("../contracts/schemas.js").ParseResult} ParseResult */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -911,7 +912,7 @@ function statusWarnings(entries) {
 
 function normalizeEventType(value) {
   const text = String(value || "change").trim();
-  return ["open", "change", "save", "close", "checkpoint"].includes(text) ? text : "change";
+  return ATLAS_BUFFER_EVENT_TYPES.includes(text) ? text : "change";
 }
 
 function normalizeLanguage(value) {

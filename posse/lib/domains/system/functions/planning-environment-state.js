@@ -7,6 +7,7 @@ import { linkNodeDependenciesFromPrimaryCheckout, linkComposerVendorFromPrimaryC
 import { linkPrimaryTestDependencies } from "../../verification/functions/test-capability.js";
 import { prepareDevelopmentDatabase } from "./planning-database.js";
 import { PACKAGE_MANAGERS } from "./package-managers.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 function payload(job) { return JSON.parse(job?.payload_json || "{}"); }
 
@@ -47,7 +48,7 @@ function pathPresent(file) {
 // incompatible primary installs are left alone, without blocking development.
 export async function prepareDevelopmentEnvironment(job, cwd) {
   const gateId = payload(job)._environment_setup_gate_id;
-  if (!["dev", "fix"].includes(job.job_type)) return { notices: [] };
+  if (!DEV_ROLE_JOB_TYPES.has(job.job_type)) return { notices: [] };
   const gate = gateId ? getJob(gateId) : null;
   if (gateId && !completedSetupGate(gate)) throw new Error("Approved dependency setup is incomplete; development cannot start.");
   // A task without a worktree of its own (a database task runs in the primary

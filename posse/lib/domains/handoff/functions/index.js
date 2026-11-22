@@ -34,7 +34,7 @@ import { getAttempts, getAgentCallById, getDependencies, getIntSetting, getJob, 
 import { HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES } from "../../settings/functions/catalog.js";
 import "../../../shared/format/functions/json.js";
 import { getSkillById, isSkillsEnabled, parseSkillIds, validateSkillIds } from "../../../shared/skills/functions/registry.js";
-import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../../catalog/job.js";
+import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES, DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 import { attachDiffNarrative, attachDiffNarrativeAsync } from "../../git/functions/diff-narrator.js";
 import { buildMergeResolutionEvidenceAsync } from "../../git/functions/attempt-committed-files.js";
 import { gitExec, gitExecAsync } from "../../git/functions/utils.js";
@@ -863,7 +863,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting, reviewe
     && Number.isSafeInteger(parentCallId) && parentCallId > 0
     ? getAgentCallById(parentCallId) : null;
   const trustedFinalReviewer = handoffEnabled && recipient === "assessor"
-    && ["dev", "fix"].includes(packet.job_type)
+    && DEV_ROLE_JOB_TYPES.has(packet.job_type)
     && parentCall && ["dev", "fix"].includes(parentCall.role)
     && Number(parentCall.job_id) === Number(packet.job_id)
     && Number(parentCall.work_item_id) === Number(packet.work_item_id);

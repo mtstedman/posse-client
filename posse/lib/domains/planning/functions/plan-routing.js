@@ -15,6 +15,9 @@ import { plannerTaskProducesRepoOutput } from "./plan-modality.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
+import { RESEARCH_BUDGETS } from "../../../catalog/research-budget.js";
+import { INTAKE_TERMINAL_OUTPUTS } from "../../../catalog/intake.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 function isStringArray(value) {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
@@ -100,7 +103,7 @@ export function planCoverageGaps(workItem = {}, tasks = []) {
     const hasWritableCodeTask = plannedTasks.some((task) => {
       if (!integrationRequested && plannerTaskProducesRepoOutput(task)) return true;
       const jobType = String(task?.job_type || "dev").trim().toLowerCase();
-      if (!["dev", "fix"].includes(jobType)) return false;
+      if (!DEV_ROLE_JOB_TYPES.has(jobType)) return false;
       const modified = Array.isArray(task?.files_to_modify) ? task.files_to_modify.filter(Boolean) : [];
       const deleted = Array.isArray(task?.files_to_delete) ? task.files_to_delete.filter(Boolean) : [];
       const createdCode = (Array.isArray(task?.files_to_create) ? task.files_to_create : [])
@@ -419,7 +422,7 @@ export function getExplicitIntakeBindings(workItem) {
       ? hints.desired_outputs.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
       : [];
     const deliverableType = typeof hints.deliverable_type === "string" ? hints.deliverable_type.trim().toLowerCase() : null;
-    const hasExplicitOutputMode = (outputMode === "repo" || outputMode === "artifact" || outputMode === "question_only")
+    const hasExplicitOutputMode = INTAKE_TERMINAL_OUTPUTS.includes(outputMode)
       && (!hasSourceMetadata || outputModeSource === "explicit");
     const hasExplicitDesiredOutputs = desiredOutputs.length > 0
       && (!hasSourceMetadata || desiredOutputsSource === "explicit");
@@ -885,7 +888,7 @@ export function validatePlannedTask(task, index, taskCount) {
   }
   if (task.deepthink_budget != null) {
     const budget = String(task.deepthink_budget || "").trim().toLowerCase();
-    if (!["low", "normal", "high", "xhigh"].includes(budget)) {
+    if (!RESEARCH_BUDGETS.includes(budget)) {
       errors.push("deepthink_budget must be one of low, normal, high, xhigh");
     }
   }

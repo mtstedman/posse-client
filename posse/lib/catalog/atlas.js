@@ -70,9 +70,11 @@ export const VALID_ATLAS_BOOT_REINDEX_POLICIES = readonlySet(ATLAS_BOOT_REINDEX_
 export const ATLAS_SCIP_RESTAGE_POLICY_VALUES = Object.freeze(["never", "missing", "smart", "always"]);
 export const VALID_ATLAS_SCIP_RESTAGE_POLICIES = readonlySet(ATLAS_SCIP_RESTAGE_POLICY_VALUES);
 export const ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT = 24;
+// Warm purposes that publish a main-branch generation.
+export const ATLAS_MAIN_GENERATION_PURPOSES = Object.freeze(["main-incremental", "main-full", "main-merge"]);
 // Warm purposes that stage and ingest repository SCIP. WI warms are hot-view
 // materialization only; repo-level SCIP belongs to main-branch warms.
-export const ATLAS_SCIP_WARM_PURPOSES = Object.freeze(["main-incremental", "main-full", "main-merge"]);
+export const ATLAS_SCIP_WARM_PURPOSES = ATLAS_MAIN_GENERATION_PURPOSES;
 
 export const ATLAS_AUTO_FEEDBACK_VALUES = Object.freeze(["off", "dry-run", "write"]);
 export const VALID_ATLAS_AUTO_FEEDBACK_MODES = readonlySet(ATLAS_AUTO_FEEDBACK_VALUES);
@@ -167,6 +169,19 @@ export const ATLAS_VIEW_CLONE_METHOD = "view-clone";
 export const ATLAS_VIEW_PATCH_META_METHOD = "view-patch-meta";
 export const ATLAS_STORAGE_CACHE_STATS_METHOD = "storage-cache-stats";
 export const ATLAS_STORAGE_CACHE_INVALIDATE_METHOD = "storage-cache-invalidate";
+
+// Operator reasons for `posse admin memory flag` and the memory.feedback
+// verdict each records. A reason with no verdict here flags the memory stale.
+export const MEMORY_FLAG_REASON_VERDICTS = Object.freeze({
+  contradicted: "wrong",
+  wrong: "wrong",
+  duplicate: "duplicate",
+});
+export const MEMORY_FLAG_REASONS = Object.freeze([
+  ...Object.keys(MEMORY_FLAG_REASON_VERDICTS),
+  "anchors_missing",
+  "manual",
+]);
 
 export const ATLAS_ROLE_ORDER = Object.freeze([
   "researcher",

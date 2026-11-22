@@ -1,7 +1,7 @@
 import { displayRoleForJobType } from "../../providers/functions/roles.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { createRunWrapUpTracker } from "../functions/review-session.js";
-import { BACKGROUND_JOB_TYPES } from "../../../catalog/job.js";
+import { BACKGROUND_JOB_TYPES, PARKED_JOB_STATUSES } from "../../../catalog/job.js";
 import { logAgentActivity } from "../../queue/functions/events.js";
 import { SESSION_SYNC_STATES } from "../../../catalog/session-sync.js";
 import { sessionMemberLabel } from "../../pairing/functions/session-console.js";
@@ -328,7 +328,7 @@ export class RunSchedulerLoopCallbacks {
         });
       }
     }
-    const blocked = activeJobs.filter((j) => j.status === "blocked" || j.status === "waiting_on_human" || j.status === "waiting_on_review");
+    const blocked = activeJobs.filter((j) => PARKED_JOB_STATUSES.includes(j.status));
     if (blocked.length > 0 && blocked.length === activeJobs.length) {
       const msg = `All ${activeJobs.length} remaining job(s) are blocked/waiting.`;
       if (display) display.addEvent(`${this.C.yellow}${msg}${this.C.reset}`);

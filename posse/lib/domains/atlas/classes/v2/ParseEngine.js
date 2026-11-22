@@ -98,7 +98,7 @@ import {
   wiPathsDifferingFromCommit,
   wiLivePaths,
 } from "../../functions/v2/wi-source-proof.js";
-import { ATLAS_SCIP_WARM_PURPOSES, ATLAS_WI_REFRESH_MAX_SOURCE_PASSES } from "../../../../catalog/atlas.js";
+import { ATLAS_SCIP_WARM_PURPOSES, ATLAS_WI_REFRESH_MAX_SOURCE_PASSES, ATLAS_MAIN_GENERATION_PURPOSES } from "../../../../catalog/atlas.js";
 import { ATLAS_EVENTS } from "../../functions/v2/contracts/events.js";
 import { ingestScipFile, listScipFiles, scipIngestRecordedArtifact } from "../../functions/v2/scip/ingester.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
@@ -3940,9 +3940,7 @@ export class ParseEngine {
         || "on_demand",
     ).trim().toLowerCase();
     const mode = rawMode === "off" || rawMode === "on" || rawMode === "on_demand" ? rawMode : "on_demand";
-    const isMainPurpose = purpose === "main-incremental"
-      || purpose === "main-full"
-      || purpose === "main-merge";
+    const isMainPurpose = ATLAS_MAIN_GENERATION_PURPOSES.includes(purpose);
 
     if (isMainPurpose || (purpose === "wi" && mode === "on")) {
       if (this.#deferEmbeddings) {

@@ -468,7 +468,6 @@
  * @property {SymbolHit} [fromSymbol]
  * @property {string} kind
  * @property {number} confidence
- * @property {boolean} resolved
  */
 
 /**
@@ -476,7 +475,6 @@
  * @property {string} repo_rel_path
  * @property {number} occurrenceCount
  * @property {number} firstLine
- * @property {string[]} kinds
  * @property {string[]} fromNames
  */
 
@@ -531,11 +529,9 @@
  * @property {string} repoRelPath
  * @property {number} rawOccurrenceCount
  * @property {number} distinctFileCount
- * @property {number} distinctResolvedFileCount
  * @property {number} distinctCallerFileCount  Every grouped caller file; not capped by `callerFiles`.
  * @property {SymbolUsageFileGroup[]} callerFiles
  * @property {boolean} callerFilesTruncated  `callerFiles` holds fewer groups than `distinctCallerFileCount`.
- * @property {SymbolUsageFileGroup[]} unresolvedFiles
  * @property {SymbolUsageSite[]} usages
  * @property {number} total
  * @property {boolean} indexTruncated  The bounded storage read was capped; counts describe an index subset.
@@ -805,7 +801,7 @@
 /**
  * @typedef {Object} CodeSkeletonData
  * @property {string} repo_rel_path
- * @property {string} content                 One declaration per row: source range, compact signature, and optional [symbol=…] selectors (the native envelope writes [symbolId=…]; the typed facade renames it); canonical IDs are replaced by short session handles at the typed MCP boundary. Indentation groups members under containers; no bodies or local functions.
+ * @property {string} content                 One declaration per row: source range, compact signature, and optional [symbol=…] selectors (the native envelope writes [symbolId=…] with a canonical ID; the MCP owner replaces it with a short session handle for every role). Indentation groups members under containers; no bodies or local functions.
  * @property {number} totalSymbols            Declaration count after filtering, before output limits.
  * @property {number} returnedSymbols         Complete rows returned.
  * @property {number} omittedSymbols          Rows omitted by output limits; raise maxLines/maxTokens to retrieve more.
@@ -919,8 +915,6 @@
  * @property {Array<{content:string,startLine:number,endLine:number,rangeStart:number,rangeEnd:number,signature:string,callableKind:string,owner?:string,anchor:string}>} [_returnedFunctionAnchors] Private owner transport; replaced with returnedFunctionAnchors before model delivery.
  * @property {Array<{anchor:string,owner?:string,signature:string,callableKind:string,startLine:number,endLine:number,ref?:string}>} [returnedFunctionAnchors] Temporary fetchable anchors for directly returned anonymous functions visible in this result.
  * @property {number} [returnedFunctionAnchorsOmitted]
- * @property {Array<{kind:string,lines:[number,number]}>} [decisionPoints] Bounded syntax navigation into exact inline source; not complete behavioral coverage or additional evidence authority.
- * @property {boolean} [decisionPointsTruncated] More syntax navigation may exist; source delivery limits remain independently reported.
  */
 
 /**
@@ -944,10 +938,10 @@
  * Model-facing header of a symbol target (symbol.get, or code.window with a
  * symbolId) after source line display: the address, the citation handle and
  * only the identifiers the body did not carry. `selectionBounded`,
- * `identifiersComplete`, `identifiersFound`, `identifiersReturned`,
- * `decisionPoints`, the line-format marker and `evidence_ref.exact_field`/
- * `chars` are not delivered; they are true by construction, restate the body,
- * or have no reader.
+ * `identifiersComplete`, `identifiersFound`, `identifiersReturned`, the
+ * line-format marker and `evidence_ref.exact_field`/`chars` are not
+ * delivered; they are true by construction, restate the body, or have no
+ * reader.
  * @typedef {Object} SymbolWindowDisplayHeader
  * @property {string} path
  * @property {string} symbolId Short symbol handle.

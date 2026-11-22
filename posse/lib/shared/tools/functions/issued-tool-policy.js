@@ -12,6 +12,7 @@ import { ENVIRONMENT_SETUP_TOOLS } from "../../../catalog/tools/environment-setu
 import { INTERNAL_ATLAS_SURFACE_ACTION_SET } from "../../../catalog/internal-tools.js";
 import { isRemotePromptClientIssuance } from "../../../domains/remote/classes/RemotePromptClient.js";
 import { inheritNativeToolGrant } from "./native-tool-grant-registry.js";
+import { DETERMINISTIC_TEST_TOOLS } from "../../../catalog/tool-surface/roles.js";
 
 const KNOWN_ISSUED_ROLES = new Set([
   "researcher",
@@ -23,10 +24,7 @@ const KNOWN_ISSUED_ROLES = new Set([
   "summary",
 ]);
 
-const TEST_TOOL_NAMES = new Set([
-  "run_scoped_checks",
-  "run_unit_test",
-]);
+const TEST_TOOL_NAMES = DETERMINISTIC_TEST_TOOLS;
 const WRITE_TOOL_NAMES = new Set([
   ...ENVIRONMENT_SETUP_TOOLS,
   "write_file",

@@ -2,7 +2,7 @@ import { COMPACT_RELATIONSHIP_PROJECTION } from "../../../catalog/atlas-presenta
 
 
 import { recordObservation } from "../../../domains/observability/functions/observations.js";
-import { sortAgentToolDefinitions } from "./agent-schema.js";
+import { providerToolSchemaChars, sortAgentToolDefinitions } from "./agent-schema.js";
 import { capString } from "./mcp-owner-session-support.js";
 import crypto from "node:crypto";
 import { getTraversalCompletionSnapshotForCall } from "../../../domains/handoff/functions/agent-handoff.js";
@@ -97,6 +97,7 @@ export function recordProviderIssuedToolSurface(session, message, researchSynthe
       action_enum_source: "atlas_tool_names",
       schema_sha256: schemaSha256,
       schema_chars: canonical.length,
+      provider_schema_chars: providerToolSchemaChars(tools),
       effective_policy: {
         disable_system_tools: boot.disableSystemTools === true,
         atlas_available: boot.atlasAvailable === true,

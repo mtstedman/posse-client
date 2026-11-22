@@ -1,5 +1,6 @@
 // Deterministic scope/risk policy used to route downstream agent budget.
 import { AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES } from "../../../../catalog/handoff.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 
 const TIER_RANK = Object.freeze({ cheap: 0, standard: 1, strong: 2 });
 const EFFORT_RANK = Object.freeze({ low: 0, medium: 1, high: 2 });
@@ -166,7 +167,7 @@ export function buildTaskStructuralFacts(task = {}, { jobType = "dev", taskMode 
   const filesToDelete = uniqueStrings(task.files_to_delete);
   const createRoots = uniqueStrings(task.create_roots);
   const uniqueScopeFiles = uniqueStrings([...filesToModify, ...filesToCreate, ...filesToDelete]);
-  const isCodeTask = (jobType === "dev" || jobType === "fix") && (taskMode || "code") === "code";
+  const isCodeTask = DEV_ROLE_JOB_TYPES.has(jobType) && (taskMode || "code") === "code";
   const broadCreateRoots = createRoots.filter((root) => {
     const normalized = root.replace(/\/+$/, "");
     return !normalized || normalized === "." || normalized === "/" || normalized === "src" || normalized === "lib";

@@ -32,9 +32,10 @@ import {
 } from "./common.js";
 import { withMergeLockSync } from "./locks.js";
 import { reviseOpenHumanGateGeneration } from "./human-gates.js";
+import { AWAITING_ANSWER_GATE_JOB_STATUSES, AWAITING_ANSWER_GATE_JOB_STATUSES_SQL } from "../../../catalog/job.js";
 
-const OPEN_GATE_STATUSES = ["queued", "waiting_on_human"];
-const OPEN_GATE_STATUSES_SQL = `(${OPEN_GATE_STATUSES.map((status) => `'${status}'`).join(", ")})`;
+const OPEN_GATE_STATUSES = AWAITING_ANSWER_GATE_JOB_STATUSES;
+const OPEN_GATE_STATUSES_SQL = `(${AWAITING_ANSWER_GATE_JOB_STATUSES_SQL})`;
 
 export function pushOfferWarningLines(state = {}) {
   const branch = String(state.pushBranch || state.targetBranch || "target");

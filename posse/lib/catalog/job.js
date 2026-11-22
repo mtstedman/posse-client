@@ -54,7 +54,7 @@ export const JOB_REASONING_EFFORT_LIST_SQL = sqlList(JOB_REASONING_EFFORTS);
 // Planner-emitted job fields may use crossed tier/effort names or common
 // provider nicknames. Compilation resolves these before checking the enums.
 export const PLANNER_MODEL_TIER_ALIASES = Object.freeze({
-  low: "cheap", medium: "standard", high: "strong", max: "strong", premium: "high",
+  low: "cheap", medium: "standard", high: "strong", max: "strong", premium: "strong",
   haiku: "cheap", sonnet: "standard", opus: "strong",
   "1": "cheap", "2": "standard", "3": "strong",
   mid: "standard", lo: "cheap", hi: "strong",
@@ -144,6 +144,12 @@ export const ACTIVE_LEASE_STATUSES = Object.freeze([
 ]);
 export const ACTIVE_LEASE_STATUSES_SQL = sqlList(ACTIVE_LEASE_STATUSES);
 
+// The attempt is executing: leased to a worker or running. Unlike
+// ACTIVE_LEASE_STATUSES it leaves out awaiting_assessment, after which the
+// job no longer writes.
+export const EXECUTING_JOB_STATUSES = Object.freeze(["leased", "running"]);
+export const EXECUTING_JOB_STATUSES_SQL = sqlList(EXECUTING_JOB_STATUSES);
+
 // Human-input gate jobs execute directly and park while waiting for an answer.
 // Assessment statuses belong to the implementation being reviewed, not its
 // human-input gate. A running gate is visible while its owner resolves it.
@@ -151,6 +157,11 @@ export const OPEN_HUMAN_GATE_JOB_STATUSES = Object.freeze([
   "queued", "waiting_on_human", "waiting_on_review",
 ]);
 export const PENDING_HUMAN_GATE_JOB_STATUSES = Object.freeze(["running"]);
+// A question or approval gate still waiting for its answer: not started yet,
+// or parked on the operator. Unlike OPEN_HUMAN_GATE_JOB_STATUSES it leaves out
+// waiting_on_review, where only review gates park.
+export const AWAITING_ANSWER_GATE_JOB_STATUSES = Object.freeze(["queued", "waiting_on_human"]);
+export const AWAITING_ANSWER_GATE_JOB_STATUSES_SQL = sqlList(AWAITING_ANSWER_GATE_JOB_STATUSES);
 export const CURRENT_HUMAN_GATE_JOB_STATUSES = Object.freeze([
   ...OPEN_HUMAN_GATE_JOB_STATUSES,
   ...PENDING_HUMAN_GATE_JOB_STATUSES,
@@ -238,6 +249,11 @@ export const NON_PROVIDER_JOB_TYPES = readonlySet([
   "delegate",
 ]);
 
+// Job types the developer role runs: an implementation task and its fix
+// rounds (JOB_TYPE_ROLE_REGISTRY worker "dev"). Code-change gates (worktree
+// merge, test receipts, final review, scope requests) key on this set.
+export const DEV_ROLE_JOB_TYPES = readonlySet(["dev", "fix"]);
+
 // Job types that emit a declared output contract enforced by the worker
 // (allowed/forbidden file lists, scope checks). Other mutating types still
 // run but don't carry an explicit contract.
@@ -262,7 +278,7 @@ export const REPLAN_CANCELABLE_JOB_TYPES = readonlySet([
 // (research, plan, delegate, assess) which the runtime spawns implicitly,
 // and atlas_warm which is scheduled separately.
 export const PLANNER_ALLOWED_JOB_TYPES = readonlySet([
-  "dev", "artificer", "promote", "human_input",
+  "dev", "artificer", "human_input", "promote",
 ]);
 
 // Job types that represent role-driven planning work (researcher/planner/

@@ -6,6 +6,7 @@
 // a single source rather than each carrying its own copy.
 
 import { ATLAS_EVENTS } from "./contracts/events.js";
+import { ATLAS_TREE_COMPRESSION_MODE_VALUES, ATLAS_MAIN_GENERATION_PURPOSES } from "../../../../catalog/atlas.js";
 
 /**
  * ML labeling normally runs at boot. A bounded self-repair warm may also
@@ -18,9 +19,7 @@ import { ATLAS_EVENTS } from "./contracts/events.js";
  * @returns {{ run: boolean, reason: string | null }}
  */
 export function shouldRunMlTreeCompressionReseed({ purpose, mode, triggerEvent, materialization = null } = {}) {
-  const isMainPurpose = purpose === "main-incremental"
-    || purpose === "main-full"
-    || purpose === "main-merge";
+  const isMainPurpose = ATLAS_MAIN_GENERATION_PURPOSES.includes(purpose);
   if (!isMainPurpose) return { run: false, reason: "not_main_purpose" };
   if (mode !== "ml") return { run: false, reason: "mode_not_ml" };
   const compressionNeedsRepair = materialization?.ok === false && [
@@ -41,7 +40,7 @@ export function shouldRunMlTreeCompressionReseed({ purpose, mode, triggerEvent, 
  */
 export function normalizeTreeCompressionMode(value) {
   const raw = String(value || "deterministic").trim().toLowerCase();
-  if (raw === "off" || raw === "deterministic" || raw === "ml") return raw;
+  if (ATLAS_TREE_COMPRESSION_MODE_VALUES.includes(raw)) return /** @type {"off" | "deterministic" | "ml"} */ (raw);
   return "deterministic";
 }
 

@@ -1,6 +1,5 @@
 import { capString } from "./mcp-owner-session-support.js";
 import path from "node:path";
-import { refreshSourceDecisionNavigation } from "./source-decision-points.js";
 import { materializeHashRefEvidenceForContext } from "../../../domains/queue/functions/hash-refs.js";
 import { sourceLineDisplay, compactSourceEvidenceSuffix } from "./source-line-display.js";
 import { ownerControlNoticePublicMetadata, OWNER_MODEL_CONTROL_NOTICES } from "./planner-triage.js";
@@ -170,7 +169,9 @@ export function ownerThinImplementationGap(source = "") {
 // custody. Hash-ref compaction can remove the content before the later
 // materialization pass gets a chance to delete those internal fields, leaving
 // them in the model-visible envelope. Strip them only after every custody and
-// citation stage has completed.
+// citation stage has completed. `contentSha256` is the same custody's digest
+// of the delivered bytes; coverage rows and ref metadata keep their own copy,
+// and no tool takes it back, so the model-visible header drops it too.
 //
 // A source window also carries file text as a JSON string, so every newline,
 // quote, and backslash is escaped and re-fed on every model turn. Lift the
@@ -184,7 +185,7 @@ function stripInternalSourceCoverageFields(value) {
   if (!value || typeof value !== "object") return 0;
   let removed = 0;
   if (!Array.isArray(value)) {
-    for (const key of ["sourceVersion", "repositoryIdentity"]) {
+    for (const key of ["sourceVersion", "repositoryIdentity", "contentSha256"]) {
       if (!Object.hasOwn(value, key)) continue;
       delete value[key];
       removed += 1;
@@ -212,7 +213,7 @@ export function finalizeSourceTransport(result, context = null) {
       nextContent.push(part);
       continue;
     }
-    const removedFields = stripInternalSourceCoverageFields(parsed) + refreshSourceDecisionNavigation(parsed);
+    const removedFields = stripInternalSourceCoverageFields(parsed);
     const resolveEvidence = context ? (ref) => {
       const visible = materializeHashRefEvidenceForContext(context, ref);
       return visible?.ok ? visible.entry : null;

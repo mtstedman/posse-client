@@ -13,6 +13,7 @@ import {
   LIVE_SCOPE_WAIT_MAX_EXEMPTION_MS,
   scopeRequestBatchEntries,
 } from "./scope-expansion.js";
+import { DEV_ROLE_JOB_TYPES, AWAITING_ANSWER_GATE_JOB_STATUSES } from "../../../catalog/job.js";
 
 // Queue-store owns the transaction and status transitions. It supplies those
 // operations to this scope state machine so gate cancellation and attempt-start
@@ -267,7 +268,7 @@ export function createScopeExpansionOperations({
         return [...(scope.files_to_modify || []), ...(scope.files_to_create || [])].includes(normalizedPath);
       });
       const plannedTestWrite = !existingTest && !siblingTestClaim && payload.write_tests === true
-        && ["dev", "fix"].includes(current.job_type) && (payload.task_mode || "code") === "code"
+        && DEV_ROLE_JOB_TYPES.has(current.job_type) && (payload.task_mode || "code") === "code"
         && isTestDirectoryPath(normalizedPath);
       const autoClass = plannedTestWrite ? { reason: "planned_test_write" } : autoApprovalEnabled && !(testPath && (existingTest || siblingTestClaim))
         ? dependentSiblingScopeApproval(current, normalizedPath, normalizedAccess,
@@ -356,7 +357,7 @@ export function createScopeExpansionOperations({
         const gateJob = pending.approval_job_id ? getJob(pending.approval_job_id) : null;
         const gateOpen = !!gateJob
           && gateJob.job_type === "human_input"
-          && ["queued", "waiting_on_human"].includes(gateJob.status);
+          && AWAITING_ANSWER_GATE_JOB_STATUSES.includes(gateJob.status);
         if (!gateOpen) {
           return {
             ok: false,
@@ -843,7 +844,7 @@ export function createScopeExpansionOperations({
           const gate = freshPending.approval_job_id ? getJob(freshPending.approval_job_id) : null;
           const gateOpen = !!gate
             && gate.job_type === "human_input"
-            && ["queued", "waiting_on_human"].includes(gate.status);
+            && AWAITING_ANSWER_GATE_JOB_STATUSES.includes(gate.status);
           if (!gateOpen) return "gate_closed";
           freshPayload._pending_scope_request = {
             ...freshPending,
@@ -892,7 +893,7 @@ export function createScopeExpansionOperations({
         const gate = freshPending.approval_job_id ? getJob(freshPending.approval_job_id) : null;
         const gateOpen = !!gate
           && gate.job_type === "human_input"
-          && ["queued", "waiting_on_human"].includes(gate.status);
+          && AWAITING_ANSWER_GATE_JOB_STATUSES.includes(gate.status);
         if (gateOpen) {
           // The rebind saw the gate closed but it is open at this re-read —
           // a torn read; retry the rebind rather than stopping a live waiter.
@@ -981,7 +982,7 @@ export function createScopeExpansionOperations({
       const settled = { ...pending, execution_settled: true, settled_at: now() };
       if (parkLiveRequest && pending.live_wait === true && original.status === "running") {
         const gate = getJob(Number(pending.approval_job_id));
-        if (!pending.decision && (!gate || !["queued", "waiting_on_human"].includes(gate.status))) {
+        if (!pending.decision && (!gate || !AWAITING_ANSWER_GATE_JOB_STATUSES.includes(gate.status))) {
           return { ok: false, code: "scope_request_gate_closed", job: original };
         }
         settled.live_wait = false;

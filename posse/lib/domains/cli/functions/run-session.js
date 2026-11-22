@@ -32,6 +32,7 @@ import "../../../shared/format/functions/ansi.js";
 import "../../../shared/tools/classes/BinaryManager.js";
 import "../../../shared/tools/classes/daemon/index.js";
 import "../../../shared/tools/classes/PersistentMcpOwner.js";
+import { AWAITING_ANSWER_GATE_JOB_STATUSES } from "../../../catalog/job.js";
 
 export const PROVIDER_AUTH_WARMUP_TIMEOUT_MS = 30_000;
 export const PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS = 1_200;
@@ -74,7 +75,7 @@ export function openParkingGateForWorkItem(workItemId) {
  * for 9 hours without being asked).
  */
 export function listOpenHumanGatesAtExit({ listJobsFn = listJobs, getHumanGateFn = getHumanGate } = {}) {
-  return listJobsFn(["queued", "waiting_on_human"])
+  return listJobsFn([...AWAITING_ANSWER_GATE_JOB_STATUSES])
     .filter((job) => job?.job_type === "human_input")
     .filter((job) => humanGateStateAllowsAnswer(getHumanGateFn(job.id)?.gate_state));
 }

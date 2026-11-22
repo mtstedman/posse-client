@@ -28,11 +28,12 @@ import { isAuthoritativeFinalReviewPass } from "../../../assessment/functions/fi
 
 import { tierModelName } from "../../../providers/functions/provider.js";
 import { resolveAssessmentExecution, nextAssessmentTier } from "../../../settings/functions/assessment-execution.js";
-const ASSESSOR_CONFIDENCE_VALUES = new Set(["low", "medium", "high"]);
+import { JOB_ASSESSOR_CONFIDENCE, MUTATING_JOB_TYPES, DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
+import { INTAKE_HINT_SOURCES } from "../../../../catalog/intake.js";
+const ASSESSOR_CONFIDENCE_VALUES = new Set(JOB_ASSESSOR_CONFIDENCE);
 const ASSESSOR_CONFIDENCE_RANK = Object.freeze({ none: -1, low: 0, medium: 1, high: 2 });
 const OUTPUT_CONTRACT_WI_MODES = new Set(["image", "report", "question"]);
-const OUTPUT_CONTRACT_JOB_TYPES = new Set(["dev", "fix", "promote", "artificer"]);
-const VALID_OUTPUT_SOURCES = new Set(["explicit", "inferred"]);
+const VALID_OUTPUT_SOURCES = new Set(INTAKE_HINT_SOURCES);
 
 export function measureConsecutiveFixChainDepth(job) {
   let depth = 0;
@@ -924,7 +925,7 @@ function _jobSatisfiesDesiredOutput(job, output, payload = null, workItem = null
   const workItemMode = String(metadataMode || workItem?.mode || "").trim().toLowerCase();
   switch (output) {
     case "repo":
-      return job.job_type === "promote" || ((job.job_type === "dev" || job.job_type === "fix") && taskMode === "code");
+      return job.job_type === "promote" || (DEV_ROLE_JOB_TYPES.has(job.job_type) && taskMode === "code");
     case "artifact":
       return job.job_type === "artificer" && taskMode !== "code";
     case "question_only":
@@ -937,13 +938,13 @@ function _jobSatisfiesDesiredOutput(job, output, payload = null, workItem = null
 
 function _planShapeIsTerminalCodeOnly(jobs = []) {
   const outputJobs = (Array.isArray(jobs) ? jobs : [])
-    .filter((candidate) => OUTPUT_CONTRACT_JOB_TYPES.has(candidate?.job_type));
+    .filter((candidate) => MUTATING_JOB_TYPES.has(candidate?.job_type));
   if (outputJobs.length === 0) return false;
   if (outputJobs.some((candidate) => candidate.job_type === "artificer" || candidate.job_type === "promote")) return false;
   return outputJobs.every((candidate) => {
     const payload = parseJobPayload(candidate);
     const taskMode = String(payload.task_mode || "code").trim().toLowerCase();
-    return (candidate.job_type === "dev" || candidate.job_type === "fix") && taskMode === "code";
+    return DEV_ROLE_JOB_TYPES.has(candidate.job_type) && taskMode === "code";
   });
 }
 

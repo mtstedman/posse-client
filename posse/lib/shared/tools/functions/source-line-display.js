@@ -42,6 +42,9 @@ function trimTransportFields(header) {
     // Reuse bookkeeping: the notice text and `reused` below carry what the
     // model needs; the requested span and the line count are derivable.
     "source_deduplicated", "requestedStartLine", "requestedEndLine", "reusedLineCount",
+    // The token estimate sizes a read against `maxTokens`, which only the
+    // runtime sets; the model has nothing to compare it with.
+    "estimatedTokens",
   ]) delete header[field];
   // Selection bounds remain internal; displayed ranges describe the source.
   delete header.selectionBounded;
@@ -65,15 +68,16 @@ function trimTransportFields(header) {
 
 // A symbol target (symbol.get, or code.window with a symbolId) is one body at
 // one address. `selectionBounded` and `identifiersComplete` are true by
-// construction there, `identifiersFound`/`identifiersReturned` restate the
-// body, and syntax navigation into a single body restates what the body
-// shows; only identifiers the body did not carry are worth a row. File-mode
-// windows keep their decision points: there they point across windows.
+// construction there and `identifiersFound`/`identifiersReturned` restate the
+// body; only identifiers the body did not carry are worth a row. A body is an
+// implementation unless it says otherwise, so only a `declaration` body (and
+// its `implementationCandidates`) keeps its kind.
 function symbolWindowDisplay(header, shown) {
   header[SOURCE_WINDOW_DISPLAY_FIELDS.LINES] = [shown.startLine, shown.endLine];
+  if (header.bodyKind === "implementation") delete header.bodyKind;
+  displayReturnedFunctionAnchors(header, [[shown.startLine, shown.endLine], ...reusedSourceRanges(header)]);
   for (const field of [
     "startLine", "endLine", "selectionBounded", "identifiersFound", "identifiersReturned",
-    "decisionPoints", "decisionPointsTruncated",
   ]) delete header[field];
   trimTransportFields(header);
   return header;
@@ -111,6 +115,42 @@ function displayedCoverage(range, displayedRanges) {
   return cursor > range[1] ? "full" : "partial";
 }
 
+// Ranges previously delivered and admitted for reuse. Admission has already
+// validated these byte-exact ranges and their refs, so their lines are on the
+// model's screen even when this response does not redisplay them.
+function reusedSourceRanges(value) {
+  return (Array.isArray(value.reusedRanges) ? value.reusedRanges : [])
+    .filter((range) => Array.isArray(range.evidence_refs) && range.evidence_refs.length > 0)
+    .map((range) => targetLines({ lines: [range.startLine, range.endLine] }))
+    .filter(Boolean);
+}
+
+// A returned anonymous callable is anchored so its exact range can be fetched.
+// An anchor whose lines are all on screen (displayed here or reused) restates
+// them; the rest keep what locates and fetches them. The owner's stored anchor
+// map and `returnedFunctionAnchorsOmitted` are untouched.
+function displayReturnedFunctionAnchors(header, availableRanges) {
+  if (!Array.isArray(header.returnedFunctionAnchors)) return;
+  const anchors = [];
+  for (const anchor of header.returnedFunctionAnchors) {
+    const lines = targetLines({ lines: [anchor?.startLine, anchor?.endLine] });
+    if (!lines) {
+      anchors.push(anchor);
+      continue;
+    }
+    if (displayedCoverage(lines, availableRanges) === "full") continue;
+    const signature = typeof anchor.signature === "string" ? anchor.signature : "";
+    anchors.push({
+      ...(anchor.owner ? { owner: anchor.owner } : {}),
+      ...(signature ? { signature } : { callableKind: anchor.callableKind }),
+      [SOURCE_WINDOW_DISPLAY_FIELDS.LINES]: lines,
+      ...(anchor.traversal_ref?.ref ? { traversal_ref: { ref: anchor.traversal_ref.ref } } : {}),
+    });
+  }
+  if (anchors.length > 0) header.returnedFunctionAnchors = anchors;
+  else delete header.returnedFunctionAnchors;
+}
+
 // Keep backing refs and capability issuance intact; suppress only a redundant
 // visible stub after proving that the header ref covers every delivered window.
 export function compactSourceEvidenceSuffix(value, suffix, resolveEvidence) {
@@ -138,13 +178,7 @@ function fileWindowDisplay(header, windows, value) {
     (Array.isArray(request.targets) ? request.targets : []).map((target) => ({ request, target }))
   ));
   const displayedRanges = windows.map(({ window }) => [window.startLine, window.endLine]);
-  // Admission has already validated these byte-exact ranges and their refs.
-  // Previously delivered evidence remains available even when not redisplayed.
-  const reusedRanges = (Array.isArray(value.reusedRanges) ? value.reusedRanges : [])
-    .filter((range) => Array.isArray(range.evidence_refs) && range.evidence_refs.length > 0)
-    .map((range) => targetLines({ lines: [range.startLine, range.endLine] }))
-    .filter(Boolean);
-  const availableRanges = [...displayedRanges, ...reusedRanges];
+  const availableRanges = [...displayedRanges, ...reusedSourceRanges(value)];
   const additionalIdentifiers = new Set(windows.flatMap(({ window }) => (
     Array.isArray(window.identifiers) ? window.identifiers.map(lowered) : []
   )));
@@ -214,6 +248,7 @@ function fileWindowDisplay(header, windows, value) {
     "identifiersFound", "identifiersReturned", "identifiersOmitted",
   ]) delete header[field];
   trimTransportFields(header);
+  displayReturnedFunctionAnchors(header, availableRanges);
   header[SOURCE_WINDOW_DISPLAY_FIELDS.DISPLAYED] = displayed;
   if (omitted.length > 0) header[SOURCE_WINDOW_DISPLAY_FIELDS.OMITTED] = omitted;
   return header;

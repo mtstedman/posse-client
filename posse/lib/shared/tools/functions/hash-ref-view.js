@@ -2,8 +2,9 @@ import {
   CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS,
   CONTEXT_FETCH_REF_MAX_LIMIT_CHARS,
 } from "../../../catalog/context.js";
+import { ATLAS_FETCH_REF_SEARCH_MODES } from "../../../catalog/atlas-params.js";
 
-const FETCH_REF_SEARCH_MODES = new Set(["auto", "literal", "regex"]);
+const FETCH_REF_SEARCH_MODES = new Set(ATLAS_FETCH_REF_SEARCH_MODES);
 const FETCH_REF_REGEX_HINT = /[\\^$.*+?()[\]{}|]/;
 
 function positiveInt(value, fallback, max = null) {

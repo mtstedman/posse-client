@@ -396,6 +396,37 @@ function modelFacingStructureFile(file) {
 }
 
 /**
+ * The line of a native `path:line` site whose path is `path`, else null. Only
+ * an exact round trip qualifies, so a site the line cannot restate byte for
+ * byte keeps its full text.
+ * @param {unknown} site
+ * @param {string} path
+ * @returns {number | null}
+ */
+export function siteLineInPath(site, path) {
+  if (typeof site !== "string" || !path || !site.startsWith(`${path}:`)) return null;
+  const digits = site.slice(path.length + 1);
+  if (!/^[1-9][0-9]*$/u.test(digits)) return null;
+  const line = Number(digits);
+  return Number.isSafeInteger(line) ? line : null;
+}
+
+/**
+ * A file-level edge lists its sites in the caller file. When every site is in
+ * `fromPath` the path is stated once and the sites become line numbers.
+ * @param {Record<string, any>} edge
+ */
+function compactFileEdge(edge) {
+  const record = plainRecord(edge);
+  if (!record || !Array.isArray(record.sites) || record.sites.length === 0) return edge;
+  const fromPath = textOrNull(record.fromPath) || "";
+  const lines = record.sites.map((site) => siteLineInPath(site, fromPath));
+  if (lines.some((line) => line == null)) return edge;
+  const { sites: _sites, ...rest } = record;
+  return { ...rest, siteLines: /** @type {number[]} */ (lines).sort((left, right) => left - right) };
+}
+
+/**
  * @param {Record<string, any>} edge
  * @param {"internal" | "inbound" | "outbound"} scope
  * @param {Map<string, string>} handleById
@@ -417,12 +448,15 @@ function compactStructureEdge(edge, scope, handleById, listedIds) {
       file: textOrNull(edge[`${prefix}Path`]) || "",
     };
   };
+  const from = endpoint("from");
   const site = textOrNull(edge.site);
+  // A site is always in the calling file, which `from.file` already names.
+  const siteLine = siteLineInPath(site, from.file);
   return {
     kind: textOrNull(edge.kind) || "unknown",
-    from: endpoint("from"),
+    from,
     to: endpoint("to"),
-    ...(site ? { site } : {}),
+    ...(siteLine != null ? { siteLine } : (site ? { site } : {})),
     scope,
   };
 }
@@ -482,7 +516,7 @@ export function projectCompactCodeStructure(data, options = {}) {
       }
     : { computed: false };
   const fileEdges = edgesComputed && Array.isArray(record.fileEdges) && record.fileEdges.length > 0
-    ? record.fileEdges
+    ? record.fileEdges.map(compactFileEdge)
     : null;
   const fanIn = edgesComputed && Array.isArray(metrics.highestInternalFanIn) && metrics.highestInternalFanIn.length > 0
     ? metrics.highestInternalFanIn

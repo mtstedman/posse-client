@@ -1,3 +1,4 @@
+import { ATLAS_RESEARCH_PREFETCH_FOCUS_MODE_VALUES } from "../../../../catalog/setting-policy.js";
 // Pure researcher-prefetch policy. Inputs are deliberately restricted to the
 // task fields rendered to the researcher plus ATLAS tree metadata. Do not add
 // grader output, reference answers, expected files, or benchmark-only hints.
@@ -158,7 +159,7 @@ export function buildResearcherVisibleTaskProjection(packet = {}) {
 
 export function normalizeResearchPrefetchFocusMode(value) {
   const mode = String(value || "").trim().toLowerCase();
-  return ["off", "shadow", "on"].includes(mode) ? mode : "on";
+  return ATLAS_RESEARCH_PREFETCH_FOCUS_MODE_VALUES.includes(mode) ? mode : "on";
 }
 
 export function chooseResearcherPrefetchLane({ focus = {}, treeScope = null, contextAllowed = false } = {}) {

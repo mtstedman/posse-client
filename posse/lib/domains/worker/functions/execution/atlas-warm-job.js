@@ -49,6 +49,7 @@ import {
   isAtlasMainGenerationPurpose,
   withAtlasMainSourceProofLock,
 } from "../../../atlas/functions/v2/main-generation.js";
+import { ATLAS_MAIN_GENERATION_PURPOSES } from "../../../../catalog/atlas.js";
 export {
   inspectAtlasMainSourceProof,
   publishAtlasMainGenerationIfProven,
@@ -825,7 +826,7 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
     // ledger-only — ParseEngine resolves and writes its own view from the job's
     // out_view_path — so dbPath here is just a stable per-repo handle-cache key.
     const viewKeyPath = branchViewPath(repoRoot, baselineBranch);
-    const mainPurpose = purpose === "main-incremental" || purpose === "main-full" || purpose === "main-merge";
+    const mainPurpose = ATLAS_MAIN_GENERATION_PURPOSES.includes(purpose);
     const job = {
       ...payload,
       purpose,

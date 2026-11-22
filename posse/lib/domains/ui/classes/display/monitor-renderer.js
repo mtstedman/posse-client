@@ -5,7 +5,7 @@ import { fit, stripAnsi, visiblePad, _sanitizeDisplayLine } from "../../function
 import { posseWordmark, roleBrandColor } from "../../functions/display/helpers/brand.js";
 import { jobLabel, jobIsBackgroundAtlasWarm } from "../../functions/display/helpers/job-status.js";
 import { BRIDGE_OPEN_GATE_STATUSES } from "../../../../catalog/bridge.js";
-import { AGENT_CONVERSATION_BOUNDS, AGENT_CONVERSATION_TIER } from "../../../../catalog/agent-conversation.js";
+import { AGENT_CONVERSATION_BOUNDS, AGENT_CONVERSATION_TIER, AGENT_CONVERSATION_MESSAGE_TOOL_TYPES } from "../../../../catalog/agent-conversation.js";
 import { ACTIVE_LEASE_STATUSES, TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 import { humanGateStateAllowsAnswer } from "../../../../catalog/human-input.js";
 import { getAgentActivityEvents, getHumanGate, listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
@@ -22,11 +22,7 @@ import { projectAgentConversation } from "../../../conversation/functions/conver
 import { getDb } from "../../../../shared/storage/functions/index.js";
 // Focus-pane mascot uses saddle tan to stay distinct from the brand marks.
 const MASCOT_FG = "\x1b[38;2;201;148;92m";
-const LIVE_CHANNEL_TOOL_TYPES = new Set([
-  "tool.agent_feedback",
-  "tool.get_operator_feedback",
-  "tool.ack_operator_feedback",
-]);
+const LIVE_CHANNEL_TOOL_TYPES = AGENT_CONVERSATION_MESSAGE_TOOL_TYPES;
 
 function clamp(value, min, max) {
   const n = Number(value);

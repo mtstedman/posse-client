@@ -67,6 +67,7 @@ import { resolveAtlasRepoTarget, resolveAtlasRepoTargetAsync } from "./atlas/rep
 import { normalizeWaitingLaneGeneration, waitingLaneGenerationsEqual } from "../../../catalog/waiting-lane.js";
 import { normalizeAtlasCodeWindowPolicy } from "../../../catalog/atlas-tools.js";
 import { getEffectiveCodeWindowPolicy } from "../../atlas/functions/v2/retrieval/policy.js";
+import { ATLAS_BOOT_REINDEX_POLICY_VALUES } from "../../../catalog/atlas.js";
 
 export {
   ATLAS_ROLE_ORDER,
@@ -287,7 +288,7 @@ function resolveAtlasV2BootTimeoutMs(value = null, config = null) {
 
 function normalizeAtlasBootReindexPolicy(value = null) {
   const raw = String(value || "").trim().toLowerCase();
-  return raw === "always" || raw === "missing" || raw === "smart" ? raw : "smart";
+  return ATLAS_BOOT_REINDEX_POLICY_VALUES.includes(raw) ? raw : "smart";
 }
 
 function atlasBootLedgerNeedsReset(viewStatus = null) {

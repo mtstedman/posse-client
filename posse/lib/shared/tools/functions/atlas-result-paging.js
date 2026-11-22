@@ -8,6 +8,7 @@ import {
   compactCodeStructurePageRows,
   paginateCompactCodeStructure,
   projectCompactCodeStructure,
+  siteLineInPath,
 } from "../../../domains/atlas/functions/v2/retrieval/compact-presentation.js";
 import { contextForHashRefs, hasHashRefScope, recordHashSurfaceFailure } from "./hash-ref-context.js";
 
@@ -146,6 +147,30 @@ export function materializeCodeSurveyPages(data, {
   return firstPage;
 }
 
+// A call-map edge's site is in its calling file, which `from` already names
+// (`path` at file granularity, `path#symbol` otherwise). Such a site becomes
+// its line; any other site keeps its full text. Unresolved rows name no
+// caller, so their sites keep their paths.
+function compactSurveySiteLines(data) {
+  const callMap = data?.callMap;
+  if (!callMap || typeof callMap !== "object") return 0;
+  let compacted = 0;
+  for (const kind of ["edges", "inbound", "outbound"]) {
+    for (const edge of Array.isArray(callMap[kind]) ? callMap[kind] : []) {
+      if (!edge || typeof edge !== "object" || typeof edge.site !== "string") continue;
+      const from = String(edge.from ?? "");
+      const path = edge.site.slice(0, Math.max(0, edge.site.lastIndexOf(":")));
+      if (from !== path && !from.startsWith(`${path}#`)) continue;
+      const siteLine = siteLineInPath(edge.site, path);
+      if (siteLine == null) continue;
+      delete edge.site;
+      edge.siteLine = siteLine;
+      compacted += 1;
+    }
+  }
+  return compacted;
+}
+
 export function compactCodeSurveyResult(toolName, result, {
   args = {},
   context = {},
@@ -156,8 +181,6 @@ export function compactCodeSurveyResult(toolName, result, {
     return { result, compacted: false };
   }
   if (enabled === false) return { result, compacted: false };
-  const hashContext = contextForHashRefs(context);
-  if (!hasHashRefScope(hashContext)) return { result, compacted: false };
 
   let envelope;
   try {
@@ -171,10 +194,14 @@ export function compactCodeSurveyResult(toolName, result, {
   const data = envelope?.data && typeof envelope.data === "object"
     ? envelope.data
     : (Array.isArray(envelope?.files) ? envelope : null);
+  // Before paging, so the stored first page shows the same call map.
+  const unpaged = data && compactSurveySiteLines(data) > 0 ? JSON.stringify(envelope) : result;
+  const hashContext = contextForHashRefs(context);
+  if (!hasHashRefScope(hashContext)) return { result: unpaged, compacted: false };
   const files = Array.isArray(data?.files) ? data.files : null;
   const snapshotFiles = Array.isArray(data?._snapshotFiles) ? data._snapshotFiles : null;
   if (!files || (!snapshotFiles && files.length <= SURVEY_PAGE_FILES)) {
-    return { result, compacted: false };
+    return { result: unpaged, compacted: false };
   }
 
   // A backed snapshot can be identical to the visible inventory. Its mere
@@ -236,6 +263,23 @@ export function compactCodeSurveyResult(toolName, result, {
 // inline instead, with `pagination: null`, so the model is never promised a
 // continuation the store cannot serve.
 const STRUCTURE_PAGE_SURFACED_BY = "structure_page_compactor";
+
+// One record per line: each top-level field, each file and each edge row. A
+// line-oriented traverse search over a stored page then matches one record,
+// not the whole page, without paying indentation on every nested key.
+function structurePageJson(payload) {
+  const records = (items) => `[${items.length > 0 ? `\n${items.map((item) => JSON.stringify(item)).join(",\n")}` : ""}]`;
+  const field = ([key, value]) => {
+    if (Array.isArray(value)) return `${JSON.stringify(key)}:${records(value)}`;
+    if (value && typeof value === "object" && Array.isArray(value.rows)) {
+      const { rows, ...rest } = value;
+      const head = JSON.stringify(rest).slice(1, -1);
+      return `${JSON.stringify(key)}:{${head}${head ? "," : ""}"rows":${records(rows)}}`;
+    }
+    return `${JSON.stringify(key)}:${JSON.stringify(value)}`;
+  };
+  return `{${Object.entries(payload).filter(([, value]) => value !== undefined).map(field).join(",\n")}}`;
+}
 
 function structurePageCursor(page) {
   if (!page?.ref) return null;
@@ -317,7 +361,7 @@ export function compactCodeStructureResult(toolName, result, {
         ...page,
         ...(cursor ? { traversal_ref: cursor } : {}),
       };
-      const payloadText = JSON.stringify(payload, null, 1);
+      const payloadText = structurePageJson(payload);
       const rankStart = index + 1;
       const surfaced = surfaceHashRefForContext(hashContext, {
         entryKind: "materialized",

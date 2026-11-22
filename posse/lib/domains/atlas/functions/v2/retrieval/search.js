@@ -37,6 +37,7 @@ import {
   symbolSearchHasUnusedSlots,
   syncScopeBeamMetadata,
 } from "./search-beam.js";
+import { ATLAS_SEARCH_SCOPES } from "../../../../../catalog/atlas-params.js";
 
 // Module-level dedup so a misconfigured pair (e.g. encoder dim 384,
 // index dim 128) doesn't flood the worker log on every search. Keyed
@@ -654,7 +655,7 @@ export function buildRetrievalTrustCaution({ disambiguation = [], separation = n
  */
 function normalizeSearchScope(value) {
   const text = String(value || "").trim().toLowerCase();
-  return text === "name" || text === "body" || text === "either" ? text : "either";
+  return ATLAS_SEARCH_SCOPES.includes(text) ? /** @type {"name" | "body" | "either"} */ (text) : "either";
 }
 
 /**

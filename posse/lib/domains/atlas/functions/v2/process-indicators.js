@@ -11,12 +11,12 @@ import { getDb } from "../../../../shared/storage/functions/index.js";
 import { C as defaultColors } from "../../../../shared/format/functions/colors.js";
 import { formatDuration, formatTokens } from "../../../../shared/format/functions/units.js";
 import { parseJsonObject } from "../../../queue/functions/payload.js";
-import { FAILED_JOB_STATUSES, FAILED_JOB_STATUSES_SQL } from "../../../../catalog/job.js";
+import { FAILED_JOB_STATUSES, FAILED_JOB_STATUSES_SQL, EXECUTING_JOB_STATUSES } from "../../../../catalog/job.js";
 import { ATLAS_WARM_JOB_TYPE } from "./contracts/jobs.js";
 import { VIEW_SCHEMA_VERSION } from "./contracts/index.js";
 import { ledgerDbPath, mainViewPath, atlasDir, warmedViewsDir } from "./runtime-paths.js";
 
-const ACTIVE_STATUSES = new Set(["leased", "running"]);
+const ACTIVE_STATUSES = new Set(EXECUTING_JOB_STATUSES);
 const WAITING_STATUSES = new Set(["queued", "blocked"]);
 const BAD_STATUSES = new Set(FAILED_JOB_STATUSES);
 

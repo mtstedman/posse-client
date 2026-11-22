@@ -15,6 +15,7 @@ import { memoryDbPathForLedgerDb } from "../runtime-paths.js";
 import { getEffectivePolicy } from "./policy.js";
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 import { scrubSecretText } from "../../../../../shared/telemetry/functions/logging/scrub-secret-text.js";
+import { ATLAS_MEMORY_DOMAINS, ATLAS_MEMORY_FEEDBACK_VERDICTS } from "../../../../../catalog/atlas-params.js";
 
 // Domain is the retrieval FILTER axis: which area of concern a memory is about.
 // `general` is the default catch-all bucket — NOT a wildcard. A scoped search
@@ -24,13 +25,7 @@ import { scrubSecretText } from "../../../../../shared/telemetry/functions/loggi
 // when out-of-domain is safe; everything broadly-relevant (infra, reliability,
 // api, conventions, gotchas) stays `general`.
 const MEMORY_DOMAIN_DEFAULT = "general";
-const MEMORY_DOMAINS = new Set([
-  "general",
-  "ux",
-  "schema",
-  "security",
-  "performance",
-]);
+const MEMORY_DOMAINS = new Set(ATLAS_MEMORY_DOMAINS);
 
 // Lifespan is the pruning tenure axis (internal, never agent-set). A memory is
 // born `ephemeral` and earns `durable` by corroboration (independent
@@ -561,7 +556,7 @@ function memoryFlagInternal({ versionId, params, ledger, repoId }) {
   }));
 }
 
-const MEMORY_FEEDBACK_VERDICTS = new Set(["used", "stale", "wrong", "duplicate", "suppress"]);
+const MEMORY_FEEDBACK_VERDICTS = new Set(ATLAS_MEMORY_FEEDBACK_VERDICTS);
 
 /**
  * Deliberate suppression: soft-delete the memory so it stops surfacing AND

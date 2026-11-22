@@ -26,6 +26,7 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { ASSESSMENT_FAILURE_CLASSES } from "../../../../catalog/human-input.js";
 import { persistReviewedFileCompletion } from "../../../assessment/functions/reviewed-file-completion.js";
 import { isAuthoritativeFinalReviewPass } from "../../../assessment/functions/final-review-authority.js";
+import { JOB_ASSESSOR_MODEL_VERDICTS } from "../../../../catalog/job.js";
 
 const ASSESSOR_SPAWN_ROLE = Object.freeze({
   role: "assessor",
@@ -70,9 +71,9 @@ export function processVerdict(job, verdict, {
     spawn_jobs: Array.isArray(verdict.spawn_jobs) ? verdict.spawn_jobs : [],
   };
 
-  // Map parse_error to valid DB values (CHECK constraint only allows
-  // pass/fail/blocked/needs_replan/needs_review/not_assessed).
-  const validDbVerdicts = new Set(["pass", "fail", "blocked", "needs_replan", "needs_review"]);
+  // Map parse_error (and any other non-model verdict) to a value the
+  // jobs.assessor_verdict CHECK constraint accepts.
+  const validDbVerdicts = new Set(JOB_ASSESSOR_MODEL_VERDICTS);
   const dbConfidence = normalizedConfidence;
 
   let verdictRecorded = false;

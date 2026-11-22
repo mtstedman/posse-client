@@ -10,6 +10,7 @@ import { installedComposerRoots, installedDependenciesMatchLockfile, installedNo
 import { classifyNestedRunnerInfrastructureFailure } from "../../verification/functions/test-runner-failure.js";
 import { validatePlannerTestCommandForRepository } from "../../verification/functions/planner-test-command.js";
 import { runCloseoutTestCommandSync } from "./merge-closeout.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 /** Create one disposable checkout of the staged candidate for merge checks. */
 export function withTemporaryMergeCandidateCheckout({ cwd, git, dependencySources = [] }, use) {
@@ -70,7 +71,7 @@ export function withTemporaryMergeCandidateCheckout({ cwd, git, dependencySource
 
 /** The distinct test commands succeeded dev/fix jobs declared for the merge gate. */
 export function declaredMergeCandidateCommands(jobs = []) {
-  return [...new Set((jobs || []).filter((job) => job.status === "succeeded" && ["dev", "fix"].includes(job.job_type))
+  return [...new Set((jobs || []).filter((job) => job.status === "succeeded" && DEV_ROLE_JOB_TYPES.has(job.job_type))
     .map((job) => String(parseJobPayload(job).test_command || "").trim()).filter(Boolean))];
 }
 
@@ -100,7 +101,7 @@ function runSelectedTests(paths, checkout, run, timeoutMs) {
 /** Verify the staged tree without letting test side effects alter the merge. */
 export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = runCloseoutTestCommandSync, candidate = null, deadlineMs = null, includeDeclared = true, scopeFiles = null }) {
   const commands = includeDeclared ? declaredMergeCandidateCommands(jobs) : [];
-  const files = scopeFiles || jobs.filter(job => job.status === "succeeded" && ["dev", "fix"].includes(job.job_type))
+  const files = scopeFiles || jobs.filter(job => job.status === "succeeded" && DEV_ROLE_JOB_TYPES.has(job.job_type))
     .flatMap(job => { const payload = parseJobPayload(job); return [...(payload.files_to_modify || []), ...(payload.files_to_create || [])]; });
   const runInCheckout = ({ checkout, reset }) => {
     reset();

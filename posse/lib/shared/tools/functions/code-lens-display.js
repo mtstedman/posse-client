@@ -78,6 +78,10 @@ export function codeLensDisplay(parsed, blockOffset = 0) {
     })),
     content_block: blockOffset + 1,
   };
+  // A zero omission count and an empty missing list are the defaults; only a
+  // nonzero count or a missed identifier says something.
+  if (header.omittedMatchCount === 0) delete header.omittedMatchCount;
+  if (Array.isArray(header.identifiersMissing) && header.identifiersMissing.length === 0) delete header.identifiersMissing;
   return {
     header: data === parsed ? header : { ...parsed, data: header },
     blocks: [{ type: "text", text: `${sections.join("\n\n")}\n\n> marks a matching line.` }],

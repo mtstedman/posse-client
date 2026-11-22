@@ -1,5 +1,6 @@
 import { MODEL_TIERS } from "../../../catalog/model.js";
 import { PLANNER_RESEARCH_EFFORT_VALUES } from "../../../catalog/planner-dispatch.js";
+import { RESEARCH_REPAIR_ACTIONS, RESEARCH_REPAIR_REASONS } from "../../../catalog/sub-agent.js";
 
 // The merged child answers every question, so it runs at the strongest tier
 // and effort any of them asked for. Taking the first brief's values ran a
@@ -20,7 +21,7 @@ function mergedBudget(previous, combined) {
     modelTier,
     reasoningEffort,
     repair: raised.length
-      ? { action: "raised", reason: "merged_brief_takes_strongest_budget", to: { model_tier: modelTier ?? null, reasoning_effort: reasoningEffort ?? null }, raised }
+      ? { action: RESEARCH_REPAIR_ACTIONS.RAISED, reason: RESEARCH_REPAIR_REASONS.MERGED_BRIEF_BUDGET, to: { model_tier: modelTier ?? null, reasoning_effort: reasoningEffort ?? null }, raised }
       : null,
   };
 }

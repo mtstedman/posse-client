@@ -1,6 +1,6 @@
 // @ts-check
 import { WORKSPACE_TRAVERSAL_PROFILES } from "./workspace-traversal.js";
-import { readonlySet } from "./readonly-collections.js";
+import { JS_TS_SOURCE_EXTENSIONS } from "./files.js";
 
 
 
@@ -17,4 +17,4 @@ export const PACKAGE_DISCOVERY_SKIP_DIRS = WORKSPACE_TRAVERSAL_PROFILES.package_
 
 export const MAX_DISCOVERED_PACKAGE_ROOTS = 64;
 
-export const JS_PROJECT_EXTENSIONS = readonlySet([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"]);
+export const JS_PROJECT_EXTENSIONS = JS_TS_SOURCE_EXTENSIONS;

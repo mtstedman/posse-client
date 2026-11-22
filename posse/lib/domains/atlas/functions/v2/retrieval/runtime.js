@@ -14,6 +14,7 @@ import { redactSecrets } from "./redaction.js";
 import { ATLAS_RUNTIME_SPECS } from "../contracts/runtimes.js";
 import { SpawnedProcessTerminator } from "../../../../../shared/platform/classes/SpawnedProcessTerminator.js";
 import { trackSpawnedProcess } from "../../../../../shared/platform/functions/spawned-process.js";
+import { ATLAS_RUNTIME_OUTPUT_MODES, ATLAS_RUNTIME_STREAMS } from "../../../../../catalog/atlas-params.js";
 
 /** @typedef {import("../contracts/tool-params.js").RuntimeExecuteParams} RuntimeExecuteParams */
 /** @typedef {import("../contracts/tool-params.js").RuntimeQueryOutputParams} RuntimeQueryOutputParams */
@@ -170,7 +171,7 @@ export async function runtimeExecute({ versionId, params, ledger, repoRoot, repo
   }
 
   const maxLines = clampInt(params.maxResponseLines, 10, MAX_RESPONSE_LINES, DEFAULT_MAX_RESPONSE_LINES);
-  const outputMode = ["minimal", "summary", "intent"].includes(String(params.outputMode || ""))
+  const outputMode = ATLAS_RUNTIME_OUTPUT_MODES.includes(String(params.outputMode || ""))
     ? String(params.outputMode)
     : "minimal";
   const excerpts = params.queryTerms && params.queryTerms.length > 0
@@ -255,7 +256,7 @@ export function runtimeQueryOutput({ versionId, params, repoRoot }) {
     queryTerms,
     maxExcerpts: clampInt(params.maxExcerpts, 1, MAX_EXCERPTS, 10),
     contextLines: clampInt(params.contextLines, 0, MAX_CONTEXT_LINES, 3),
-    stream: ["stdout", "stderr", "both"].includes(String(params.stream || "")) ? String(params.stream) : "both",
+    stream: ATLAS_RUNTIME_STREAMS.includes(String(params.stream || "")) ? String(params.stream) : "both",
   });
   return okEnvelope({
     action: "runtime.queryOutput",

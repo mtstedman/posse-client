@@ -7,6 +7,7 @@ import { sha256Hex } from "../hash.js";
 import { isCanonicalRepoPath } from "../paths.js";
 import { parseSymbolId, symbolIdOf, etagOf } from "./cards.js";
 import { okEnvelope } from "./envelope.js";
+import { ATLAS_EDIT_OPERATIONS } from "../../../../../catalog/atlas-params.js";
 
 /** @typedef {import("../contracts/api.js").View} View */
 /** @typedef {import("../contracts/api.js").ViewSymbol} ViewSymbol */
@@ -164,7 +165,7 @@ function editForFile({ filePath, operation, search, replace, versionId }) {
  */
 function normalizeOperation(value, params) {
   const text = String(value || "").trim();
-  if (["replace", "insert", "delete", "inspect"].includes(text)) return text;
+  if (ATLAS_EDIT_OPERATIONS.includes(text)) return text;
   if (params.search && params.replace != null) return "replace";
   if (params.search && params.replace == null) return "inspect";
   return "inspect";

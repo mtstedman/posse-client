@@ -16,13 +16,14 @@ import { blockedReviewedReservation } from "./reviewed-handoff-journal.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { logDurableEvent } from "./events.js";
 import { reviewedTransferTelemetry } from "../../observability/functions/reviewed-handoff-telemetry.js";
+import { DEV_ROLE_JOB_TYPES } from "../../../catalog/job.js";
 
 const settings = new ReviewedHandoffSettings();
 export function reviewedHandoffsEnabled() { return settings.enabled(); }
 
 export function supportsReviewedAdmission(job, scope) {
   const payload = parseJobPayload(job);
-  return ["dev", "fix"].includes(job.job_type) && [undefined, "code"].includes(payload.task_mode)
+  return DEV_ROLE_JOB_TYPES.has(job.job_type) && [undefined, "code"].includes(payload.task_mode)
     && scope && !scope.assessmentBarrier && !scope.unknown && scope.files?.length > 0
     && !scope.roots?.length && scope.files.every(exactReviewedPath);
 }
