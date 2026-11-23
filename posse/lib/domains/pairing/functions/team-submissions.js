@@ -5,7 +5,7 @@ import { adminGitExec } from "../../git/functions/admin-git.js";
 import { gitPushWithGitHubCliFallback } from "../../git/functions/git-push-auth.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { createPairingRemoteClient } from "./remote-client.js";
-import { repositoryFingerprint } from "./git.js";
+import { lsRemoteRefOid, repositoryFingerprint } from "./git.js";
 import { githubRepositoryName } from "./github-session.js";
 import { findTeamPullRequest, verifyProtectedTeamBranch, verifyPublishedTeamPullRequest } from "./github-team-pr.js";
 import { verifyTeamGrantToken } from "./team-grant-token.js";
@@ -307,9 +307,8 @@ function submittedRefPair(state, workItemId, sourceOid, candidateOid) {
 }
 
 function advertisedOid(projectDir, remote, ref) {
-  const line = git(["ls-remote", remote, ref], projectDir).trim();
-  const [oid, foundRef] = line.split(/\s+/u);
-  return foundRef === ref && OID_RE.test(oid || "") ? oid : null;
+  const oid = lsRemoteRefOid(git(["ls-remote", remote, ref], projectDir), ref);
+  return OID_RE.test(oid || "") ? oid : null;
 }
 
 function fetchExactRef(projectDir, remote, ref, oid) {

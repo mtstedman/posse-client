@@ -219,7 +219,9 @@ export class ServedAccess {
     const relay = await this.waitForRelayOutcome(this.bridge, { signal: this.shutdownAbort.signal });
     if (this.closing) return;
     if (relay.state === "online") this.log("  Phone/web  Online");
-    else if (relay.state === "unauthorized") this.log("  Phone/web  Credential rejected · Run posse serve --pair to repair");
+    // A repository whose Relay access is switched off in the app is rejected
+    // the same way; re-pairing it would mint a duplicate, so say both.
+    else if (relay.state === "unauthorized") this.log("  Phone/web  Credential rejected · If Relay access is off in the Posse app, turn it on; otherwise run posse serve --pair to repair");
     else if (relay.state !== "stopped") this.log(`  Phone/web  Offline (${relay.state}) · Retrying in the background`);
   }
 

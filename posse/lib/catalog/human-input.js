@@ -424,10 +424,10 @@ const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
     diagnostic_insufficient_reason: "Acknowledgement records an operator decision before shared-trunk recovery resumes.",
   },
   "shared_trunk_provenance": {
-    "unresolved_fact": "A task requirement cannot be derived from repository and work-item evidence.",
-    "human_contribution": "ambiguity_resolution",
-    "headless_behavior": "continue_with_best_judgment",
-    "diagnostic_insufficient_reason": "Continuing without an answer requires an explicit best-judgment assumption."
+    "unresolved_fact": "Whether unattributed commits on the session trunk may be accepted as this session's baseline.",
+    "human_contribution": "authority",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "No session operation, member trailer or reviewed provider merge accounts for these commits."
   },
   "post_merge_db_task": {
     "unresolved_fact": "Whether the merged change is deployed, so its deferred task may write the project database.",

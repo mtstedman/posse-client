@@ -11,7 +11,7 @@ import { roleExecutionForBudget } from "../../settings/functions/repository-sett
 import { C } from "../../../shared/format/functions/colors.js";
 import { mergeFailureDiagnostics } from "../../git/functions/merge-failure-diagnostics.js";
 import { resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
-import { addDependency, createJob, getJob, getWorkItem, listJobsByWorkItem, listWorkItems, logEvent, markWorkItemMergeFailed, refreshWorkItemStatus, reopenWorkItemForFollowUp, updateWorkItemMetadata } from "../../queue/functions/index.js";
+import { addDependency, createJob, getJob, getWorkItem, holdForCurrentMergeVerificationReview, listJobsByWorkItem, listWorkItems, logEvent, markWorkItemMergeFailed, refreshWorkItemStatus, reopenWorkItemForFollowUp, updateWorkItemMetadata } from "../../queue/functions/index.js";
 import { ITERATIVE_WORKFLOW_PROFILES, getIterativeReloopPrompt, getIterativeState, getIterativeWorkflowProfile, isIterativeWorkItemActive, iterativeFollowUpJobsAfter, markIterativeFinished, metadataRedTeamPlanningEnabled, parseWorkItemMetadata, persistIterativeState, summarizeIterativeReasons } from "./state.js";
 import { classifyResearchForRouting } from "../../research/functions/intake-routing.js";
 import { createRedTeamPlanChain, redTeamPlanningPayload } from "./red-team-plan.js";
@@ -272,7 +272,31 @@ export async function processIterativeWrapUp({
         reason,
         display,
       });
-      if (!mergeResult.ok && isTransientSharedTrunkMergeResult(mergeResult)) {
+      if (!mergeResult.ok && mergeResult.reviewStale) {
+        // The branch moved since its merge review. Nothing failed: hold for
+        // review of the current commit, as auto-merge does, and keep the
+        // completed passes. A person answers it, so it is not a timed retry.
+        const review = holdForCurrentMergeVerificationReview(wi.id, mergeResult.branchHead);
+        logEvent({
+          work_item_id: wi.id,
+          event_type: EVENT_TYPES.WORK_ITEM_ITERATION_PASS_MERGE_DEFERRED,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Iterative pass merge waits for review of the current branch commit${review?.gate_job_id ? ` (gate #${review.gate_job_id})` : ""}`,
+          event_json: JSON.stringify({
+            pass: refreshed.passCount,
+            branch: wi.branch_name,
+            reason: "review_stale",
+            review_stale: true,
+            gate_job_id: review?.gate_job_id ?? null,
+          }),
+        });
+        say(`  ${C.yellow}[iterate]${C.reset} WI#${wi.id}: branch changed since its merge review; pass merge waits for review of the current commit`);
+        continue;
+      }
+      // A deferral decided by the merge itself (an installer holding the
+      // checkout, an upstream not merged yet, a cold native pulse, a pending
+      // journal row) is retryable exactly like a shared-trunk transient.
+      if (!mergeResult.ok && (mergeResult.deferred === true || isTransientSharedTrunkMergeResult(mergeResult))) {
         // A shared-trunk deferral (merge lock busy, native/transport blip,
         // push contention, pending journal recovery) is retryable by design
         // and must not finalize the iterative WI as merge-failed — the next
@@ -293,18 +317,18 @@ export async function processIterativeWrapUp({
           actor_type: EVENT_ACTORS.SYSTEM,
           message: needsAttention
             ? `Team publication blocked: the work-item grant did not verify after a fresh re-resolution (${mergeResult.reason}). Completed passes are preserved; reissue the grant to resume.`
-            : `Iterative pass merge deferred (${mergeResult.reason || "shared-trunk deferral"}); retrying at next wrap-up`,
+            : `Iterative pass merge deferred (${mergeResult.reason || (mergeResult.sharedTrunk === true ? "shared-trunk deferral" : "merge deferral")}); retrying at next wrap-up`,
           event_json: JSON.stringify({
             pass: refreshed.passCount,
             branch: wi.branch_name,
             reason: mergeResult.reason || null,
-            shared_trunk: true,
+            shared_trunk: mergeResult.sharedTrunk === true,
             ...(needsAttention ? { needs_attention: true, repair_attempted: true } : {}),
           }),
         });
         say(needsAttention
           ? `  ${C.red}[iterate]${C.reset} WI#${wi.id}: Team publication blocked — grant did not verify after re-resolution (${mergeResult.reason}); passes preserved, reissue the grant to resume`
-          : `  ${C.yellow}[iterate]${C.reset} WI#${wi.id}: pass merge deferred (${mergeResult.reason || "shared trunk busy"}); will retry`);
+          : `  ${C.yellow}[iterate]${C.reset} WI#${wi.id}: pass merge deferred (${mergeResult.reason || (mergeResult.sharedTrunk === true ? "shared trunk busy" : "merge deferred")}); will retry`);
         // Only a deferral that time can clear is counted: a caller that stays
         // running retries those, while a blocked grant waits for its reissue.
         if (!needsAttention) deferred++;

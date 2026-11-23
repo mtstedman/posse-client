@@ -95,6 +95,12 @@ async function invokeSharedTrunkMutation(method, args, options) {
   };
 }
 
+// Node-side envelope for git.trunk.fetch and git.trunk.preflight. posse-git
+// gives the network fetch its own 600 s class (a large peer push on a slow
+// link must be able to land; stall detection ends a dead link sooner) plus a
+// few bounded local steps, so the envelope must not be the 30 s local budget.
+export const SHARED_TRUNK_FETCH_TIMEOUT_MS = 660_000;
+
 /** @param {Record<string, unknown>} args @param {Record<string, unknown>} [options] */
 export function fetchSharedTrunkNative(args, options = {}) {
   return invokeSharedTrunkMutation(SHARED_TRUNK_NATIVE_METHODS.FETCH, args, options);

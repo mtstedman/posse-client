@@ -106,6 +106,7 @@ import {
   readPairingPromotionJournal,
 } from "./promotion.js";
 import { waitForPairingSchedulerStop } from "./shutdown.js";
+import { applyProvenanceGateDecision, ensureProvenanceGate, HOST_CLOSE_SESSION_PHASES } from "./provenance-gate.js";
 import {
   activeSessionCloseClaim,
   claimSessionCredentialMutation,
@@ -651,6 +652,18 @@ function describeFinalMemberSync(finalSync) {
 }
 
 async function unpair(projectDir, remoteClient, state = getLivePairingState()) {
+  // A running posse go keeps merging and pushing to the session trunk, and
+  // restoring the checkout refuses under it. Leaving first would end the
+  // session's checks with publication still on, so nothing changes until it
+  // stops.
+  const schedulerLive = state ? getLiveSchedulerBlockMessage("main") : null;
+  if (schedulerLive) {
+    return {
+      ok: false,
+      local: { ok: false, code: "pairing_scheduler_live", message: `Leaving the session refused: ${schedulerLive}` },
+      role: state.role,
+    };
+  }
   clearPairingPeerSnapshot();
   if (!state) return { ok: true, alreadyLeft: true };
   const finalSync = await takeFinalMemberSync(projectDir, state);
@@ -1085,17 +1098,32 @@ async function closeClaimedHostSession(root, remoteClient, state, {
   if (checkoutSharedBranchForClose(root, state.shared_branch) && !json) {
     console.log(`  ${C.dim}[pair close] switched back to ${state.shared_branch} to take the final sync${C.reset}`);
   }
+  // No poll runs while the session closes, so a provenance review answered
+  // since the last one is applied here, before its baseline is read.
+  applyProvenanceGateDecision({ phases: HOST_CLOSE_SESSION_PHASES });
+  state = getPairingState(state.id) || state;
   const provenance = pairingSessionProvenance(state);
   if (!provenance) throw Object.assign(new Error("Final shared-trunk sync lacks session provenance"), {
     code: "session_provenance_unavailable",
   });
   const synced = await retryWhileMergeLockBusy(() => syncSharedTrunkFromOrigin(root, { provenance }));
   if (!synced.ok) {
-    const blocked = synced.reason === "fast_forward_blocked"
+    let blocked = synced.reason === "fast_forward_blocked"
       ? ` (${synced.blockedReason === "dirty"
         ? `${state.shared_branch} has uncommitted changes; commit or stash them, then run \`posse session integrate\``
         : `${synced.blockedReason || "the checkout could not be fast-forwarded"}; switch to ${state.shared_branch} with a clean checkout, then run \`posse session integrate\``})`
       : "";
+    if (synced.reason === "shared_trunk_provenance_blocked") {
+      // Commits that arrived after the last poll have no review yet: raise
+      // the one review this exact tip needs (or reuse it on a retry).
+      const gate = ensureProvenanceGate(synced, { phases: HOST_CLOSE_SESSION_PHASES });
+      const tip = String(synced.remoteSha || "").slice(0, 8) || "its tip";
+      blocked = gate
+        ? ` (${state.shared_branch} at ${tip} holds commits this session cannot attribute; review gate #${gate.id}: `
+          + `answer it (accept/reject), then rerun close: \`posse gate answer ${gate.id} accept\` or \`reject\`)`
+        : ` (${state.shared_branch} at ${tip} holds commits this session cannot attribute, and their review was rejected; `
+          + "inspect the session branch before closing)";
+    }
     throw Object.assign(new Error(`Final shared-trunk sync failed: ${synced.reason || "unknown error"}${blocked}`), {
       code: "pairing_shutdown_sync_failed",
       result: synced,
@@ -2489,17 +2517,29 @@ export async function runPairingCommand(argv = [], {
       keepBranch: args.keepBranch || state.close_action === "keep-branch",
       historyPreserving: args.historyPreserving || state.close_action === "integrate-fast-forward",
     });
+  } else if (state?.role === "host") {
+    result = await finishHostShutdown(root, client, state, {
+      graceful: true,
+      C,
+      json: args.json,
+      reason: "host_leave",
+      keepBranch: args.keepBranch || state.close_action === "keep-branch",
+      historyPreserving: args.historyPreserving || state.close_action === "integrate-fast-forward",
+    });
   } else {
-    result = state?.role === "host"
-      ? await finishHostShutdown(root, client, state, {
+    // A member's posse go drains first: leaving under it would stop the
+    // session's checks while it still merges and pushes.
+    if (state && getLiveSchedulerBlockMessage("main")) {
+      if (!args.json) console.log("\n  Waiting for this clone's posse go to finish its active jobs before leaving.\n");
+      await waitForPairingSchedulerStop({
+        state,
         graceful: true,
-        C,
-        json: args.json,
-        reason: "host_leave",
-        keepBranch: args.keepBranch || state.close_action === "keep-branch",
-        historyPreserving: args.historyPreserving || state.close_action === "integrate-fast-forward",
-      })
-      : await unpair(root, client, state);
+        onProgress: (message) => {
+          if (!args.json) console.log(`  ${C.cyan}[session drain]${C.reset} ${message}`);
+        },
+      });
+    }
+    result = await unpair(root, client, state ? getPairingState(state.id) : state);
   }
   if (args.json) console.log(JSON.stringify(result));
   else if (!state || result.alreadyLeft) console.log("\n  This clone is not paired.\n");
@@ -2642,7 +2682,7 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
 
 export const __testPairingCommandInternals = Object.freeze({
   waitForPairingAdmission, preparePairingEnvironment,
-  monitorPairing, printMemberChanges, finishHostShutdown, retryWhileSessionKeyPropagates,
+  monitorPairing, printMemberChanges, finishHostShutdown, unpair, retryWhileSessionKeyPropagates,
   retireEndedSessionQueueRows, retryWhileMergeLockBusy, runPendingIntegration, printPromotionForApproval,
   askToPublishPromotion, spawnedByLiveSessionOwner, posseWindowScript, acknowledgeOwnerLaunch,
   admissionComputeLease,

@@ -92,7 +92,26 @@ const PAIR_CONFIRM_FRIENDLY = Object.freeze({
   confirmation_mismatch: "Confirmation code doesn't match what the phone committed. Try again with the exact code shown on the phone.",
   already_consumed: "This pair was already completed. Run `posse serve --pair` again if you need to pair another instance.",
   pairing_canceled: "This pairing was canceled. Run `posse serve --pair` again to mint a fresh QR.",
+  bridge_disabled: "Relay access for this repository was turned off in the Posse app while pairing. Turn it back on there, then type `phone` again.",
+  bridge_unavailable: "This repository was removed from the Posse app while pairing. Type `phone` to pair it as a new repository.",
 });
+
+// Start refusals that a fresh pairing must not paper over: re-pairing a
+// disabled repository would mint a duplicate, and re-pairing one owned by
+// another account would move it before the phone's account-switch prompt.
+const PAIR_START_FRIENDLY = Object.freeze({
+  bridge_disabled: "Relay access for this repository is turned off in the Posse app. Turn it back on there; this serve reconnects by itself. To pair it as a new repository instead, remove it in the app, then type `phone`.",
+  bridge_owner_mismatch: "This repository is paired to a different Posse account than this POSSE_KEY. It stays online for that account. To move it, remove it in the Posse app signed in to that account, then type `phone`; or set POSSE_KEY back to that account's key.",
+});
+
+// Relays before the coded refusal said only "forbidden" with this message.
+function pairStartRefusalCode(body) {
+  const code = String(body?.error?.code || "");
+  if (code === "forbidden" && /bridge belongs to another account/iu.test(String(body?.error?.message || ""))) {
+    return "bridge_owner_mismatch";
+  }
+  return code;
+}
 
 /**
  * Bridge-initiated pairing flow (3-step mutual confirmation):
@@ -200,7 +219,8 @@ export async function runPairCommand(
       const { response: cancelRes, body: cancelBody } = await requestBridgePair(cancelUrl, {
         fetchImpl, authHeaders: pairAuthHeaders, body: { qr_token: qrToken }, timeoutMs: cancelTimeoutMs,
       });
-      if (cancelRes.ok || cancelBody?.error?.code === "already_consumed") return;
+      // Nothing is left to clean up once the QR was consumed or has expired.
+      if (cancelRes.ok || ["already_consumed", "qr_token_expired"].includes(cancelBody?.error?.code)) return;
       const message = cancelBody?.error?.message || cancelBody?.message || `HTTP ${cancelRes.status}`;
       log(`  ${C.yellow}Pair cleanup did not complete:${C.reset} ${message}. The QR will expire automatically.\n`);
     } catch (err) {
@@ -212,12 +232,15 @@ export async function runPairCommand(
     // Step 1: ask the relay to mint a QR token. Cancellation is installed
     // before auth or network work, including on the first request.
     const startUrl = bridgePairUrl(pairHttpBase, "start");
+    // A bound re-pair confirms without a new bridge token: the relay bound
+    // this ceremony to the instance this token authenticates.
+    const sentBridgeToken = String(config.relayToken || "").trim();
     let startRes;
     let startBody;
     try {
       pairPulseTokens.assertTrustedResourceUrl(startUrl, "bridge pair start");
       ({ response: startRes, body: startBody } = await requestBridgePair(startUrl, {
-        fetchImpl, authHeaders: pairAuthHeaders, body: { instance_label: config.label, ...(config.relayToken ? { bridge_token: config.relayToken } : {}) },
+        fetchImpl, authHeaders: pairAuthHeaders, body: { instance_label: config.label, ...(sentBridgeToken ? { bridge_token: sentBridgeToken } : {}) },
         signal: ceremonyAbort.signal, timeoutMs: requestTimeoutMs,
       }));
     } catch (err) {
@@ -227,8 +250,13 @@ export async function runPairCommand(
     }
     if (!startRes.ok) {
       const message = startBody?.error?.message || startBody?.message || `HTTP ${startRes.status}`;
-      log(`\n  ${C.red}Relay rejected pair-start:${C.reset} ${message}\n`);
-      return { ok: false, reason: "pair_start_failed", status: startRes.status, body: startBody };
+      const refusal = pairStartRefusalCode(startBody);
+      const friendly = PAIR_START_FRIENDLY[refusal];
+      log(`\n  ${C.red}Relay rejected pair-start:${C.reset} ${friendly || message}\n`);
+      return {
+        ok: false, reason: "pair_start_failed", status: startRes.status, body: startBody,
+        ...(friendly ? { code: refusal } : {}),
+      };
     }
     qrToken = startBody?.qr_token;
     if (!qrToken) {
@@ -349,8 +377,13 @@ export async function runPairCommand(
       return { ok: false, reason: "qr_token_expired" };
     }
 
-    const token = typeof body?.bridge_token === "string" ? body.bridge_token.trim()
-      : body?.instance?.id === config.instanceId ? config.relayToken || "" : "";
+    // A missing bridge_token means the relay bound this pair to the instance
+    // the sent token authenticates, so that token belongs to the returned
+    // instance id even when the local id has drifted. A present but empty or
+    // non-string value is still a failure.
+    const returnedToken = body?.bridge_token;
+    const token = typeof returnedToken === "string" ? returnedToken.trim()
+      : returnedToken == null && sentBridgeToken ? sentBridgeToken : "";
     if (!token) {
       log(`\n  ${C.red}Relay accepted code but returned no bridge_token.${C.reset}\n`);
       return { ok: false, reason: "missing_bridge_token", body };

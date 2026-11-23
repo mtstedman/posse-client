@@ -19,6 +19,7 @@ import {
   casPushSharedTrunkClaimNative,
   getSharedTrunkNativeCapabilities,
   preflightSharedTrunkNative,
+  SHARED_TRUNK_FETCH_TIMEOUT_MS,
 } from "../../git/functions/shared-trunk-native.js";
 
 const OID_RE = /^[0-9a-f]{40,64}$/u;
@@ -197,11 +198,12 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
 
   let remoteEnvelope;
   try {
+    // Preflight begins with a trunk fetch, so it needs the fetch envelope.
     remoteEnvelope = await preflightNative({
       cwd: projectDir,
       remote: config.remote,
       branch: config.branch,
-    });
+    }, { timeoutMs: SHARED_TRUNK_FETCH_TIMEOUT_MS });
   } catch (error) {
     const auth = authFailure(projectDir, config.remote, error, options);
     if (auth) return auth;

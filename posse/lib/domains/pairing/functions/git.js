@@ -344,6 +344,19 @@ export function repositoryFingerprint(remoteUrl) {
   return createHash("sha256").update(canonicalRepositoryLocator(remoteUrl)).digest("hex");
 }
 
+/**
+ * The object `git ls-remote <remote> <ref>` output advertises for exactly
+ * `ref`, or null. Git matches the pattern against each ref's tail, so other
+ * refs ending in the same path (refs/a/<ref>) are listed too and can sort first.
+ */
+export function lsRemoteRefOid(output, ref) {
+  for (const line of String(output || "").split(/\r?\n/u)) {
+    const [oid, name] = line.trim().split(/\s+/u);
+    if (name === ref) return oid || null;
+  }
+  return null;
+}
+
 export function validateRemoteName(remoteName) {
   const value = String(remoteName || "").trim();
   if (value.includes("..") || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value)) {

@@ -99,6 +99,9 @@ export const TEAM_FAILURE_REASONS = Object.freeze({
   PUBLICATION_POLICY_STALE: "team_publication_policy_stale",
   HOST_PROVIDER_MERGE_REQUIRED: "host_provider_merge_required",
   SUBMISSION_IDENTITY_INVALID: "team_submission_identity_invalid",
+  // The originator approved this candidate OID, but its push did not land
+  // (transport failure, unknown outcome, credentials). Journal marker only.
+  APPROVED_PUBLISH_PENDING: "approved_publish_pending",
 });
 
 // Submission lifecycle as Remote reports it. The host decides pending rows;
@@ -127,6 +130,7 @@ export const TEAM_PARKED_CANDIDATE_REASONS = Object.freeze([
   TEAM_FAILURE_REASONS.APPROVAL_PENDING,
   TEAM_FAILURE_REASONS.APPROVAL_UNAVAILABLE,
   TEAM_FAILURE_REASONS.HOST_PROVIDER_MERGE_REQUIRED,
+  TEAM_FAILURE_REASONS.APPROVED_PUBLISH_PENDING,
 ]);
 
 export const TEAM_FATAL_FAILURE_REASONS = Object.freeze([

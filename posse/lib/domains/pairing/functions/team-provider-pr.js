@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import { adminGitExec } from "../../git/functions/admin-git.js";
-import { repositoryFingerprint } from "./git.js";
+import { lsRemoteRefOid, repositoryFingerprint } from "./git.js";
 import {
   configureProtectedTeamBranch,
   createOrVerifyTeamPullRequest,
@@ -33,9 +33,8 @@ function git(projectDir, args) {
 
 function observedRef(projectDir, remote, ref) {
   if (!TEAM_REF_RE.test(ref || "") || ref.includes("..")) return null;
-  const line = git(projectDir, ["ls-remote", remote, ref]).trim();
-  const [oid, foundRef] = line.split(/\s+/u);
-  return foundRef === ref && OID_RE.test(oid || "") ? oid : null;
+  const oid = lsRemoteRefOid(git(projectDir, ["ls-remote", remote, ref]), ref);
+  return OID_RE.test(oid || "") ? oid : null;
 }
 
 function fetchExact(projectDir, remote, ref, oid) {
@@ -77,9 +76,9 @@ export async function configureHostTeamBranchProtection({
       return fail("team_provider_policy_stale");
     }
     const ref = `refs/heads/${state.shared_branch}`;
-    const line = git(projectDir, ["ls-remote", state.remote_name, ref]).trim();
-    const [oid, name] = line.split(/\s+/u);
-    if (name !== ref || oid !== targetOid) return fail("github_target_moved");
+    if (lsRemoteRefOid(git(projectDir, ["ls-remote", state.remote_name, ref]), ref) !== targetOid) {
+      return fail("github_target_moved");
+    }
     const configured = await configureProtectedTeamBranch({
       projectDir, remoteUrl: state.remote_url, targetBranch: state.shared_branch,
       expectedTargetOid: targetOid, requiredCheckContext, requiredCheckAppId,
@@ -174,9 +173,7 @@ export async function prepareTeamSubmissionPullRequest({
     });
     if (!signed.ok || signed.claims.jti !== row.grant_jti) return fail("team_provider_grant_stale");
     const targetRef = `refs/heads/${state.shared_branch}`;
-    const targetLine = git(projectDir, ["ls-remote", state.remote_name, targetRef]).trim();
-    const [advertisedTarget, advertisedName] = targetLine.split(/\s+/u);
-    if (advertisedName !== targetRef || advertisedTarget !== targetOid) {
+    if (lsRemoteRefOid(git(projectDir, ["ls-remote", state.remote_name, targetRef]), targetRef) !== targetOid) {
       return fail("team_provider_refs_stale");
     }
     git(projectDir, ["fetch", "--no-tags", state.remote_name, targetRef]);

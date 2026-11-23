@@ -8,6 +8,7 @@ import { nativeResult, nativeUnavailable, firstString, fetchedClaims, fetchedCla
 
 import {
   TEAM_ATTENTION_FAILURE_REASONS,
+  TEAM_FAILURE_REASONS,
   TEAM_FATAL_FAILURE_REASONS,
   TEAM_PARKED_CANDIDATE_REASONS,
   TEAM_TRANSIENT_FAILURE_REASONS,
@@ -42,8 +43,10 @@ import {
   getSharedTrunkNativeCapabilities,
   pushSharedTrunkNative,
   resetRejectedSharedTrunkNative,
+  SHARED_TRUNK_FETCH_TIMEOUT_MS,
 } from "./shared-trunk-native.js";
 import { gitExec } from "./utils.js";
+import { isPosseRuntimePath } from "../../runtime/functions/ignore.js";
 import { isGitCommandFailure } from "../classes/Repo.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { throwIfAborted } from "../../runtime/functions/yield.js";
@@ -87,7 +90,7 @@ function nativeTrunkOptions(workItemContext, timeoutMs = 30_000, signal = null) 
 }
 
 function sharedTrunkFetch(args, workItemContext = null, signal = null) {
-  return (testOverrides?.fetch || fetchSharedTrunkNative)(args, nativeTrunkOptions(workItemContext, 30_000, signal));
+  return (testOverrides?.fetch || fetchSharedTrunkNative)(args, nativeTrunkOptions(workItemContext, SHARED_TRUNK_FETCH_TIMEOUT_MS, signal));
 }
 
 function sharedTrunkFastForward(args, workItemContext = null, signal = null) {
@@ -146,12 +149,23 @@ async function activeSessionHold() {
   }
 }
 
-async function sessionProvenanceContext() {
+// Session phases in which this checkout is still on the session trunk but no
+// longer publishes for the session: the trailer, write scope and provenance
+// checks are all keyed to `active`, so a merge must wait instead.
+const NON_PUBLISHING_SESSION_PHASES = Object.freeze(["leaving", "restore_blocked"]);
+
+async function sessionProvenanceContext(config = null) {
   const [{ getLivePairingState }, { pairingSessionProvenance }] = await Promise.all([
     import("../../pairing/functions/state.js"),
     import("../../pairing/functions/work-items.js"),
   ]);
   const state = getLivePairingState();
+  if (state && NON_PUBLISHING_SESSION_PHASES.includes(state.phase)
+    && (!config?.branch || state.shared_branch === config.branch)) {
+    throw Object.assign(new Error(`Shared-trunk merge waits: this checkout's session is ${state.phase.replace("_", " ")}`), {
+      code: "session_not_active",
+    });
+  }
   if (!state || state.phase !== "active") return null;
   const provenance = pairingSessionProvenance(state);
   if (!provenance) {
@@ -293,6 +307,13 @@ function refSha(projectDir, ref, { strict = false } = {}) {
   }
 }
 
+// A trunk branch always resolves through refs/heads/: a bare name loses to a
+// same-named tag (a clone or a plain `git fetch` brings tags in), and a tag
+// OID would then read as a moved local trunk on every sync.
+function branchSha(projectDir, branch, options) {
+  return refSha(projectDir, `refs/heads/${branch}`, options);
+}
+
 function restoreParkedCandidate(projectDir, operation) {
   const branchRef = `refs/heads/${operation.targetBranch}`;
   const actualBranch = (() => {
@@ -305,19 +326,15 @@ function restoreParkedCandidate(projectDir, operation) {
   if (refSha(projectDir, branchRef) !== operation.baseSha) {
     return { ok: false, reason: "local_changed" };
   }
-  const dirty = execGit(["status", "--porcelain", "--untracked-files=all"], projectDir, { trim: false })
-    .split(/\r?\n/u)
-    .map((line) => line.trimEnd())
-    .filter(Boolean)
-    .filter((line) => {
-      const statusPath = line.slice(3).replace(/\\/gu, "/").replace(/^"|"$/gu, "");
-      return statusPath !== ".posse"
-        && !statusPath.startsWith(".posse/")
-        && statusPath !== ".posse-worktrees"
-        && !statusPath.startsWith(".posse-worktrees/");
-    })
-    .join("\n")
-    .trim();
+  // `reset --hard` below discards every tracked or staged change, so only
+  // untracked runtime state is harmless. A tracked runtime-directory path
+  // (versioned .posse/skills or .posse/deploy) is a real edit, the same rule
+  // the startup guard applies. -z keeps renamed and quoted paths exact; any
+  // rename or copy record is a staged change and therefore dirty.
+  const records = execGit(["status", "--porcelain=v1", "-z", "--untracked-files=all"], projectDir, { trim: false })
+    .split("\0")
+    .filter(Boolean);
+  const dirty = records.some((record) => !(record.slice(0, 2) === "??" && isPosseRuntimePath(record.slice(3))));
   if (dirty) return { ok: false, reason: "dirty" };
   try {
     // The ref update is the CAS. Reset then materializes the already-validated
@@ -545,8 +562,12 @@ function recordSyncStatus(projectDir, config, {
   }, { increments: unavailable ? { sync_unavailable_count: 1 } : {} });
 }
 
-function recordPublicationHealth(config, unresolved = [], stale = []) {
+// Only reconciliation computes the stale (other-config) rows. Merge-path
+// callers omit `stale`, which leaves the last reconciled view in place instead
+// of zeroing it and re-announcing the same stale rows after every merge.
+function recordPublicationHealth(config, unresolved = [], stale = null) {
   const prior = readRuntimeStatus(RUNTIME_STATUS_KEYS.SHARED_TRUNK) || {};
+  const staleKnown = Array.isArray(stale);
   const rows = Array.isArray(unresolved) ? unresolved : [];
   const publicationUnresolved = rows.length > 0;
   const lastErrorCode = rows
@@ -560,8 +581,10 @@ function recordPublicationHealth(config, unresolved = [], stale = []) {
     publication_unresolved: publicationUnresolved,
     unresolved_operation_count: rows.length,
     last_error_code: lastErrorCode,
-    stale_operation_count: stale.length,
-    stale_operation_ids: stale.slice(0, 16).map((operation) => operation.operationId),
+    ...(staleKnown ? {
+      stale_operation_count: stale.length,
+      stale_operation_ids: stale.slice(0, 16).map((operation) => operation.operationId),
+    } : {}),
   });
   if (publicationUnresolved && prior.publication_unresolved !== true) {
     sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, "Shared-trunk publication requires reconciliation", {
@@ -570,7 +593,7 @@ function recordPublicationHealth(config, unresolved = [], stale = []) {
       last_error_code: lastErrorCode,
     });
   }
-  if (stale.length > 0 && Number(prior.stale_operation_count || 0) !== stale.length) {
+  if (staleKnown && stale.length > 0 && Number(prior.stale_operation_count || 0) !== stale.length) {
     sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, "Stale shared-trunk operations need operator review", {
       stale_operation_count: stale.length,
       operation_ids: stale.slice(0, 16).map((operation) => operation.operationId),
@@ -605,6 +628,10 @@ function teamProofUnavailable(proof, operation) {
     operation,
   };
 }
+
+// Pre-push validation outcomes that the same source commit reproduces on every
+// attempt (see validateCandidate in workflow-push.js).
+const DETERMINISTIC_CANDIDATE_GATE_REASONS = Object.freeze(["conflict_markers", "gate_failed"]);
 
 function isParkedCandidateReason(reason) {
   return TEAM_PARKED_CANDIDATE_REASONS.includes(reason)
@@ -642,6 +669,30 @@ function ensureUnprovablePublicationGate(operation, proof) {
   }).id;
 }
 
+// Proof failures that no later attempt can turn into a proof: the landed
+// candidate is abandoned behind an operator gate instead of retried.
+function isPermanentTeamProofFailure(proof) {
+  const reason = String(proof?.reason || "");
+  return TEAM_FATAL_FAILURE_REASONS.includes(reason) || [
+    "team_approved_submission_missing",
+    "team_approval_receipt_stale",
+    "github_merge_parents_mismatch",
+    "team_candidate_not_on_trunk",
+  ].includes(reason);
+}
+
+// git itself says whether an object exists: true when it is missing, false
+// when present, null when git could not answer.
+function objectMissing(projectDir, sha) {
+  if (!SHA_RE.test(String(sha || ""))) return true;
+  try {
+    execGit(["cat-file", "-e", sha], projectDir);
+    return false;
+  } catch (err) {
+    return isGitCommandFailure(err) && Number(err?.status) === 1 ? true : null;
+  }
+}
+
 function abandonUnprovablePublication(operation, publishedSha, proof) {
   const gateJobId = ensureUnprovablePublicationGate({
     ...operation,
@@ -675,6 +726,10 @@ export function isTransientSharedTrunkMergeResult(result) {
   if (result.team === true) return !TEAM_FATAL_FAILURE_REASONS.includes(reason);
   return [
     "merge_in_progress",
+    // Unknown trunk commits await a human provenance review. The block is on
+    // the trunk, not the work: the WI keeps its worktree and publishes once
+    // the review is answered.
+    "shared_trunk_provenance_blocked",
     "unresolved_shared_trunk_operation",
     "push_retry_exhausted",
     "publication_ambiguous",
@@ -682,6 +737,7 @@ export function isTransientSharedTrunkMergeResult(result) {
     "fast_forward_blocked",
     "remote_head_unresolved",
     "local_trunk_diverged",
+    "local_trunk_ahead",
     "local_candidate_changed",
     "parked_candidate_restore_blocked",
     "merge_operational_failure",
@@ -793,12 +849,12 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
         const recoveredCandidate = candidateRecoveredFromIntent(projectDir, operation);
         if (recoveredCandidate) {
           operation = transition(operation, { phase: "candidate", candidateSha: recoveredCandidate });
-        } else if (refSha(projectDir, operation.targetBranch) === operation.baseSha) {
+        } else if (branchSha(projectDir, operation.targetBranch) === operation.baseSha) {
           operation = transition(operation, { phase: "deferred", lastErrorCode: "intent_recovered" });
           operations.push({ operation, recovered: "deferred" });
           continue;
         } else {
-          const localHead = refSha(projectDir, operation.targetBranch);
+          const localHead = branchSha(projectDir, operation.targetBranch);
           if (localHead && isAncestor(projectDir, localHead, observed.remoteSha)) {
             operation = transition(operation, {
               phase: "deferred",
@@ -815,13 +871,7 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
         const proof = await teamPublishedProof({ projectDir, operation, observedOid: observed.remoteSha });
         throwIfAborted(signal);
         if (!proof?.ok) {
-          if (TEAM_FATAL_FAILURE_REASONS.includes(String(proof?.reason || ""))
-            || [
-              "team_approved_submission_missing",
-              "team_approval_receipt_stale",
-              "github_merge_parents_mismatch",
-              "team_candidate_not_on_trunk",
-            ].includes(String(proof?.reason || ""))) {
+          if (isPermanentTeamProofFailure(proof)) {
             const abandoned = abandonUnprovablePublication(operation, observed.remoteSha, proof);
             operation = abandoned.operation;
             const gateJobId = abandoned.gateJobId;
@@ -859,7 +909,7 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
         const pendingMarker = ["candidate_gate_reset_pending", "rejection_reset_pending", "remote_advance_reset_pending"].includes(operation.lastErrorCode)
           ? operation.lastErrorCode
           : null;
-        const localHead = refSha(projectDir, operation.targetBranch);
+        const localHead = branchSha(projectDir, operation.targetBranch);
         // A trunk merely behind the remote (its head an ancestor of the
         // fetched remote, so it cannot hold this unlanded candidate) needs no
         // reset; the sync fast-forwards it, as the intent arm above assumes.
@@ -1026,12 +1076,12 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
   // dirty; a blocked fast-forward there is shown, not raised as a gate.
   raiseBlockedGate = true,
 } = {}) {
-  recordSyncStatus(projectDir, config, { localSha: refSha(projectDir, config.branch) });
+  recordSyncStatus(projectDir, config, { localSha: branchSha(projectDir, config.branch) });
   const fetched = await fetchRemote(projectDir, config, { includeClaims, claimAfter, workItemContext, signal });
   if (!fetched.ok) {
     if (fetched.unavailable) {
       recordSyncStatus(projectDir, config, {
-        localSha: refSha(projectDir, config.branch),
+        localSha: branchSha(projectDir, config.branch),
         unavailable: true,
         errorCode: syncErrorCode(fetched.reason, "fetch_failed"),
       });
@@ -1050,7 +1100,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
   // is recorded with it so ahead/behind describe this exact pair; otherwise the
   // previous pair's counts would still claim "0 behind" until a fast-forward.
   recordSyncStatus(projectDir, config, {
-    localSha: refSha(projectDir, `refs/heads/${config.branch}`) || null,
+    localSha: branchSha(projectDir, config.branch) || null,
     remoteSha: fetched.remoteSha,
     fetchOk: true,
   });
@@ -1123,7 +1173,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
     ? reconciliation.unresolved.find((operation) => operation.operationId === allowOperationId)
     : null;
   if (allowedOperation && ["candidate", "publish_unknown"].includes(allowedOperation.phase)) {
-    const localSha = refSha(projectDir, config.branch);
+    const localSha = branchSha(projectDir, config.branch);
     recordSyncStatus(projectDir, config, { localSha, remoteSha: fetched.remoteSha, success: true });
     return {
       ok: true,
@@ -1140,7 +1190,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       unavailable: false,
     };
   }
-  const oldSha = refSha(projectDir, config.branch);
+  const oldSha = branchSha(projectDir, config.branch);
   if (holdFastForward === true) {
     // Frozen checkout: record the exact distance to the fetched origin ref so
     // the indicator can show it, but neither move the branch nor claim a
@@ -1201,15 +1251,40 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
   const ff = nativeResult(ffEnvelope) || {};
   const status = String(ff.status || ff.outcome || "").toLowerCase();
   const diverged = ff.diverged === true || status === "diverged" || status === "non_fast_forward";
-  const newSha = firstString(ff, ["newSha", "new_sha", "newOid", "new_oid", "headSha", "head_sha", "oid"]) || refSha(projectDir, config.branch);
+  const newSha = firstString(ff, ["newSha", "new_sha", "newOid", "new_oid", "headSha", "head_sha", "oid"]) || branchSha(projectDir, config.branch);
   const advanced = ff.advanced === true || status === "advanced" || (!!oldSha && !!newSha && oldSha !== newSha);
   if (diverged) {
+    const prior = readRuntimeStatus(RUNTIME_STATUS_KEYS.SHARED_TRUNK) || {};
     recordSyncStatus(projectDir, config, { localSha: oldSha, remoteSha: fetched.remoteSha, diverged: true });
-    sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_DIVERGED, `Shared trunk ${config.branch} diverged from ${config.remote}`, {
-      local_sha: oldSha || null,
-      remote_sha: fetched.remoteSha,
-    });
-    return { ok: false, config, fetchCompleted: true, fetchedClaims: fetched.fetchedClaims, ...claimFetchMetadata(fetched), remoteSha: fetched.remoteSha, diverged: true, advanced: false, oldSha, newSha, reason: "local_trunk_diverged" };
+    // Native reports a checkout strictly ahead of the remote as diverged too.
+    // Local commits on the trunk (a hand commit, the startup "commit" policy)
+    // need a different repair than a true fork, so say which one this is.
+    const { aheadCount, behindCount } = divergenceCounts(projectDir, oldSha, fetched.remoteSha);
+    const localAhead = aheadCount > 0 && behindCount === 0;
+    const remediation = localAhead
+      ? `${aheadCount} commit(s) on ${config.branch} exist only in this checkout. Move them off the session trunk (for example \`git branch keep-local && git reset --keep ${config.remote}/${config.branch}\`) so it can follow ${config.remote} again.`
+      : null;
+    // One event per distinct local/remote pair, not one per poll.
+    const samePair = prior.diverged === true
+      && prior.local_sha === (oldSha || null)
+      && prior.remote_sha === (fetched.remoteSha || null);
+    if (!samePair) {
+      sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_DIVERGED, localAhead
+        ? `Shared trunk ${config.branch} has local commits not on ${config.remote}`
+        : `Shared trunk ${config.branch} diverged from ${config.remote}`, {
+        local_sha: oldSha || null,
+        remote_sha: fetched.remoteSha,
+        ahead_count: aheadCount,
+        behind_count: behindCount,
+        ...(remediation ? { remediation } : {}),
+      });
+    }
+    return {
+      ok: false, config, fetchCompleted: true, fetchedClaims: fetched.fetchedClaims, ...claimFetchMetadata(fetched),
+      remoteSha: fetched.remoteSha, diverged: true, advanced: false, oldSha, newSha,
+      reason: localAhead ? "local_trunk_ahead" : "local_trunk_diverged",
+      ...(remediation ? { remediation } : {}),
+    };
   }
   if (status === "blocked") {
     const blockedReason = String(ff.reason || "").trim() || null;
@@ -1265,6 +1340,10 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
     });
   }
   recordSyncStatus(projectDir, config, { localSha: newSha, remoteSha: fetched.remoteSha, success: true });
+  // A real fast-forward proves the checkout is repairable again. "Unchanged"
+  // proves nothing (native reports it before the dirty check), so only an
+  // advance retires the open repair prompts.
+  if (advanced) retireFastForwardBlockedGates(config, "shared trunk fast-forwarded");
   return {
     ok: true,
     config,
@@ -1401,6 +1480,26 @@ export function cancelSharedTrunkGatesForBranch(branch, reason, { remote = null 
   return canceled;
 }
 
+function retireFastForwardBlockedGates(config, reason) {
+  // Same unanswered statuses as session-end cleanup: a gate being answered
+  // right now is left to its answer.
+  const open = ["queued", "waiting_on_human", "blocked"];
+  const rows = getDb().prepare(`
+    SELECT id FROM jobs
+    WHERE job_type = 'human_input'
+      AND status IN (${open.map(() => "?").join(",")})
+      AND CASE WHEN json_valid(payload_json)
+        THEN json_extract(payload_json, '$.subtype') = 'shared_trunk_fast_forward_blocked'
+          AND json_extract(payload_json, '$.branch') = ?
+          AND (json_extract(payload_json, '$.remote') IS NULL OR json_extract(payload_json, '$.remote') = ?)
+        ELSE 0 END
+  `).all(...open, config.branch, config.remote);
+  for (const row of rows) {
+    if (!forceUpdateJobStatus(row.id, "canceled", { expectedStatuses: open })) continue;
+    setJobResult(row.id, { canceled: true, reason });
+  }
+}
+
 function ensureFastForwardBlockedGate(config, reason) {
   if (!["wrong_checkout", "dirty", "ignored_path_collision"].includes(reason)) return null;
   const existing = getDb().prepare(`
@@ -1472,7 +1571,10 @@ async function strictResetRejected(projectDir, config, operation, remoteOid = op
   const result = nativeResult(envelope) || {};
   const status = pushStatus(result);
   const ok = result.ok === true || result.reset === true || ["reset", "already_reset", "applied", "ok"].includes(status);
-  return ok ? { ok: true, result } : { ok: false, reason: status || "reset_rejected_candidate_failed", result };
+  // A blocked reset names its cause (dirty, wrong_checkout, head_changed, ...)
+  // in `reason`; the outcome tag alone tells an operator nothing.
+  const blockedReason = status === "blocked" ? String(result.reason || "").trim() : "";
+  return ok ? { ok: true, result } : { ok: false, reason: blockedReason || status || "reset_rejected_candidate_failed", result };
 }
 
 /**
@@ -1545,7 +1647,7 @@ export async function mergeToSharedTrunkAsync({
   const workItemContext = team.workItemContext || null;
   let provenance;
   try {
-    provenance = await sessionProvenanceContext();
+    provenance = await sessionProvenanceContext(config);
   } catch (error) {
     return {
       ok: false, deferred: true, sharedTrunk: true, unavailable: true,
@@ -1564,8 +1666,14 @@ export async function mergeToSharedTrunkAsync({
     const sourceSha = refSha(projectDir, branch, { strict: true });
     if (!sourceSha) return { ok: false, reason: "source_head_unresolved", message: `Cannot resolve ${branch}` };
     const key = String(purposeKey || sourceSha);
-    let existing = listUnresolvedSharedTrunkMergeOperations({ workItemId: Number(workItemId) })
-      .find((value) => value.purpose === purpose && value.purposeKey === key) || null;
+    // The journal key is (WI, purpose, purposeKey) and does not name a trunk.
+    // A row settled for another trunk (session changed, remote renamed) is
+    // superseded under a trunk-qualified key instead of blocking this trunk.
+    const trunkKey = `${key}@${config.remote}/${config.branch}`;
+    const onThisTrunk = (value) => value.targetBranch === config.branch && value.remote === config.remote;
+    const keyed = listUnresolvedSharedTrunkMergeOperations({ workItemId: Number(workItemId) })
+      .filter((value) => value.purpose === purpose && (value.purposeKey === key || value.purposeKey === trunkKey));
+    let existing = keyed.find(onThisTrunk) || keyed[0] || null;
     let sync = await syncSharedTrunkAlreadyLocked(projectDir, {
       config,
       allowOperationId: existing?.operationId || null,
@@ -1582,12 +1690,12 @@ export async function mergeToSharedTrunkAsync({
         return { ok: true, sharedTrunk: true, published: true, recovered: true, mergeHash: existing.candidateSha, targetBranch: config.branch, operation: existing };
       }
     }
-    let baseSha = sync.newSha || refSha(projectDir, config.branch, { strict: true });
+    let baseSha = sync.newSha || branchSha(projectDir, config.branch, { strict: true });
     if (!baseSha) return { ok: false, reason: "base_head_unresolved" };
-    let operation = existing || beginSharedTrunkMergeOperation({
+    const beginOperation = (purposeKeyValue) => beginSharedTrunkMergeOperation({
       workItemId: Number(workItemId),
       purpose,
-      purposeKey: key,
+      purposeKey: purposeKeyValue,
       sourceBranch: branch,
       sourceSha,
       targetBranch: config.branch,
@@ -1595,11 +1703,16 @@ export async function mergeToSharedTrunkAsync({
       baseSha,
       expectedRemoteSha: baseSha,
     });
+    let operation = existing || beginOperation(key);
+    if (!onThisTrunk(operation) && ["deferred", "abandoned"].includes(operation.phase)) {
+      operation = beginOperation(trunkKey);
+    }
     if (operation.phase === "abandoned") {
+      // Not tagged `team`: that tag classifies gate and proof results, and an
+      // abandoned operation is terminal for this source commit in every mode.
       return {
         ok: false,
         sharedTrunk: true,
-        team: Boolean(workItemContext),
         deferred: false,
         needsAttention: true,
         reason: "operation_abandoned",
@@ -1645,11 +1758,34 @@ export async function mergeToSharedTrunkAsync({
         try {
           landed = isAncestor(projectDir, operation.candidateSha, baseSha);
         } catch (error) {
-          return { ok: false, unavailable: true, reason: "ancestry_unresolved", error, operation };
+          // merge-base cannot read a parked candidate whose object is gone
+          // (reflog expiry, gc, a journal carried to another clone). A missing
+          // object has neither landed nor can be reused: drop it below.
+          if (objectMissing(projectDir, operation.candidateSha) !== true) {
+            return { ok: false, unavailable: true, reason: "ancestry_unresolved", error, operation };
+          }
         }
         const proof = landed
           ? await teamPublishedProof({ projectDir, operation, observedOid: baseSha })
           : null;
+        // A landed Team candidate is settled only by its proof. Dropping it on
+        // a failed proof would let the empty re-squash settle it unproven.
+        if (landed && !proof?.ok) {
+          if (isPermanentTeamProofFailure(proof)) {
+            const abandoned = abandonUnprovablePublication(operation, baseSha, proof);
+            recordPublicationHealth(config, []);
+            return {
+              ok: false,
+              sharedTrunk: true,
+              deferred: false,
+              needsAttention: true,
+              reason: "team_publication_unprovable",
+              gateJobId: abandoned.gateJobId,
+              operation: abandoned.operation,
+            };
+          }
+          return teamProofUnavailable(proof, operation);
+        }
         if (proof?.ok && proof.legacy !== true) {
           operation = transition(operation, { phase: "candidate" });
           operation = finalizePublished(operation, { remoteSha: baseSha, recovered: true });
@@ -1773,7 +1909,7 @@ export async function mergeToSharedTrunkAsync({
           });
           return { ...local, ...(mergeHash ? { resetPending: true } : {}), operation };
         }
-        const candidateSha = local.mergeHash || refSha(projectDir, config.branch);
+        const candidateSha = local.mergeHash || branchSha(projectDir, config.branch);
         if (!candidateSha) return { ok: false, reason: "candidate_head_unresolved", operation };
         operation = transition(operation, { phase: "candidate", candidateSha, attempt, lastErrorCode: null });
         if (candidateSha === operation.baseSha) {
@@ -1859,7 +1995,12 @@ export async function mergeToSharedTrunkAsync({
         });
         if (!reset.ok) recordPublicationHealth(config, [operation]);
         else recordPublicationHealth(config, []);
-        return { ...validation, ok: false, deferred: reset.ok, publishUnknown: !reset.ok, reset, operation };
+        // Markers in the candidate or a failing pre-push hook reproduce on
+        // every re-squash of the same source, so they are failures that need
+        // a person, not deferrals. Only an unreadable marker check can pass on
+        // a later attempt.
+        const deterministicGateFailure = DETERMINISTIC_CANDIDATE_GATE_REASONS.includes(String(validation?.reason || ""));
+        return { ...validation, ok: false, deferred: reset.ok && !deterministicGateFailure, publishUnknown: !reset.ok, reset, operation };
       }
 
       // Candidate validation may be slow enough for another paired clone to
@@ -1954,7 +2095,7 @@ export async function mergeToSharedTrunkAsync({
           provenance,
         });
         if (!sync.ok) return { ...sync, operation };
-        baseSha = sync.newSha || refSha(projectDir, config.branch);
+        baseSha = sync.newSha || branchSha(projectDir, config.branch);
         operation = transition(operation, {
           phase: "deferred",
           candidateSha: null,
@@ -1990,6 +2131,20 @@ export async function mergeToSharedTrunkAsync({
         };
       }
 
+      // Once the originator has approved this exact OID, a push that did not
+      // land must keep it: a re-squash has a new OID and would need a second
+      // human approval. The parked marker makes reconciliation and reuse
+      // keep the candidate; the transport code survives as an event.
+      const approvedCandidate = approval?.ok === true && approval.legacy !== true;
+      const unlandedPushCode = (code) => {
+        if (!approvedCandidate) return code;
+        sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, `Approved shared-trunk candidate for WI#${workItemId} did not publish (${code}); keeping the approved commit`, {
+          operation_id: operation.operationId,
+          candidate_sha: operation.candidateSha,
+          error_code: code,
+        }, Number(workItemId));
+        return TEAM_FAILURE_REASONS.APPROVED_PUBLISH_PENDING;
+      };
       let pushedEnvelope;
       try {
         pushedEnvelope = await sharedTrunkPush({
@@ -2002,7 +2157,7 @@ export async function mergeToSharedTrunkAsync({
       } catch (err) {
         const auth = sharedTrunkAuthRemediation(projectDir, config, err);
         if (auth) {
-          operation = transition(operation, { phase: "candidate", lastErrorCode: auth.reason });
+          operation = transition(operation, { phase: "candidate", lastErrorCode: unlandedPushCode(auth.reason) });
           recordPublicationHealth(config, [operation]);
           return {
             ok: false,
@@ -2013,19 +2168,19 @@ export async function mergeToSharedTrunkAsync({
             operation,
           };
         }
-        operation = transition(operation, { phase: "publish_unknown", lastErrorCode: err?.code || "push_operational_failure" });
+        operation = transition(operation, { phase: "publish_unknown", lastErrorCode: unlandedPushCode(err?.code || "push_operational_failure") });
         recordPublicationHealth(config, [operation]);
         return { ok: false, publishUnknown: true, reason: "publication_ambiguous", message: err?.message || String(err), operation };
       }
       if (nativeUnavailable(pushedEnvelope)) {
-        operation = transition(operation, { phase: "publish_unknown", lastErrorCode: pushedEnvelope?.reason || "native_capability_unavailable" });
+        operation = transition(operation, { phase: "publish_unknown", lastErrorCode: unlandedPushCode(pushedEnvelope?.reason || "native_capability_unavailable") });
         recordPublicationHealth(config, [operation]);
         return { ok: false, unavailable: true, publishUnknown: true, reason: pushedEnvelope?.reason || "native_capability_unavailable", operation };
       }
       const pushed = nativeResult(pushedEnvelope) || {};
       const auth = sharedTrunkAuthRemediation(projectDir, config, pushed);
       if (auth) {
-        operation = transition(operation, { phase: "candidate", lastErrorCode: auth.reason });
+        operation = transition(operation, { phase: "candidate", lastErrorCode: unlandedPushCode(auth.reason) });
         recordPublicationHealth(config, [operation]);
         return {
           ok: false,
@@ -2119,7 +2274,7 @@ export async function mergeToSharedTrunkAsync({
           provenance,
         });
         if (!sync.ok) return { ...sync, operation };
-        baseSha = sync.newSha || refSha(projectDir, config.branch);
+        baseSha = sync.newSha || branchSha(projectDir, config.branch);
         operation = transition(operation, {
           phase: "deferred",
           candidateSha: null,
@@ -2141,7 +2296,7 @@ export async function mergeToSharedTrunkAsync({
       }
       const status = pushStatus(pushed);
       if (!(pushed.ok === true || pushed.published === true || ["pushed", "published", "already_published", "applied", "ok"].includes(status))) {
-        operation = transition(operation, { phase: "publish_unknown", lastErrorCode: status || "push_outcome_unknown" });
+        operation = transition(operation, { phase: "publish_unknown", lastErrorCode: unlandedPushCode(status || "push_outcome_unknown") });
         recordPublicationHealth(config, [operation]);
         return { ok: false, publishUnknown: true, reason: "publication_ambiguous", operation };
       }
