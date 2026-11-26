@@ -12,6 +12,123 @@ names.
 For first-time setup, start with the [installation walkthrough](installers/README.md).
 Application integrations use the [registered agent bridge](REGISTERED-AGENT.md).
 
+## Iterative tests
+
+Bossy recommends **one test setup** containing the prompt, guidelines, initial
+payload files, metrics, iteration allowance, acceptance policy, model choices
+and budgets. Its existing review card offers **Approve & start**, **Adjust
+setup**, and **Cancel**. Approval launches a Posse-owned runner agent. Bossy
+never walks the user through individual stage/run tool calls.
+
+The runner uses the existing caller-owned agent dispatch framework. The
+coordinator manages the loop; a writer produces scoped candidate edits and an
+assessor reviews them before staging. The optional inexpensive proctor reads
+compact findings and has no mutation authority. Recommended model aliases are
+`strong`/high reasoning for coordinator and assessor, `cheap`/low for writer and
+proctor; the approved setup can change them. Every decision and delegated call
+counts against the same model-call, token, spend and active wall budgets.
+Unknown model usage stops further inference. Token/spend checks stop new calls;
+they cannot undo an overrun by the final in-flight call. Human review time does
+not consume the active wall budget.
+
+**Passing an iteration is different from meeting the goal.** A completed,
+independently scored improvement can pass and be accepted below the goal.
+Automatic acceptance requires the configured primary metric's minimum gain,
+no goal-metric regressions, and all guardrails. Human acceptance pauses the
+runner until a decision; guardrail violations cannot be promoted. Acceptance
+atomically advances the experiment's file snapshot and current baseline.
+Rejection preserves the prior accepted files. The starting baseline never
+changes. This does not publish changes into the source repository.
+
+The owner captures a baseline once and reserves each iteration durably before
+execution. A staged or failed candidate consumes its iteration. Accepted goals
+stop the loop; otherwise the iteration allowance or model budget stops it.
+Revision guards, snapshot digests and idempotency receipts prevent stale review
+and duplicate launches. Owner restart reconciles sandbox work and marks model
+work interrupted; it never silently repeats a potentially billed decision.
+
+**Toolkit › Tests** in Bossy displays active runners, periodic percent complete,
+starting/accepted/current metric values, stale-measurement warnings, decisions,
+budget usage, history and charts using the existing UI components. Human review
+buttons are bound to the displayed candidate revision. Reports update from
+owner telemetry without model calls, and remain available after completion.
+
+Operator CLI:
+
+```sh
+posse experiment setup-schema
+posse experiment setup-validate < setup.json
+# request: {"setup": {...}, "setup_digest": "<reviewed digest>", "idempotency_key": "..."}
+posse experiment launch < approved-setup-request.json
+posse experiment list
+# request: {"id": "<campaign id>"}
+posse experiment progress < campaign.json
+posse experiment status < campaign.json > report.json
+bossy experiment-report < report.json
+posse experiment stop < campaign.json
+```
+
+The lower-level `schema`, `validate`, `create`, `stage`, `run`, `get`, `files`,
+`decide` and `cancel` owner operations remain available for harness integration.
+They are not Bossy assistant actions. `schema` and `validate` only check plan
+structure and never grant execution. `report < measurements.json` retains the
+older provisional v1 artifact formatter; `status` emits owner campaign v2.
+
+### Execution profile and provisioning
+
+The implemented adapter is **offline numeric prediction**, with Python or Node
+JSONL payloads. `experiment schema` includes public templates: stdin carries
+`{case_id,input}` and stdout must return exactly `{case_id,prediction}` once per
+case. Host scoring supports absolute error, squared error and exact match,
+with mean/min/max/p95 aggregation. General test suites, backtests and GPU
+training still need workload adapters; declaring a latency metric does not
+make a numeric scorer measure elapsed latency.
+
+Execution is disabled unless an operator installs a regular, owner-owned 0600
+`experiment-runtime.json` in the automation data directory. Its shape is:
+
+```json
+{
+  "schema": "posse.experiment.runtime.v1",
+  "images": {"node": "sha256:<installed image id>", "python": "sha256:<installed image id>"},
+  "evaluations": {
+    "evaluation-v1": {
+      "schema": "posse.experiment.numeric.v1",
+      "cases": [{"id": "case-1", "input": 2, "expected": 3}],
+      "scorers": {"error": "absolute_error"}
+    }
+  }
+}
+```
+
+Images must already be installed and pinned by image ID; no image pulls,
+package installs or network access occur. Plans must use empty dependency lists
+for this profile. Setup-schema discovery returns evaluation references, digests
+and scorer names without labels. Freeze representative evaluation cases before
+experiments; do not specialize product code to hidden answers.
+
+The backend requires Linux Docker with cgroup v2, effective CPU/memory/pid
+controls, seccomp and a user systemd manager. The container has a read-only
+root and payload mount, no network, dropped capabilities, no privilege gain,
+non-root UID, bounded tmpfs/output, and no owner socket, scorer or labels.
+Owner caps are 2 CPUs, 2 GiB and 600 seconds per execution, one active sandbox.
+One runner campaign is active or awaiting review at a time. A systemd deadline
+removes the container even if the Node owner dies. Missing
+capabilities fail closed; there is no unsandboxed fallback. This boundary
+protects the payload and narrowly issued agent tools, not an operator with
+unrestricted host access.
+
+Run the explicit local integration probe with an installed Node image:
+
+```sh
+node scripts/smoke-experiment-sandbox.mjs sha256:<installed-node-image-id>
+```
+
+It checks isolation, forged/duplicate/incomplete output, flooding, deadlines,
+cancellation, owner-death cleanup and one approved setup through baseline plus
+two accepted iterations. Model decisions are scripted in this probe; container
+execution and scoring are real. It does not provision the live owner or deploy.
+
 ## Architecture
 
 ```text
@@ -1271,6 +1388,16 @@ Promote jobs deterministically copy approved artifacts from
 
 ## Git And Recovery
 
+If Posse reports **database recovery required**, startup stops without replacing
+the queue database. Stop all Posse processes for that repository and preserve
+the database together with its SQLite `-wal`, `-shm`, and `-journal` sidecars
+before attempting recovery. Restore a verified, consistent backup or recover a
+copy with SQLite tooling; retain the original files until the recovered queue,
+work items, decisions, and history have been inspected. Do not delete the runtime
+directory to make startup succeed: that discards operational state. Normal
+SQLite crash/journal recovery still runs; this stop applies to corruption errors,
+and lock or I/O failures remain errors without automatic quarantine.
+
 Mutating jobs run in per-work-item git worktrees. Successful dev/fix/promote
 jobs are committed on the work-item branch. Failed or interrupted work is
 snapshotted before cleanup when possible.
@@ -1985,7 +2112,11 @@ unknown, and waived checks remain visible. The review screen's **Execution
 Check** retains the existing queue/dirty-tree check rather than presenting it
 as proof of product acceptance. Work-item deployment is verified only by an
 exact matching merge-commit receipt; repository-wide publication is shown
-separately. Phone review briefs expose only bounded states and counts.
+separately. `included_in_deployment` means a local Git ancestry check found the
+merge in the verified deployed revision's history. It does not claim current
+behavior is verified: later commits may change or revert it. Missing local
+history stays unverified; outcome inspection never fetches or mutates Git.
+Phone review briefs expose only bounded states and counts.
 
 ### Requirement acceptance evidence
 
@@ -2003,6 +2134,11 @@ judgment about coverage, not an automatic claim that a general test proves every
 requirement. Changed source, contracts or superseding receipts invalidate evidence.
 
 `posse acceptance require <wi-id> <key>` explicitly marks an obligation.
+After inspecting the current plan, `posse acceptance require-all <wi-id>` marks
+all currently tracked requirements as obligations in one atomic operator action.
+It is idempotent and does not automatically require criteria added by later plans.
+Outcome summaries distinguish all unresolved criteria from the subset explicitly
+required; zero required outcomes unresolved does not mean all criteria are proven.
 In strict verification mode, unresolved required obligations defer merging before
 Git mutation; the candidate remains available. Permissive mode reports them only.
 `posse acceptance waive <wi-id> <key> "reason"` records a distinct operator waiver

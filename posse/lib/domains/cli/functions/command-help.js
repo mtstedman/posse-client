@@ -20,7 +20,7 @@ function posseAliasDiagnostic() {
 
 const COMMAND_USAGE = {
   budget: () => console.log(BUDGET_USAGE),
-  acceptance: () => console.log("Usage: posse acceptance show|require|bind|waive <wi-id> [contract:requirement] [receipt-id] [reason]"),
+  acceptance: () => console.log("Usage: posse acceptance show|require|require-all|bind|waive <wi-id> [contract:requirement] [receipt-id] [reason]"),
   local: () => console.log(LOCAL_USAGE),
   add: () => {
     console.log(`\n  Usage: posse add "description of what you want built" [--follow-up <wi-id>] [--follow-up-kind gap|regression|enhancement]`);

@@ -1,16 +1,17 @@
-import { OUTCOME_EXECUTION as E, OUTCOME_VERIFICATION as V, OUTCOME_VERIFIED_COVERAGE, WORK_ITEM_OUTCOME_VERSION } from "../../../catalog/work-item-outcome.js";
+import { OUTCOME_EXECUTION as E, OUTCOME_VERIFICATION as V, OUTCOME_DEPLOYMENT as D, OUTCOME_VERIFIED_COVERAGE, WORK_ITEM_OUTCOME_VERSION } from "../../../catalog/work-item-outcome.js";
 import { reviewVisibleJobs, jobIsDisplayFailure, jobIsWriteStep } from "../../ui/functions/display/helpers/job-status.js";
 import { ASSESSMENT_ONLY_FAILURE_STATES } from "../../../catalog/job.js";
 import { outcomeGuidance } from "./outcome-guidance.js";
 
 // Read-side only: this projection never authorizes a merge or supplies a verdict.
 export function projectWorkItemOutcome({ workItem = {}, jobs = [], receipts = [], candidateCommit = null,
-  publication = {}, mergeCommit = null, acceptance = null, budget = null, waivers = [], gates = [], evidenceAvailable = true } = {}) {
+  publication = {}, mergeCommit = null, deploymentInclusion = null, acceptance = null, budget = null, waivers = [], gates = [], evidenceAvailable = true } = {}) {
   const visible = reviewVisibleJobs(jobs);
   const failed = visible.some(job => jobIsDisplayFailure(job, visible));
   const visibleIds = new Set(visible.map(job => job.id));
   const pending = gates.filter(gate => visibleIds.has(gate.id)).map(gate => ({ gate_id: gate.id, kind: gate.question_kind || gate.review_type || "unknown" }));
-  const execution = failed ? E.FAILED : pending.length || (budget?.enabled && budget.paused_reason) ? E.BLOCKED
+  const execution = workItem.status === "canceled" ? E.CANCELED
+    : failed ? E.FAILED : pending.length || (budget?.enabled && budget.paused_reason) ? E.BLOCKED
     : workItem.status === "complete" ? E.COMPLETE : visible.length ? E.ACTIVE : E.UNKNOWN;
   const implemented = visible.filter(jobIsWriteStep).filter(job => job.status === "succeeded");
   const reviewed = implemented.length > 0 && implemented.every(job => job.assessor_verdict === "pass");
@@ -23,6 +24,9 @@ export function projectWorkItemOutcome({ workItem = {}, jobs = [], receipts = []
   // exact merge commit is named. Later descendants require ancestry evidence.
   const boundPublication = !!mergeCommit && publication.head === mergeCommit;
   const deployed = boundPublication && publication.deployment_state === "verified" && publication.deployment_head === mergeCommit;
+  const included = !!mergeCommit && workItem.merge_state === "merged" && publication.deployment_state === "verified"
+    && publication.head === publication.deployment_head && deploymentInclusion?.merge_commit === mergeCommit
+    && deploymentInclusion?.deployment_commit === publication.deployment_head;
   const outcome = {
     schema_version: WORK_ITEM_OUTCOME_VERSION,
     merge_failed: workItem.merge_state === "merge_failed",
@@ -35,7 +39,7 @@ export function projectWorkItemOutcome({ workItem = {}, jobs = [], receipts = []
     decisions: pending,
     delivery: { local: workItem.merge_state === "merged" ? "merged" : workItem.branch_name ? "unmerged_branch" : "no_branch",
       merge_commit: mergeCommit, publication: boundPublication ? publication.publication_state : "unknown",
-      deployment: deployed ? "verified" : "unverified" },
+      deployment: deployed ? D.VERIFIED : included ? D.INCLUDED : D.UNVERIFIED },
   };
   return { ...outcome, guidance: outcomeGuidance(outcome) };
 }
@@ -51,6 +55,10 @@ export function safeOutcomeBrief(outcome) {
     guidance: outcomeGuidance(outcome),
     budget_paused: !!(outcome.budget?.enabled && outcome.budget.paused_reason),
     acceptance: outcome.acceptance?.state || "untracked", unmet_required: outcome.acceptance?.unmet_required.length || 0,
+    ...(Number.isSafeInteger(outcome.acceptance?.unresolved_count) ? {
+      unresolved_requirements: outcome.acceptance.unresolved_count,
+      advisory_unresolved_requirements: outcome.acceptance.advisory_unresolved_count,
+    } : {}),
     passed_checks: outcome.verification.passed, waived_checks: outcome.verification.waivers.length,
     pending_decisions: outcome.decisions.length, local_delivery: outcome.delivery.local, deployment: outcome.delivery.deployment };
 }

@@ -17,7 +17,7 @@ export function firstTaskReadinessLines(report) {
   return [
     `First-task readiness: ${report.state.replaceAll("_", " ")}`,
     ...[report.repository, report.runtime, ...report.providers, report.verification].map(check => `  [${check.state}] ${check.detail}`),
-    ...report.verification.commands.map(check => `    Declared: ${check.command} (${check.source})`),
+    ...report.verification.commands.map(check => `    Candidate: ${check.command} (${check.source}${check.cwd ? `; run from ${check.cwd}` : ""})`),
     "  Provider readiness is local configuration/runtime evidence; no model request was sent.",
     ...report.next_steps.map(step => `  Next: ${step}`),
     "  First task: choose a small change with a specific, observable result.",

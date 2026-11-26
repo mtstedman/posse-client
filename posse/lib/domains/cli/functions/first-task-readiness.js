@@ -47,9 +47,9 @@ export function collectFirstTaskReadiness({ projectDir, initialized, doctorResul
   let commands = [];
   try { commands = discoverChecks(projectDir); } catch { /* no readiness claim from failed discovery */ }
   const verification = commands.length
-    ? { state: S.READY, detail: "Verification commands are declared; they have not been executed by this report.", commands }
-    : { state: S.NEEDS_ATTENTION, detail: "No supported verification commands were found at this project root.", commands,
-      next: "Identify the task's test command or manual acceptance steps in its plan; nested packages may declare their own commands." };
+    ? { state: S.READY, detail: "Manifest-derived verification candidates were found; they have not been executed. Confirm the project's documented check policy before running them.", commands }
+    : { state: S.NEEDS_ATTENTION, detail: "No supported verification commands were found in the bounded project scan.", commands,
+      next: "Identify the task's test command or manual acceptance steps in its plan; packages outside the scan may declare their own commands." };
   const checks = [repository, runtime, ...providers, verification];
   const state = checks.some(check => check.state === S.BLOCKED) ? S.BLOCKED
     : checks.some(check => check.state === S.NEEDS_ATTENTION) ? S.NEEDS_ATTENTION : S.READY;

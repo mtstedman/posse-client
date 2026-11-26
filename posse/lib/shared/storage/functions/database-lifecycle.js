@@ -37,66 +37,28 @@ export function applyDbPragmas(db, dbPath) {
   return { walEnabled };
 }
 
-export function quarantineStaleIncompleteDb(dbPath, { force = false, ignoreAge = false } = {}) {
-  if (!fs.existsSync(dbPath)) return;
-
-  let stat;
-  try { stat = fs.statSync(dbPath); } catch { return false; }
-  if (!force && stat.size !== 0) return false;
-
-  const siblings = [dbPath, `${dbPath}-journal`, `${dbPath}-wal`, `${dbPath}-shm`]
-    .filter((p) => fs.existsSync(p));
-  if (siblings.length <= 1) return false;
-
-  const newestSiblingMs = Math.max(...siblings.map((p) => {
-    try { return fs.statSync(p).mtimeMs; } catch { return 0; }
-  }));
-  if (!ignoreAge && Date.now() - newestSiblingMs < 5000) return false;
-
-  const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
-  let quarantined = false;
-  for (const filePath of siblings) {
-    try {
-      fs.renameSync(filePath, `${filePath}.corrupt-${stamp}`);
-      quarantined = true;
-    } catch {
-      // Best effort: if another process owns it, let SQLite report the error.
-    }
-  }
-  return quarantined;
-}
-
 export function ensureRuntimeDbDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   try { fs.chmodSync(dir, 0o700); } catch { /* Windows/best-effort */ }
 }
 
 export function openDatabaseHandle(dbPath) {
-  let db = new Database(dbPath);
+  let db;
   try {
-    try {
-      applyDbPragmas(db, dbPath);
-    } catch (err) {
-      try { db.close(); } catch {}
-      if (!isRecoverableDbError(err)
-        || !quarantineStaleIncompleteDb(dbPath, { force: true, ignoreAge: true })) throw err;
-      db = new Database(dbPath);
-      applyDbPragmas(db, dbPath);
-    }
-
-    // A corrupt file may open and fail only on the first schema read.
-    try {
-      db.prepare(`SELECT name FROM sqlite_master WHERE type='table' LIMIT 1`).get();
-    } catch (err) {
-      try { db.close(); } catch {}
-      if (!isRecoverableDbError(err)
-        || !quarantineStaleIncompleteDb(dbPath, { force: true, ignoreAge: true })) throw err;
-      db = new Database(dbPath);
-      applyDbPragmas(db, dbPath);
-    }
+    db = new Database(dbPath);
+    applyDbPragmas(db, dbPath);
+    // SQLite owns journal recovery. Corruption must never turn an existing
+    // queue into a successfully opened empty database.
+    db.prepare(`SELECT name FROM sqlite_master WHERE type='table' LIMIT 1`).get();
     return db;
   } catch (err) {
-    try { db.close(); } catch {}
+    try { db?.close(); } catch { /* retain the original failure */ }
+    if (isRecoverableDbError(err)) {
+      err.message = `Posse database recovery required at ${dbPath}: ${err.message}. `
+        + "Startup stopped; no replacement database was created. Stop all Posse processes for this repository, "
+        + "preserve the database and its SQLite sidecars, and restore a verified backup or recover a copy before retrying. "
+        + "Do not delete the runtime directory to clear this error.";
+    }
     throw err;
   }
 }

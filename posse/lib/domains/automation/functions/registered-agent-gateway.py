@@ -132,11 +132,13 @@ def handle(conn, key):
     relaying = False
     try:
         pid, uid, gid = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        # Consume the bounded request before rejecting an unknown account. Closing
+        # with unread caller bytes can reset the socket and discard the rejection.
+        frame = read_frame(conn, time.monotonic() + READ_TIMEOUT)
+        conn.settimeout(READ_TIMEOUT)
         account = pwd.getpwuid(uid)
         # NSS is authoritative for current membership, not caller-provided JSON.
         groups = sorted(set(os.getgrouplist(account.pw_name, gid)))
-        frame = read_frame(conn, time.monotonic() + READ_TIMEOUT)
-        conn.settimeout(READ_TIMEOUT)
         request = json.loads(frame)
         if not isinstance(request, dict):
             raise ValueError("invalid request")

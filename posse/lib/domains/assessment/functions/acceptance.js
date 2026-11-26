@@ -39,8 +39,12 @@ export function projectAcceptance({ jobs = [], receipts = [], decisions = [], ca
       waiver: waived ? { reason: decision.reason, actor: decision.actor, at: decision.at, commit: candidateCommit } : null };
   });
   const counts = Object.fromEntries(Object.values(S).map(state => [state, requirements.filter(r => r.state === state).length]));
+  const unresolved = requirements.filter(r => ![S.SATISFIED, S.WAIVED].includes(r.state));
   return { schema_version: ACCEPTANCE_VERSION, candidate_commit: candidateCommit,
     contract_digest: createHash("sha256").update(JSON.stringify([...new Set(requirements.map(r => r.contract_digest))].sort())).digest("hex"),
     state: !requirements.length ? "untracked" : counts[S.OPEN] || counts[S.CONSTRAINED] ? "incomplete" : counts[S.WAIVED] ? "accepted_with_waivers" : "evidence_mapped",
-    counts, requirements, unmet_required: requirements.filter(r => r.required && ![S.SATISFIED, S.WAIVED].includes(r.state)).map(r => r.key) };
+    counts, requirements, unresolved_count: unresolved.length,
+    required_count: requirements.filter(r => r.required).length,
+    advisory_unresolved_count: unresolved.filter(r => !r.required).length,
+    unmet_required: unresolved.filter(r => r.required).map(r => r.key) };
 }

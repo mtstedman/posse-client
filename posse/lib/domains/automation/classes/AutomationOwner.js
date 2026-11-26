@@ -21,6 +21,10 @@ import { gatewayKey, verifyGatewayFrame } from "../functions/gateway-auth.js";
 import { automationBuildIdentity, automationOwnerLaunch } from "../functions/owner-identity.js";
 import { definitionDigest, demand } from "../functions/policy.js";
 import { previewOccurrences } from "../functions/triggers.js";
+import { EXPERIMENT_OPERATIONS } from "../../../catalog/experiments.js";
+import { experimentPlanningRequest } from "../../experiments/functions/planning-api.js";
+import { ExperimentService } from "../../experiments/classes/ExperimentService.js";
+import { experimentRuntimeConfig } from "../../experiments/functions/runtime-config.js";
 
 import { AUTOMATION_MAX_REQUEST_BYTES, AUTOMATION_MAX_RESPONSE_BYTES } from "../../../catalog/custom-tools.js";
 
@@ -38,6 +42,7 @@ export class AutomationOwner {
     this.scripts.agentTools = new AgentToolRuntime(this);
     this.agentSchedules = new AgentScheduleRegistry(this.store, this.agentRuntime, this.agentDefinitions);
     this.registered = new RegisteredAgentBridge(this);
+    this.experiments = new ExperimentService(this.store, { ...experimentRuntimeConfig(), assertOwner: () => this.service.assertOwner() });
     this.exposures = new AgentExposureRegistry(this);
     this.socketPath = socketPath; this.operatorToken = operatorToken || ensureAutomationOperatorToken(); this.tickMs = tickMs;
     this.build = build; this.launch = launch;
@@ -67,6 +72,7 @@ export class AutomationOwner {
     this.service.recover();
     this.agentSchedules.recover();
     this.registered.recover();
+    await this.experiments.recover();
     this.registeredServer = net.createServer(socket => {
       if (this.registeredConnections.size >= 64) { socket.destroy(); return; }
       this.registeredConnections.add(socket);
@@ -162,7 +168,7 @@ export class AutomationOwner {
   // agent runs (the last two hold no automation run between tool calls).
   health() {
     const service = this.service.health();
-    return { ...service, active_runs: service.active_runs + this.registered.active.size + this.agentSchedules.active.size, build: this.build, launch: this.launch };
+    return { ...service, active_runs: service.active_runs + this.registered.active.size + this.agentSchedules.active.size + (this.experiments?.activeCount() || 0), build: this.build, launch: this.launch };
   }
   dispatchAgent(request) {
     const claims = verifyMcpOAuthToken(request.token);
@@ -176,6 +182,11 @@ export class AutomationOwner {
     return this.service.tool(principal, request.args || {});
   }
   dispatchOperator(operation, args, { signal } = {}) {
+    if (operation === EXPERIMENT_OPERATIONS.SCHEMA || operation === EXPERIMENT_OPERATIONS.VALIDATE) return experimentPlanningRequest(operation, args);
+    if (Object.values(EXPERIMENT_OPERATIONS).includes(operation)) {
+      demand(!this.service.stopping && this.service.ownsLease(), "Experiment owner is not ready", "owner_fenced");
+      return this.experiments.request(operation, args);
+    }
     switch (operation) {
       case "health": return this.health();
       case "tools.available": return { available: this.service.health().ready === true && this.service.discover(args.principal).length > 0 };
@@ -291,7 +302,7 @@ export class AutomationOwner {
     if (gatewayServer) gatewayServer.close();
     for (const socket of this.registeredConnections) socket.destroy();
     if (server) server.close();
-    await this.registered.shutdown(); await this.agentSchedules.shutdown(); await this.service.shutdown(); if (this.ownsStore) this.store.close();
+    await this.experiments.shutdown(); await this.registered.shutdown(); await this.agentSchedules.shutdown(); await this.service.shutdown(); if (this.ownsStore) this.store.close();
     // A successor may already listen on this path; remove only our own socket.
     if (process.platform !== "win32") {
       try { if (!this.socketFile || sameFile(fileIdentity(this.socketPath), this.socketFile)) fs.unlinkSync(this.socketPath); } catch {}

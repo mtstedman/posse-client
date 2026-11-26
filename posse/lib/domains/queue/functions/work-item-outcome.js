@@ -7,6 +7,8 @@ import { mergeVerificationReviewRequirement, committedJobIdsForWorkItem } from "
 import { getPublicationTelemetry } from "./publication-telemetry.js";
 import { projectWorkItemOutcome } from "../../assessment/functions/work-item-outcome.js";
 import { EVENT_TYPES } from "../../../catalog/event.js";
+import { normalizeProjectDir } from "../../runtime/functions/paths.js";
+import { readDeploymentInclusion } from "../../git/functions/deployment-inclusion.js";
 
 export function readWorkItemOutcome(workItemId) {
   const workItem = getWorkItem(workItemId);
@@ -34,5 +36,7 @@ export function readWorkItemOutcome(workItemId) {
   }
   let acceptance = null;
   try { acceptance = readAcceptance(workItemId); } catch { evidenceAvailable = false; }
-  return projectWorkItemOutcome({ budget: readAdmissionBudget(workItemId), acceptance, workItem, jobs, candidateCommit, receipts, waivers, gates, mergeCommit, evidenceAvailable, publication: getPublicationTelemetry() });
+  const publication = getPublicationTelemetry();
+  const deploymentInclusion = mergeCommit ? readDeploymentInclusion({ projectDir: normalizeProjectDir(), mergeCommit, publication }) : null;
+  return projectWorkItemOutcome({ budget: readAdmissionBudget(workItemId), acceptance, workItem, jobs, candidateCommit, receipts, waivers, gates, mergeCommit, evidenceAvailable, publication, deploymentInclusion });
 }

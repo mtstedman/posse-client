@@ -49,6 +49,20 @@ if (process.argv[2] === "bossy" || process.argv.includes("--bossy")) {
   process.exit(await launchBossy());
 }
 
+// Experiment planning is read-only and must not boot a repository queue.
+if (process.argv[2] === "experiment") {
+  try {
+    const { runExperimentCli } = await import("./lib/domains/experiments/functions/cli.js");
+    const code = await runExperimentCli(process.argv.slice(3));
+    await flushCliOutput();
+    process.exit(code);
+  } catch (error) {
+    process.stderr.write(`experiment_error: ${error?.message || error}\n`);
+    await flushCliOutput();
+    process.exit(1);
+  }
+}
+
 // Read-only repository Atlas access for Bossy, before queue/runtime startup.
 if (process.argv[2] === "atlas-read") {
   try {

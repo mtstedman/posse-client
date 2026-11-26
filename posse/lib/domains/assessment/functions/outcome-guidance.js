@@ -1,4 +1,4 @@
-import { OUTCOME_EXECUTION as E, OUTCOME_VERIFICATION as V, OUTCOME_DESTINATIONS as D } from "../../../catalog/work-item-outcome.js";
+import { OUTCOME_EXECUTION as E, OUTCOME_VERIFICATION as V, OUTCOME_DESTINATIONS as D, OUTCOME_DEPLOYMENT } from "../../../catalog/work-item-outcome.js";
 
 /** Bounded, source-safe copy shared by local and relay surfaces. No raw errors,
  * paths, commands, requirement text, or provider output belongs here. */
@@ -6,7 +6,11 @@ export function outcomeGuidance(outcome) {
   if (!outcome) return { headline: "Outcome evidence unavailable", next: "Inspect the work item before continuing.", destination: D.STATUS };
   const { execution, verification, acceptance, budget, decisions, delivery } = outcome;
   let headline, next, destination;
-  if (decisions.length) {
+  if (execution.state === E.CANCELED) {
+    headline = "Work was canceled";
+    next = "Inspect retained work and evidence before deciding what to do next.";
+    destination = D.REVIEW;
+  } else if (decisions.length) {
     headline = `${decisions.length} decision${decisions.length === 1 ? "" : "s"} waiting for you`;
     next = "Open review and answer the pending decision.";
     destination = D.REVIEW;
@@ -34,9 +38,15 @@ export function outcomeGuidance(outcome) {
     headline = `${acceptance.unmet_required.length} required outcome${acceptance.unmet_required.length === 1 ? "" : "s"} still need evidence`;
     next = "Inspect requirement acceptance and its missing evidence.";
     destination = D.ACCEPTANCE;
+  } else if (acceptance?.state === "incomplete") {
+    headline = "Requirements still need evidence";
+    next = "Inspect unresolved requirements. Advisory criteria do not block merging unless explicitly required.";
+    destination = D.ACCEPTANCE;
   } else if (delivery.local === "merged") {
     headline = "Changes merged locally";
-    next = delivery.deployment === "verified" ? "Deployment evidence matches this merge." : "Review delivery evidence before assuming the changes are deployed.";
+    next = delivery.deployment === OUTCOME_DEPLOYMENT.VERIFIED ? "Deployment evidence matches this merge."
+      : delivery.deployment === OUTCOME_DEPLOYMENT.INCLUDED ? "This merge is in deployed history. Later changes or reverts may affect its behavior; inspect the deployed result."
+        : "Review delivery evidence before assuming the changes are deployed.";
     destination = D.REVIEW;
   } else if (execution.state === E.COMPLETE) {
     headline = "Execution finished; review the result";
@@ -64,7 +74,7 @@ export function outcomeDetailLines(outcome, { workItemId = null } = {}) {
     guidance.headline,
     `Saved work: ${v.commit ? `implementation commit ${v.commit}` : "no implementation commit recorded"}.`,
     `Evidence: ${v.state}; ${v.passed} checks passed; ${v.waivers.length} checks waived. Review: ${outcome.review.verdict}.`,
-    `Requirements: ${outcome.acceptance?.state || "untracked"}; ${outcome.acceptance?.unmet_required?.length || 0} required outcomes unresolved.`,
+    `Requirements: ${outcome.acceptance?.state || "untracked"}; ${Number.isSafeInteger(outcome.acceptance?.unresolved_count) ? `${outcome.acceptance.unresolved_count} unresolved in total; ${outcome.acceptance.advisory_unresolved_count} advisory; ` : ""}${outcome.acceptance?.unmet_required?.length || 0} required outcomes unresolved.`,
     ...(outcome.budget?.enabled ? [`Budget: $${Number(outcome.budget.spent_usd || 0).toFixed(2)} recorded; $${Number(outcome.budget.reserved_usd || 0).toFixed(2)} reserved; ${outcome.budget.unknown_costs || 0} unknown charges${outcome.budget.spend_is_complete ? "" : "; accounting incomplete"}.`] : []),
     `Delivery: ${outcome.delivery.local}; deployment ${outcome.delivery.deployment}.`,
     `Next: ${guidance.next} (${command})`,

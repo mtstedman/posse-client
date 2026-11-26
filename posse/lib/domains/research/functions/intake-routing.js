@@ -341,7 +341,8 @@ export function classifyResearchForRouting({
     ? null
     : repositorySourceInventory(projectDir, { sourceListMaxBytes: directPathMaxSourceBytes });
   const projectMap = { ...(persistedMap || getProjectMapForResearchRouting(projectDir) || {}),
-    ...inventory, candidate_check_commands: discoverCheckCommands(projectDir) };
+    ...inventory, candidate_check_commands: Array.isArray(persistedMap?.candidate_check_commands)
+      ? persistedMap.candidate_check_commands : discoverCheckCommands(projectDir) };
   if (live && workItem?.id && projectMap && !persistedMap) {
     try {
       updateWorkItemMetadata(workItem.id, { ...metadata, research_project_map: projectMap });

@@ -54,6 +54,26 @@ export function rebindAcceptanceDecisionsAfterRefresh(workItemId, { fromHead, to
 }
 
 /** Operator-only API; no agent tool can waive or declare acceptance. */
+export function requireAllAcceptanceRequirements(workItemId) {
+  return runImmediateTransaction(getDb(), () => {
+    const current = readAcceptance(workItemId);
+    if (!current.requirements.length) throw new Error("No tracked requirements; inspect the work item's plan before requiring acceptance.");
+    const wi = getWorkItem(workItemId);
+    const metadata = JSON.parse(wi.metadata_json || "{}");
+    const at = new Date().toISOString();
+    const additions = current.requirements.filter(row => !row.required).map(row => ({
+      action: "require", key: row.key, contract_digest: row.contract_digest,
+      requirement_id: row.id, requirement_text: row.text, artifact_id: null,
+      reason: "", commit: current.candidate_commit, actor: "operator", at,
+    }));
+    if (additions.length) updateWorkItemMetadata(workItemId, {
+      ...metadata, acceptance_decisions: [...(metadata.acceptance_decisions || []), ...additions],
+    });
+    return readAcceptance(workItemId);
+  });
+}
+
+/** Operator-only API; no agent tool can waive or declare acceptance. */
 export function recordAcceptanceDecision(workItemId, { action, key, artifactId = null, reason = "" } = {}) {
   if (!ACCEPTANCE_ACTIONS.includes(action)) throw new Error("Expected require, bind or waive");
   if (action !== "require" && !String(reason).trim()) throw new Error("Evidence mappings and waivers need a reason");
