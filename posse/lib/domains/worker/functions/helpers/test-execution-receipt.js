@@ -628,7 +628,7 @@ async function attributeDeclaredTestFailure(result, plan, { base, scopePaths, po
     })) } : {}) };
 }
 
-async function executeReceipt({
+export async function executeReceipt({
   job,
   plan,
   phase,
@@ -644,6 +644,8 @@ async function executeReceipt({
   allowProjectedBaseline = false,
   signal = null,
   slotKey = null,
+  baselineChecks = null,
+  baselinePlanJobId = null,
 } = {}) {
   signal?.throwIfAborted();
   // Every run below takes the work item's verification slot and stops when
@@ -688,6 +690,7 @@ async function executeReceipt({
     normalized_argv: normalizedArgv,
     normalized_cwd: plan.cwd_relative || ".",
     baseline_commit_hash: phase === "baseline" ? (commitHash || actualCommit) : null,
+    ...(phase === "baseline" && baselinePlanJobId ? { plan_baseline_job_id: baselinePlanJobId } : {}),
     assessed_commit_hash: phase === "post_change" ? (commitHash || actualCommit) : null,
     tree_fingerprint: initialPorcelain
       ? dirtyFingerprintFromDigests(actualCommit, initialPorcelain, initialDirtyDigests)
@@ -834,7 +837,7 @@ async function executeReceipt({
     : cwd;
   const hasExecutionChecks = Array.isArray(plan.execution_checks) && plan.execution_checks.length > 0;
   const rawResult = hasExecutionChecks
-    ? await runVerificationChecks(plan, { cwd, policy: effectivePolicy, phase, ...execution,
+    ? await runVerificationChecks(plan, { cwd, policy: effectivePolicy, phase, baselineChecks, ...execution,
         baselineCommit: plan.capability_base_commit || (baselineReceipt?.status === "passed" ? baselineReceipt.commit_hash : null) || "HEAD" })
     : Array.isArray(plan.unit_test_paths)
     ? await runUnitTestFilesInSlot({
@@ -985,7 +988,7 @@ async function executeReceipt({
   });
 }
 
-async function retryAfterDependencyRepair(receipt, repairDependencies, rerun) {
+export async function retryAfterDependencyRepair(receipt, repairDependencies, rerun) {
   if (receipt?.reason !== "test_task_dependency_unavailable"
     || typeof repairDependencies !== "function") {
     return receipt;

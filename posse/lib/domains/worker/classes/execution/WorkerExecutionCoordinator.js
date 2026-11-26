@@ -1,3 +1,4 @@
+import { ensurePlanBaseline } from "../PlanBaselineCoordinator.js";
 import { prepareDevelopmentEnvironment } from "../../../system/functions/planning-environment-state.js";
 import path from "path";
 import { isLeaseValid, logEvent, updateJobPayload } from "../../../queue/functions/index.js";
@@ -219,6 +220,13 @@ export class WorkerExecutionCoordinator {
       for (const notice of environment.notices) {
         worker.emit(job.id, `${C.yellow}[setup] WI#${job.work_item_id}: ${notice}${C.reset}`);
       }
+
+      await ensurePlanBaseline({ job, cwd: wtPath, signal: executeAbortController?.signal || null,
+        onProgress: (message) => worker.emit(job.id, message),
+        repairDependencies: (baselineJob, receipt, baselineCwd) => repairTestDependencies(worker, baselineJob, baselineCwd, {
+          signal: executeAbortController?.signal || null, phase: "intake", receipt,
+        }),
+      });
 
       // Brief DEV/FIX on the type errors already present in the files it may
       // edit. The job holds its write locks and its worktree is ready here.

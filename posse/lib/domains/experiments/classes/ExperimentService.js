@@ -17,7 +17,7 @@ export class ExperimentService {
   }
   async request(operation, args = {}) {
     const keys = {
-      [O.SETUP_SCHEMA]: [], [O.SETUP_VALIDATE]: ["setup"], [O.LAUNCH]: ["setup", "setup_digest", "idempotency_key"], [O.STOP]: ["id"], [O.INTEGRATE]: ["id", "snapshot_digest", "integration", "idempotency_key"],
+      [O.SETUP_SCHEMA]: [], [O.SETUP_VALIDATE]: ["setup"], [O.LAUNCH]: ["setup", "setup_digest", "idempotency_key"], [O.STOP]: ["id"], [O.INTEGRATE]: ["id", "snapshot_digest", "integration", "idempotency_key"], [O.INTEGRATION_LOG]: ["id", "stage", "check"],
       [O.CREATE]: ["idempotency_key", "plan", "files"], [O.GET]: ["id"], [O.LIST]: [], [O.FILES]: ["id"], [O.REPORT]: ["id"], [O.PROGRESS]: ["id"],
       [O.STAGE]: ["id", "idempotency_key", "expected_revision", "changes", "hypothesis"],
       [O.RUN]: ["id", "idempotency_key", "expected_revision", "snapshot_digest"],
@@ -28,6 +28,7 @@ export class ExperimentService {
       evaluations: Object.entries(this.evaluations).map(([ref, evaluation]) => ({ ref, digest: experimentDigest(evaluation), cases: evaluation.cases?.length ?? 0, scorers: evaluation.scorers || {} })) } };
     if (operation === O.SETUP_VALIDATE) return validateExperimentSetup(args.setup);
     if (operation === O.LAUNCH) return this.runner.launch(args);
+    if (operation === O.INTEGRATION_LOG) return this.integration.log(args);
     if (operation === O.INTEGRATE) return this.integration.launch(args);
     if (operation === O.STOP) { await this.integration.stop(args.id); return { ...(this.runner.load(args.id) ? await this.runner.stop(args.id) : { id: args.id }), integration: this.integration.status(args.id) }; }
     if (operation === O.CREATE) return this.campaigns.create(args);

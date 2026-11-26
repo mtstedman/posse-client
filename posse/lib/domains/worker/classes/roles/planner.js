@@ -1,3 +1,4 @@
+import { ensurePlanBaseline } from "../PlanBaselineCoordinator.js";
 import { buildFollowUpEvidence } from "../../../planning/functions/follow-up-context.js";
 import { repositoryTestInventory } from "../../../verification/functions/test-command-inventory.js";
 import { effectiveGatePolicy } from "../../../../catalog/approval-policies.js";
@@ -1147,6 +1148,9 @@ export class PlannerRole extends BaseRole {
         agent_call_id: plannerStats?.agentCallId || null,
       },
     });
+
+    await ensurePlanBaseline({ job, cwd: worker.projectDir, signal: ctx.abortSignal || null,
+      onProgress: (message) => emit(worker, job.id, message) });
 
     return output;
   }

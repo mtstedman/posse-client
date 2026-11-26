@@ -39,7 +39,8 @@ export function validateExperimentPlan(plan) {
     for (const name of paths) {
       if (Array.from(paths).some(other => other !== name && other.startsWith(`${name}/`))) add("/files", I.PATH_OVERLAP, "A declared file cannot also be a parent directory.");
     }
-    if (!plan.files.some(file => file.path === plan.entrypoint && file.mode !== "read")) add("/entrypoint", I.ENTRYPOINT_SCOPE, "Entrypoint must be a declared editable file.");
+    if (!plan.files.some(file => file.path === plan.entrypoint)) add("/entrypoint", I.ENTRYPOINT_SCOPE, "Entrypoint must be a declared file.");
+    if (!plan.files.some(file => file.mode !== "read")) add("/files", I.FILE_SCOPE, "At least one payload file must be editable.");
     const extension = plan.runtime.profile === "python" ? /\.py$/ : /\.(?:js|mjs|cjs|ts)$/;
     if (!extension.test(plan.entrypoint)) add("/entrypoint", I.RUNTIME_MISMATCH, "Entrypoint extension must match the public runtime profile.");
     const ids = new Set();

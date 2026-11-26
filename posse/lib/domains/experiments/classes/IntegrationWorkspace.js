@@ -7,9 +7,21 @@ import { terminateSpawnedProcessTree, trackSpawnedProcess } from "../../../share
 import { filterProcessEnv } from "../../../shared/platform/functions/process-env.js";
 import { experimentDigest } from "../functions/snapshots.js";
 import { integrationRelativePath } from "../functions/integration-config.js";
+import { IntegrationTrunk } from "./IntegrationTrunk.js";
 
 export class IntegrationWorkspace {
-  constructor(config, { git = gitExecAsync, commit = gitCommitAllAsync } = {}) { this.config = config; this.git = git; this.commit = commit; }
+  constructor(config, { git = gitExecAsync, commit = gitCommitAllAsync, lock } = {}) { this.config = config; this.git = git; this.commit = commit; this.trunk = new IntegrationTrunk(this, { lock }); }
+  async validateBindings(files, signal) {
+    const c = this.config;
+    for (const item of c.mapping || []) {
+      const scope = this.declared(item.target, true);
+      const entry = String(await this.git(["ls-tree", c.base_commit, "--", item.target], c.repo_path, { signal })).trim();
+      if (scope.mode === "create") { if (entry) throw new Error("Mapped creation already exists at the base commit."); continue; }
+      if (!/^100(644|755) blob /.test(entry)) throw new Error("Mapped source must be a regular repository file.");
+      const source = String(await this.git(["show", `${c.base_commit}:${item.target}`], c.repo_path, { signal, trim: false }));
+      if (source !== files[item.source]) throw new Error(`Starting payload differs from repository source: ${item.target}. Test the shippable source directly or explicitly choose agent adaptation.`);
+    }
+  }
   async command(args, signal) { return String(await this.git(args, this.config.worktree_path, { signal })).trim(); }
   async safePath(file, { missing = false, directory = false } = {}) {
     if (file !== "." && !integrationRelativePath(file)) throw new Error("Invalid relative path.");
@@ -118,8 +130,10 @@ export class IntegrationWorkspace {
     const changed = (await this.command(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"], signal)).split("\0").filter(Boolean).sort();
     for (const file of changed) {
       this.declared(file, true);
-      const target = await this.safePath(file);
-      files[file] = { content: await fs.readFile(target, "utf8"), executable: !!((await fs.stat(target)).mode & 0o111) };
+      await this.safePath(file);
+      const entry = await this.command(["ls-tree", hash, "--", file], signal);
+      if (!/^100(644|755) blob /.test(entry)) throw new Error("Committed file is not regular source.");
+      files[file] = { content: String(await this.git(["show", `${hash}:${file}`], this.config.worktree_path, { signal, trim: false })), executable: entry.startsWith("100755 ") };
     }
     if (experimentDigest(files) !== record.verification.digest) throw new Error("Commit differs from the verified changes.");
     return hash;

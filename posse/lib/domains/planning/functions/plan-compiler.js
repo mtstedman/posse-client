@@ -1,3 +1,4 @@
+import { registerPlanBaseline } from "./plan-baseline.js";
 import { PLANNER_EXISTING_JOB_PREFIX } from "../../../catalog/planning.js";
 import { retainedExistingJobDependencies, validExistingJobDependency } from "./existing-job-dependencies.js";
 import { captureRequirementContract, compileRequirementContracts, requirementContracts as inheritedContracts } from "./requirement-contract.js";
@@ -295,6 +296,7 @@ export function createJobsFromPlan(worker, planJob, tasks, options = {}) {
   try {
     stampPlanCompile(planJob, attemptId, false);
     compileJobsFromPlan(worker, planJob, tasks, options, createdJobIds);
+    registerPlanBaseline(planJob, createdJobIds);
     // Inside the try: a batch whose completion could not be recorded is
     // canceled like any other failed compile, so the retry cannot duplicate it.
     stampPlanCompile(planJob, attemptId, true);

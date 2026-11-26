@@ -39,8 +39,8 @@ runner until a decision; guardrail violations cannot be promoted. Acceptance
 atomically advances the experiment's file snapshot and current baseline.
 Rejection preserves the prior accepted files. The starting baseline never
 changes. Acceptance alone does not change the source repository. An optional
-integration agent can adapt the accepted snapshot, verify it, and commit it on
-a new local branch, as described below.
+integration configuration can verify the accepted source, commit it, and merge
+it into the main worktree, as described below.
 
 The owner captures a baseline once and reserves each iteration durably before
 execution. A staged or failed candidate consumes its iteration. Accepted goals
@@ -70,55 +70,100 @@ bossy experiment-report < report.json
 posse experiment stop < campaign.json
 ```
 
-### Integrating accepted code
+### Compact agent context
 
-Add an optional `integration` object to the setup to close the loop automatically.
-It runs after a goal, iteration limit, or model budget stops the experiment, only
-when a changed candidate has been accepted. Integration has its own explicit
-budget and model choice; `standard` with `medium` reasoning is a useful starting
-point. `setup-schema` includes the complete integration configuration schema,
-and `setup-validate` includes this authority in its summary and setup digest.
+Agents receive separate **accepted** and **rejected** tables with column names
+once and one row per decision. Each row includes the change and measurements;
+rejected rows also include the reason. Agent context retains the latest eight
+rows per table and reports how many older rows were omitted. The campaign
+report retains the full tables and its existing iteration history for charts.
 
-For an already completed experiment, use:
+Writers receive editable source within a 24 KiB allowance and an inventory of
+other files; `test.read` retrieves bounded source ranges when needed. Writers
+can submit exact replacement patches. Assessors receive changed spans and can
+read accepted or candidate source rather than receiving both complete snapshots.
+Truncated spans are explicit and require further reading before approval.
+Integration adaptation uses compact current state and recent action receipts,
+not an accumulating transcript of source reads, writes, and successful logs.
+Successful checks return short receipts; failures include bounded diagnostics,
+and `integration.check_log` retrieves the stored log on demand. Operators can use
+`posse experiment integration-log` with `{id,stage,check}` (`stage` is `candidate`
+or `trunk`, and `check` is a zero-based index). Reports include
+per-role request-byte totals/peaks and reported input/output token counts;
+request bytes measure context size, not billable tokens.
+
+### Integrating accepted code into trunk
+
+Add `integration` to the setup to close the loop automatically after a goal,
+iteration limit, or model budget stops an experiment with an accepted change.
+`setup-schema` includes the complete schema and an `integration_example` using
+**`strategy: "direct"`**. Direct integration uses **zero model calls and tokens**.
+
+Test the actual shippable source as the writable payload. Keep JSONL wrappers,
+fixtures, and adapters read-only. Map each writable payload file to exactly one
+writable repository file, for example:
+
+```json
+{
+  "strategy": "direct",
+  "repo_path": "/absolute/path/repo",
+  "worktree_path": "/absolute/path/task-worktree",
+  "branch": "experiment/algorithm",
+  "trunk_branch": "main",
+  "base_commit": "<full pinned commit>",
+  "commit_message": "Apply accepted algorithm experiment",
+  "mapping": [{"source": "work/algorithm.mjs", "target": "src/algorithm.mjs"}],
+  "files": [{"path": "src/algorithm.mjs", "mode": "modify"}],
+  "prepare": [],
+  "checks": [{"program": "npm", "args": ["test"], "cwd": ".", "timeout_seconds": 120}],
+  "budget": {"model_calls": 0, "tokens": 0, "spend_usd": 0, "wall_seconds": 600}
+}
+```
+
+For modified repository files, starting payload bytes must equal the pinned
+repository source. Validation rejects a transformed adapter being substituted
+for source before the experiment starts. The harness copies the accepted bytes,
+runs the fixed repository checks, commits, and updates the declared trunk in
+`repo_path`. Unchanged trunk fast-forwards to that exact verified commit. If
+trunk advanced, the harness cleanly merges it into the isolated candidate and
+checks the combined tree before fast-forwarding trunk. It uses the existing
+Git worktree/branch locks and scoped commit machinery. It does not push or deploy.
+
+Dirty trunk, changed checkout, conflicts, or failing merged-tree checks stop
+without overwriting user work or dispatching an agent to redo the experiment.
+`merge_blocked` retains the verified candidate and diagnostics. Replaying the
+same integration request retries only the merge/check work. Restart recovery
+reconciles a recorded merge candidate already present in trunk rather than
+creating another commit. Earlier failures without a verified commit preserve
+the worktree and require a new request key, branch, and worktree for another try.
+
+When adaptation is actually required, explicitly select `strategy: "agent"`
+and provide `instructions`, `model`, `reasoning_effort`, and positive model-call,
+token, and spend budgets. This uses the compact agent context above; a configured
+`trunk_branch` then enables the same deterministic merge. Legacy configurations
+without `strategy` retain their previous agent behavior and do not gain trunk
+write authority unless `trunk_branch` is supplied. Direct mode never silently
+falls back to agent adaptation.
+
+For an already completed experiment:
 
 ```sh
-# {"id":"<campaign>","snapshot_digest":"<current accepted digest>",
+# {"id":"<campaign>","snapshot_digest":"<accepted digest>",
 #  "integration":{...},"idempotency_key":"integrate-v1"}
 posse experiment integrate < integration-request.json
 posse experiment status < campaign.json
 ```
 
-The integration configuration supplies `repo_path`, a full `base_commit`, a
-fresh `worktree_path`, a new `experiment/` branch, `instructions`, a fixed
-`commit_message`, `files` with exact `read`/`modify`/`create` paths, `prepare`
-commands, `checks`, `model`, `reasoning_effort`, and `budget`. Each command is
-`{program,args,cwd,timeout_seconds}`; `cwd` is relative to the new worktree.
-For example, a Node repository might use `npm ci` in preparation and `npm test`
-plus `npm run typecheck` as checks. Supply repository instructions as declared
-read files. Dependencies and build output must stay ignored by Git.
-
 This is operator-owned **host execution authority**, distinct from sandbox
-payload edits. Review the paths, commands, and additional budget before launch.
-Commands are fixed argv lists, run without a shell with bounded time and output;
-the model cannot choose commands or expand its file scope. The integrator uses
-the existing agent-dispatch route and Git scoped-commit machinery. It reads the
-accepted payload and public findings, never private evaluation labels.
-
-Checks must succeed without changing the source tree. Edits invalidate previous
-verification; the commit receipt binds the exact verified changes, base commit,
-campaign, and accepted snapshot. `status`, `progress`, and `list` expose the
-integration state, verification results, usage, worktree, branch, and commit.
-`stop` also interrupts integration. Replaying the same integration request
-returns its receipt; changing it under the same key fails. Failed/interrupted
-worktrees are preserved. To retry after inspecting a failure, use a new key,
-branch, and worktree. A restart reconciles a completed commit rather than
-repeating it or billing another model call.
-
-Integration commits locally. It does not merge, push, or deploy. Adapted code
-still needs repository regressions and appropriate real-world validation;
-experimental metrics belong to the original accepted snapshot. The harness is
-shared across repositories; the file mapping, dependency setup, checks, and
-adaptation instructions are repository configuration.
+payload edits. Paths, commands, trunk destination, and budgets are included in
+the validated setup summary and digest. Commands are fixed argv lists, run
+without a shell with bounded time/output; `cwd` is worktree-relative. Dependencies
+and build output must stay ignored by Git. Checks must succeed without changing
+the source tree. Status/report receipts bind the accepted snapshot, verified
+commit, merged tree, and trunk commit. `stop` interrupts unfinished work. No
+private evaluation labels are exposed to models. Adapted or merged code still
+needs appropriate real-world validation; original experiment metrics remain
+attached to the original accepted snapshot.
 
 The lower-level `schema`, `validate`, `create`, `stage`, `run`, `get`, `files`,
 `decide` and `cancel` owner operations remain available for harness integration.
@@ -443,6 +488,13 @@ Per-job verification runs the job's selected or owned tests. Commands that
 discover the full suite remain integration obligations at the isolated merge
 gate. Post-change verification runs the assessed commit in a detached checkout,
 so concurrent edits and test cleanup cannot modify another agent's work.
+
+Submitting a development plan registers its starting commits for shared baseline
+verification. Before its developers begin, Posse collects each starting point in
+one detached checkout and shares identical checks across the plan's tasks.
+Each task retains its own frozen receipt, including existing failures. Completed
+receipts survive restarts; different commits, policies, and environments remain
+separate. Post-change checks still verify each task's resulting code.
 
 The flag applies only to that run. Omitting it, or using `--scope-mode=default`,
 preserves the existing `scope_auto_approval` policy and interactive or

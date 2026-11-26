@@ -162,7 +162,7 @@ export function aggregateCheckCoverageStatus(checkRuns = []) {
   return "unknown";
 }
 
-export async function runVerificationChecks(plan, { cwd, policy, phase = null, signal = null, baselineCommit = plan.capability_base_commit || "HEAD", slotKey = null, onSlotWait = null } = {}) {
+export async function runVerificationChecks(plan, { cwd, policy, phase = null, signal = null, baselineCommit = plan.capability_base_commit || "HEAD", slotKey = null, onSlotWait = null, baselineChecks = null } = {}) {
   const checks = Array.isArray(plan.execution_checks) && plan.execution_checks.length > 0
     ? plan.execution_checks : [{ ...plan, id: plan.check_id }];
   // Each check gets the policy's full wall. The plan as a whole is bounded by
@@ -204,9 +204,15 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
       continue;
     }
     const checkWall = Math.min(wall, remaining);
-    const run = await runVerificationCheck(check, { cwd,
-      baselineCommit, filesToCreate: plan.files_to_create || [], policy: { ...policy, wall_timeout_ms: checkWall, idle_timeout_ms: policy.idle_timeout_ms == null
-        ? null : Math.min(policy.idle_timeout_ms, checkWall) }, phase, signal, slotKey, onSlotWait: onCheckSlotWait });
+    const checkPolicy = { ...policy, wall_timeout_ms: checkWall, idle_timeout_ms: policy.idle_timeout_ms == null
+      ? null : Math.min(policy.idle_timeout_ms, checkWall) };
+    const execute = () => runVerificationCheck(check, { cwd, baselineCommit,
+      filesToCreate: plan.files_to_create || [], policy: checkPolicy, phase, signal, slotKey, onSlotWait: onCheckSlotWait });
+    const result = baselineChecks && phase === "baseline"
+      ? await baselineChecks.run(check, { cwd, policy: checkPolicy, signal }, execute)
+      : await execute();
+    const run = { ...result, check_id: check.id || check.check_id || null,
+      command: check.command, required: check.required !== false, intent: check.intent || "test" };
     runs.push(run.status === "timed_out" && run.timeout_kind !== "idle" && checkWall < wall
       ? budgetExhausted(check, { timeout_kind: "plan_budget", duration_ms: run.duration_ms || 0,
         stdout: run.stdout || "", stderr: run.stderr || "", test_counts: run.test_counts || null })
@@ -237,6 +243,7 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
       cwd_relative: run.cwd_relative || null, execution_root: run.execution_root || cwd,
       stdout: String(run.stdout || "").slice(0, MAX_STREAM_CHARS), stderr: String(run.stderr || "").slice(0, MAX_STREAM_CHARS),
       file_results: run.file_results || [],
+      ...(run.baseline_shared ? { baseline_shared: true } : {}),
       ...(run.required != null ? { required: run.required } : isUnrunnableTestResult(run) ? { required: false } : {}),
       status: run.status, ok: run.ok, reason: run.reason, exit_code: run.code,
       duration_ms: run.duration_ms, test_counts: run.test_counts || null,

@@ -1,3 +1,4 @@
+import { decisionTables } from "./agent-context.js";
 import { EXPERIMENT_CAMPAIGN_REPORT_SCHEMA } from "../../../catalog/experiments.js";
 
 export function campaignReport(c) {
@@ -11,6 +12,7 @@ export function campaignReport(c) {
       values: Object.fromEntries(c.plan.metrics.map(metric => [metric.id, c.active_run.progress?.metrics.find(item => item.id === metric.id)?.current ?? null])) } : null,
     current_baseline_snapshot: c.current_baseline.snapshot_digest,
     metrics: c.plan.metrics.map(metric => ({ ...metric, baseline: c.starting_baseline.metrics?.[metric.id] ?? null, current_baseline: c.current_baseline.metrics?.[metric.id] ?? null })),
+    decision_tables: decisionTables(c, c.iterations.length || 1),
     iterations: c.iterations.map(row => {
       const live = c.active_run && !c.active_run.baseline && row.status === "running" ? c.active_run.progress : null;
       return { number: row.number, status: row.status, snapshot_digest: row.snapshot_digest,
