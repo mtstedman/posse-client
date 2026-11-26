@@ -20,7 +20,7 @@ export async function runExperimentCli(argv = [], { input = process.stdin, print
   else if (action === "schema") result = experimentPlanningRequest(EXPERIMENT_OPERATIONS.SCHEMA);
   else if (action === "setup-schema") result = experimentSetupContract();
   else if (action === "list") result = await request(EXPERIMENT_OPERATIONS.LIST, {});
-  else if (["init", "validate", "setup-validate", "launch", "integrate", "integration-log", "case-results", "stop", "report", "create", "get", "stage", "run", "decide", "files", "progress", "status", "cancel"].includes(action)) {
+  else if (["corpus-contract", "corpus-options", "corpus-prepare", "corpus-status", "corpus-bind", "init", "validate", "setup-validate", "launch", "integrate", "integration-log", "case-results", "stop", "report", "create", "get", "stage", "run", "decide", "files", "progress", "status", "cancel"].includes(action)) {
     const limit = action === "validate" ? EXPERIMENT_LIMITS.planBytes : EXPERIMENT_LIMITS.reportBytes;
     const chunks = []; let bytes = 0;
     for await (const chunk of input) {

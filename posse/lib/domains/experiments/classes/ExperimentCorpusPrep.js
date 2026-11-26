@@ -141,11 +141,12 @@ export class ExperimentCorpusPrep {
     for (const key of ['model_calls', 'tokens', 'spend_usd', 'wall_seconds']) if (!Number.isFinite(config[key]) || config[key] <= 0 || config[key] > D[key] * 10) throw new Error(`Invalid prep budget: ${key}`);
     this.identity = { experiment: args.experiment, corpus: args.corpus };
     let snapshot;
-    try { snapshot = await this.store.load(this.identity); } catch (error) {
+    try { snapshot = await this.store.load(this.identity); if (args.require_new) throw new Error('Corpus already exists; choose use or expand.'); } catch (error) {
       if (error.code !== 'ENOENT') throw error;
       await this.store.prepareInputs(this.identity);
       snapshot = args.contract ? await this.store.create({ ...this.identity, contract: args.contract }) : { id: `${args.experiment}/${args.corpus}`, revision: null, contract: null, entries: [] };
     }
+    if (args.expected_revision && args.expected_revision !== snapshot.revision) throw new Error('Corpus revision changed before preparation.');
     this.revision = snapshot.revision; this.contract = snapshot.contract;
     this.paths = this.store.paths(args.experiment, args.corpus);
     const root = path.join(this.paths.root, 'prep'); await fs.mkdir(root, { recursive: true, mode: 0o700 });

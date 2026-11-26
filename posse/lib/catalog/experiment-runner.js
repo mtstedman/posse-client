@@ -1,3 +1,4 @@
+import { EXPERIMENT_INIT_DEFAULTS } from './experiment-workspace.js';
 import { EXPERIMENT_SETUP_SCHEMA, EXPERIMENT_PLAN_JSON_SCHEMA, EXPERIMENT_RUNNER_ROLES, experimentPlanExample } from "./experiments.js";
 import { AGENT_REASONING_EFFORTS } from "./agent.js";
 
@@ -23,8 +24,8 @@ export function experimentSetupContract() {
     prompt: "Improve the algorithm against the declared metrics and return the best accepted version and a concise report.",
     guidelines: "Keep the public interface stable. Use general improvements. Never infer or special-case hidden evaluation answers.",
     plan, files: { "work/candidate.py": "# Supply the starting implementation before approval.\n" },
-    models: Object.fromEntries(EXPERIMENT_RUNNER_ROLES.map(role => [role, { model: ["coordinator", "assessor"].includes(role) ? "strong" : "cheap", reasoning_effort: ["coordinator", "assessor"].includes(role) ? "high" : "low" }])),
-    budget: { model_calls: 60, wall_seconds: 1800, tokens: 100000, spend_usd: 5 } },
+    models: structuredClone(EXPERIMENT_INIT_DEFAULTS.models),
+    budget: { ...EXPERIMENT_INIT_DEFAULTS.budget } },
     integration_example: { strategy: "direct", repo_path: "/absolute/path/repo", worktree_path: "/absolute/path/task-worktree", branch: "experiment/algorithm",
       trunk_branch: "main", base_commit: "0".repeat(40), commit_message: "Apply accepted algorithm experiment",
       mapping: [{ source: "work/candidate.py", target: "src/candidate.py" }], files: [{ path: "src/candidate.py", mode: "modify" }], prepare: [],

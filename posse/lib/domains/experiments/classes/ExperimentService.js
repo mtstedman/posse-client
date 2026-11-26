@@ -1,3 +1,5 @@
+import { ExperimentCorpusService } from './ExperimentCorpusService.js';
+import { EXPERIMENT_CORPUS_OPERATIONS } from '../../../catalog/experiment-corpus.js';
 import { CORPUS_RESULT_SELECTORS } from '../../../catalog/experiment-corpus-prep.js';
 import { EXPERIMENT_CORPUS_EVALUATION_SCHEMA } from '../../../catalog/experiment-corpus.js';
 import { corpusCaseReport, corpusCaseSummary } from '../functions/corpus-report.js';
@@ -13,12 +15,14 @@ import { experimentDigest } from "../functions/snapshots.js";
 import { ExperimentIntegration } from "./ExperimentIntegration.js";
 
 export class ExperimentService {
-  constructor(store, { backend = null, evaluations = {}, assertOwner = () => {}, dispatch, now, integrationWorkspace } = {}) {
+  constructor(store, { backend = null, evaluations = {}, assertOwner = () => {}, dispatch, now, integrationWorkspace, corpus } = {}) {
     this.campaigns = new ExperimentCampaigns(store); this.backend = backend; this.evaluations = structuredClone(evaluations); this.active = new Map(); this.stopping = false; this.assertOwner = assertOwner;
+    this.corpora = new ExperimentCorpusService(this, corpus);
     this.runner = new ExperimentRunner(this, { dispatch, now });
     this.integration = new ExperimentIntegration(this, { dispatch, now, workspace: integrationWorkspace });
   }
   async request(operation, args = {}) {
+    if (Object.values(EXPERIMENT_CORPUS_OPERATIONS).includes(operation)) return this.corpora.request(operation, args);
     const keys = {
       [O.SETUP_SCHEMA]: [], [O.SETUP_VALIDATE]: ["setup"], [O.LAUNCH]: ["setup", "setup_digest", "idempotency_key"], [O.STOP]: ["id"], [O.INTEGRATE]: ["id", "snapshot_digest", "integration", "idempotency_key"], [O.INTEGRATION_LOG]: ["id", "stage", "check"], [O.CASE_RESULTS]: ["id", "which"],
       [O.CREATE]: ["idempotency_key", "plan", "files"], [O.GET]: ["id"], [O.LIST]: [], [O.FILES]: ["id"], [O.REPORT]: ["id"], [O.PROGRESS]: ["id"],
@@ -98,6 +102,7 @@ export class ExperimentService {
     return receipt;
   }
   async recover() {
+    this.corpora.recover();
     this.runner.recover();
     await this.integration.recover();
     for (const c of this.campaigns.store.list(K.CAMPAIGNS)) {
@@ -110,6 +115,6 @@ export class ExperimentService {
     // Close a crash window between terminal runner persistence and handoff.
     for (const record of this.campaigns.store.list(K.RUNNERS)) this.runner.integrate(record);
   }
-  async shutdown() { this.stopping = true; await this.runner.shutdown(); await this.integration.shutdown(); for (const task of this.active.values()) task.controller.abort(); await Promise.all([...this.active.values()].map(task => task.promise)); }
-  activeCount() { return new Set([...this.runner.active.keys(), ...[...this.integration.active.values()].map(t => t.campaignID), ...this.campaigns.store.list(K.CAMPAIGNS).filter(c => c.active_run).map(c => c.id)]).size; }
+  async shutdown() { this.stopping = true; await this.corpora.shutdown(); await this.runner.shutdown(); await this.integration.shutdown(); for (const task of this.active.values()) task.controller.abort(); await Promise.all([...this.active.values()].map(task => task.promise)); }
+  activeCount() { return this.corpora.active.size + new Set([...this.runner.active.keys(), ...[...this.integration.active.values()].map(t => t.campaignID), ...this.campaigns.store.list(K.CAMPAIGNS).filter(c => c.active_run).map(c => c.id)]).size; }
 }

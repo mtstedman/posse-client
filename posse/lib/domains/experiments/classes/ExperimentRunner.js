@@ -1,3 +1,4 @@
+import { publicCorpusContract } from '../functions/corpus-contract.js';
 import { EXPERIMENT_CORPUS_EVALUATION_SCHEMA, EXPERIMENT_CORPUS_PAYLOAD_API } from '../../../catalog/experiment-corpus.js';
 import { EXPERIMENT_OBJECTS as K, EXPERIMENT_STATES as S, EXPERIMENT_RUNNER_STATES as R, EXPERIMENT_PAYLOAD_API } from "../../../catalog/experiments.js";
 import { AGENT_DISPATCH_PROTOCOL } from "../../../catalog/agent.js";
@@ -10,7 +11,7 @@ import { campaignProgress } from "../functions/campaign-report.js";
 
 import { EXPERIMENT_CANDIDATE_TOOL as candidateTool, EXPERIMENT_PATCH_TOOL as patchTool, EXPERIMENT_READ_TOOL as readTool, EXPERIMENT_REVIEW_TOOL as reviewTool, EXPERIMENT_RUNNER_TOOLS as managerTools } from "../../../catalog/experiment-runner.js";
 
-import { decisionTables, fileInventory, editableFiles, changeSummary, fileExcerpt, recordContextUsage, recordContextTokens } from "../functions/agent-context.js";
+import { agentPlan, actionSummary, decisionTables, fileInventory, editableFiles, changeSummary, fileExcerpt, recordContextUsage, recordContextTokens } from "../functions/agent-context.js";
 
 const terminal = c => [S.GOAL, S.EXHAUSTED, S.BLOCKED, S.CANCELLED].includes(c.state);
 
@@ -51,7 +52,7 @@ export class ExperimentRunner {
   check(record, signal, modelCall = false) {
     signal.throwIfAborted(); this.service.assertOwner();
     const b = record.setup.budget, u = record.usage;
-    if ((modelCall && u.model_calls >= b.model_calls) || u.tokens >= b.tokens || u.spend_usd >= b.spend_usd || this.now() >= record.deadline_at)
+    if ((modelCall && (u.model_calls >= b.model_calls || u.tokens >= b.tokens || u.spend_usd >= b.spend_usd)) || this.now() >= record.deadline_at)
       throw Object.assign(new Error("Runner budget exhausted."), { code: "experiment_budget" });
   }
   async decision(record, role, messages, tools, signal) {
@@ -116,8 +117,8 @@ export class ExperimentRunner {
     const c = this.service.campaigns.load(record.id);
     if (c.state !== S.READY) throw new Error("Campaign is not ready for a candidate.");
     const accepted = this.service.campaigns.files(c.id);
-    const context = { instructions, plan: c.plan, inventory: fileInventory(c.plan, accepted.files), findings: campaignProgress(c), decision_tables: decisionTables(c) };
-    const writer = await this.sourceDecision(record, "writer", { ...context, editable_files: editableFiles(c.plan, accepted.files), payload_api: this.service.evaluations[c.plan.evaluation.ref]?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? { ...EXPERIMENT_CORPUS_PAYLOAD_API, scoring_contract: this.service.evaluations[c.plan.evaluation.ref].contract } : EXPERIMENT_PAYLOAD_API }, [candidateTool, patchTool], accepted.files, null, signal);
+    const context = { instructions, plan: agentPlan(c.plan), inventory: fileInventory(c.plan, accepted.files), findings: campaignProgress(c), decision_tables: decisionTables(c) };
+    const writer = await this.sourceDecision(record, "writer", { ...context, editable_files: editableFiles(c.plan, accepted.files), payload_api: this.service.evaluations[c.plan.evaluation.ref]?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? { ...EXPERIMENT_CORPUS_PAYLOAD_API, corpus: publicCorpusContract(this.service.evaluations[c.plan.evaluation.ref]) } : { ...EXPERIMENT_PAYLOAD_API, templates: { [c.plan.runtime.profile]: EXPERIMENT_PAYLOAD_API.templates[c.plan.runtime.profile] } } }, [candidateTool, patchTool], accepted.files, null, signal);
     const candidate = writer.name === patchTool.name ? { changes: {}, hypothesis: writer.arguments.hypothesis } : writer.arguments;
     if (writer.name === patchTool.name) for (const edit of writer.arguments.edits) {
       const source = candidate.changes[edit.path] ?? accepted.files[edit.path];
@@ -146,7 +147,7 @@ export class ExperimentRunner {
     }
     if (call.name === "test.proctor") {
       const c = this.service.campaigns.load(record.id);
-      const answer = await this.decision(record, "proctor", [{ role: "user", content: JSON.stringify({ question: call.arguments.question, findings: campaignProgress(c), decision_tables: decisionTables(c), latest_iteration: c.iterations.at(-1) || null }) }], [], signal);
+      const answer = await this.decision(record, "proctor", [{ role: "user", content: JSON.stringify({ question: call.arguments.question, findings: campaignProgress(c), decision_tables: decisionTables(c) }) }], [], signal);
       return { advice: String(answer.content || "").slice(0, 4000) };
     }
     const c = this.service.campaigns.load(record.id);
@@ -186,10 +187,15 @@ export class ExperimentRunner {
         if (c.state === S.REVIEW) { record.state = R.REVIEW; record.phase = "review"; record.paused_at = this.now(); break; }
         if (c.state === S.RUNNING) throw new Error("Unreconciled sandbox run.");
         this.check(record, signal);
+        // Baseline/candidate execution is determined by state, not a paid decision.
+        if ([S.BASELINE, S.STAGED].includes(c.state)) {
+          previous = { action: 'test.run', result: await this.execute(record, { name: 'test.run', arguments: {} }, signal) };
+          continue;
+        }
         // Do not offer actions that cannot execute in the current campaign state.
         const tools = managerTools.filter(tool => tool.name === "test.run" ? [S.BASELINE, S.STAGED].includes(c.state)
           : tool.name === "test.prepare" ? c.state === S.READY : true);
-        const message = await this.decision(record, "coordinator", [{ role: "user", content: JSON.stringify({ objective: c.plan.objective, findings: campaignProgress(c), decision_tables: decisionTables(c), last_action: previous,
+        const message = await this.decision(record, "coordinator", [{ role: "user", content: JSON.stringify({ objective: c.plan.objective, corpus: this.service.evaluations[c.plan.evaluation.ref]?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? { id: this.service.evaluations[c.plan.evaluation.ref].corpus_id, revision: this.service.evaluations[c.plan.evaluation.ref].corpus_revision } : undefined, findings: campaignProgress(c), decision_tables: decisionTables(c), last_action: actionSummary(previous),
           next: c.state === S.BASELINE ? "Run the starting baseline." : c.state === S.STAGED ? "Run the reviewed candidate." : "Prepare the next general improvement. Continue until goals or budget stop the campaign." }) }], tools, signal);
         let call;
         try { call = this.checkedCall(message, tools); }

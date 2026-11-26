@@ -62,6 +62,7 @@ export async function initializeExperiment(request, { cwd = process.cwd(), git =
   const directory = path.join(repo, '.posse', 'experiments', request.name);
   try { await fs.lstat(directory); throw new Error('Experiment directory already exists; use its launch/status commands or choose a new name.'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (!request.corpus && !request.evaluation && !request.setup?.plan?.evaluation?.ref) return { ok: false, state: 'corpus_choice_required', ...(await new ExperimentCorpora(repo).choices()) };
   const supplied = structuredClone(request.setup || {});
   if (supplied.integration) throw new Error('init builds direct integration; provide mapping, checks and prepare at the top level. Use the raw setup route for agent adaptation.');
   const defaults = experimentPlanExample();

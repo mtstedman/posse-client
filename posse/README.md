@@ -22,10 +22,14 @@ never walks the user through individual stage/run tool calls.
 
 The runner uses the existing caller-owned agent dispatch framework. The
 coordinator manages the loop; a writer produces scoped candidate edits and an
-assessor reviews them before staging. The optional inexpensive proctor reads
-compact findings and has no mutation authority. Recommended model aliases are
-`strong`/high reasoning for coordinator and assessor, `cheap`/low for writer and
-proctor; the approved setup can change them. Every decision and delegated call
+assessor reviews them before staging. The optional proctor reads
+compact findings and has no mutation authority. All roles default to `standard` with medium reasoning; the approved setup can
+change them. Defaults allow 100 calls, 1,000,000 tokens, $25 and one hour.
+Baseline and reviewed-candidate execution run directly from campaign state,
+without coordinator calls. An ordinary iteration needs three model calls:
+choose an improvement, write it, assess it. Repairs, extra source reads and
+optional advice consume additional calls. Scoring and direct integration use
+no model calls. Every decision and delegated call
 counts against the same model-call, token, spend and active wall budgets.
 Unknown model usage stops further inference. Token/spend checks stop new calls;
 they cannot undo an overrun by the final in-flight call. Human review time does
@@ -59,7 +63,14 @@ owner telemetry without model calls, and remain available after completion.
 
 `posse experiment corpus schema` prints the import example, prep defaults and
 prep tools. `corpus list` lists every registered corpus in the project, including
-when called from a task worktree. Other actions take one JSON request on stdin:
+when called from a task worktree. `corpus choices` gives a compact inventory with
+case counts, readiness, metric IDs and pinned revisions. Ask the user whether to
+use, create or expand a corpus before constructing the test setup. An `init`
+request without a corpus or explicit evaluation returns `corpus_choice_required`
+before creating a workspace. Preparation is a separate step; testing never
+silently generates or expands a corpus.
+
+Other actions take one JSON request on stdin:
 
 ```sh
 posse experiment corpus create < corpus.json
@@ -152,7 +163,18 @@ object matching by bounding-box IoU with optional attribute scores. Missing or
 extra objects lose credit; duplicate detections cannot match multiple answers.
 Dependencies can require correct card identity before printing earns credit.
 Unknown answer fields are excluded from the denominator; they are not invented.
-The contract and answer keys freeze when a run is initialized.
+Scoring is deterministic host code, including partial credit; an LLM never judges
+predictions. The contract and answer keys freeze when a run is initialized.
+
+A contract may also include a compact `interface` with `resources`, `input` and
+`prediction` maps of field names to descriptions, plus `requirements` strings.
+For example, `resources:{image:"PNG/JPEG card photograph"}` documents the alias,
+while `prediction:{identity:"Canonical card ID",printing:"Canonical printing ID"}`
+documents expected output types. Keep this public usage information free of
+case answers. The prep agent and test writer receive the contract; the coordinator
+receives its identity and compact findings. Resource aliases are sampled to 32
+with an explicit omitted count; use stable aliases across cases. Interface text
+is limited to 8 KiB and the complete contract to 16 KiB.
 
 To run a corpus, replace the inline `evaluation` in an init request with
 `corpus:{experiment,corpus,revision?}`. Metric IDs are `score` or contract field
@@ -169,6 +191,28 @@ adapter and a suitable pinned runtime image.
 score table to `case-results.json`. `status` includes the weakest cases and tag
 summaries. Raw `case-results` requests accept `{id,which}` with `latest`, `accepted`
 or `baseline`. Detailed answer keys are never included in optimizer context.
+
+### Owner and Bossy corpus selection
+
+Bossy lists corpora with `experiment.corpus_options`, asks **Use existing**,
+**Create new**, or **Expand existing**, and reviews preparation separately from
+the test setup. `experiment.corpus_prepare` starts a bounded background prep job;
+`experiment.corpus_status` reports readiness and usage without loading answers.
+Expansion requires the current `expected_revision`. Idempotency keys prevent
+repeated preparation; interrupted paid work is never replayed automatically.
+
+For testing, supply `repo_path` and `corpus:{experiment,corpus,revision}` alongside
+the Bossy setup. The owner binds that verified revision and persists its private
+evaluation before launch. Draft answers block binding. A public contract is
+available through `experiment.corpus_contract`; it contains no answer keys.
+The existing setup still supplies payload files and a configured sandbox runtime.
+
+External callers can use the same owner operations through stdin:
+`posse experiment corpus-options`, `corpus-contract`, `corpus-prepare`,
+`corpus-status`, and `corpus-bind`. Options takes `{repo_path,offset?}`; contract
+and bind take `{repo_path,corpus}` (bind also takes `setup`); preparation takes
+`{repo_path,mode,preparation,idempotency_key}`; status takes `{id}`. Standalone
+`posse experiment corpus prep` remains a foreground preparation command.
 
 ### Standalone workspace preparation
 

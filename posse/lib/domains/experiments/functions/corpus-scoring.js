@@ -1,3 +1,4 @@
+import { validateCorpusInterface } from './corpus-contract.js';
 import { EXPERIMENT_CORPUS_FIELD_KINDS as K, EXPERIMENT_CORPUS_LIMITS as L } from '../../../catalog/experiment-corpus.js';
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -7,7 +8,9 @@ const read = (value, parts) => parts.reduce((current, key) => object(current) &&
 const equal = (a, b) => (typeof a === 'string' || finite(a) || typeof a === 'boolean' || a === null) && a === b;
 
 export function validateCorpusContract(contract) {
-  if (!object(contract) || Object.keys(contract).some(k => k !== 'fields') || !Array.isArray(contract.fields) || !contract.fields.length || contract.fields.length > L.fields) throw new Error('Scoring contract requires 1–32 fields.');
+  if (!object(contract) || Object.keys(contract).some(k => !['fields', 'interface'].includes(k)) || !Array.isArray(contract.fields) || !contract.fields.length || contract.fields.length > L.fields) throw new Error('Scoring contract requires 1–32 fields.');
+  validateCorpusInterface(contract.interface);
+  if (Buffer.byteLength(JSON.stringify(contract)) > 16000) throw new Error('Corpus contract exceeds 16 KiB.');
   const seen = new Set();
   for (const field of contract.fields) {
     if (!object(field) || !identifier(field.id) || field.id === 'score' || seen.has(field.id) || !K.includes(field.kind) || !finite(field.weight) || field.weight <= 0 || field.weight > 1000000

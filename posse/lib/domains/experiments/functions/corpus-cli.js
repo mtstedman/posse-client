@@ -34,9 +34,10 @@ export async function importCorpusItems(store, args, options = {}) {
 
 export async function runCorpusCli(argv, { input = process.stdin, print = value => console.log(value), open = () => ExperimentCorpora.open() } = {}) {
   const [action, ...rest] = argv;
-  if (rest.length || !EXPERIMENT_CORPUS_ACTIONS.includes(action)) throw new Error('posse experiment corpus schema|create|register|list|inspect|import|update|remove|score|prep < request.json');
+  if (rest.length || !EXPERIMENT_CORPUS_ACTIONS.includes(action)) throw new Error('posse experiment corpus schema|choices|create|register|list|inspect|import|update|remove|score|prep < request.json');
   if (action === 'schema') { print(JSON.stringify({ actions: EXPERIMENT_CORPUS_ACTIONS, example: EXPERIMENT_CORPUS_EXAMPLE, prep: { defaults: CORPUS_PREP_DEFAULTS, tools: CORPUS_PREP_TOOLS },
     note: 'Import accepts path, existing resource ID, or public HTTPS URL. Answers supplied by the operator are verified; prep-generated labels are drafts. Every edit creates an immutable revision. Resource ZIPs are shared project-wide; case manifests and answer keys belong to the named experiment.' })); return 0; }
+  if (action === 'choices') { print(JSON.stringify(await (await open()).choices())); return 0; }
   if (action === 'list') { print(JSON.stringify(await (await open()).list())); return 0; }
   const chunks = []; let bytes = 0;
   for await (const chunk of input) { const data = Buffer.from(chunk); bytes += data.length; if (bytes > EXPERIMENT_CORPUS_LIMITS.jsonBytes) throw new Error('Corpus request is too large.'); chunks.push(data); }

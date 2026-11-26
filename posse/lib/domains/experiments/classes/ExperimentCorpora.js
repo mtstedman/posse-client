@@ -65,6 +65,21 @@ export class ExperimentCorpora {
     } catch (error) { if (error.code !== 'ENOENT') throw error; return { schema: EXPERIMENT_CORPUS_REGISTRY_SCHEMA, corpora: [] }; }
   }
   async list() { return (await this.registry()).corpora; }
+  async choices({ offset = 0 } = {}) {
+    if (!Number.isInteger(offset) || offset < 0) throw new Error('Invalid corpus inventory offset.');
+    const all = await this.list(), rows = [];
+    for (const entry of all.slice(offset, offset + 50)) {
+      const [experiment, corpus] = entry.id.split('/');
+      const snapshot = await this.inspect({ experiment, corpus });
+      const verified = snapshot.entries.filter(item => item.status === 'verified').length;
+      rows.push([entry.id, snapshot.entries.length, verified, snapshot.entries.length - verified,
+        snapshot.contract.fields.map(field => field.id), snapshot.entries.slice(0, 3).map(item => item.label.slice(0, 96)), snapshot.revision]);
+    }
+    return { project: this.repo, corpora: { columns: ['corpus', 'cases', 'verified', 'draft', 'metrics', 'examples', 'revision'], rows, total: all.length, offset, omitted: Math.max(0, all.length - offset - rows.length) },
+      question: all.length ? 'Use an existing corpus, create a new one, or expand an existing corpus?' : 'No corpora are registered. Create a new corpus?',
+      choices: all.length ? ['Use existing', 'Create new', 'Expand existing'] : ['Create new', 'Cancel'],
+      instruction: 'Ask the user which action and corpus to use. Preparation is separate from testing. Do not infer a selection or include answer keys in test-agent context.' };
+  }
   async load({ experiment, corpus, revision }) {
     const p = this.paths(experiment, corpus);
     if (revision !== undefined && !digest(revision)) throw new Error('Invalid corpus revision.');

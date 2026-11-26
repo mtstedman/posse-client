@@ -9,7 +9,7 @@ export const EXPERIMENT_CORPUS_REGISTRY_SCHEMA = 'posse.experiment.corpora.v1';
 export const EXPERIMENT_CORPUS_FIELD_KINDS = ['exact', 'number', 'set', 'objects'];
 export const EXPERIMENT_CORPUS_KEY_STATUSES = ['draft', 'verified'];
 export const EXPERIMENT_CORPUS_LIMITS = { items: 1000, batch: 100, resourceBytes: 64 * 1024 * 1024, importBytes: 256 * 1024 * 1024, jsonBytes: 4 * 1024 * 1024, fields: 32, objects: 128 };
-export const EXPERIMENT_CORPUS_ACTIONS = ['schema', 'create', 'register', 'list', 'inspect', 'import', 'update', 'remove', 'score', 'prep'];
+export const EXPERIMENT_CORPUS_ACTIONS = ['schema', 'choices', 'create', 'register', 'list', 'inspect', 'import', 'update', 'remove', 'score', 'prep'];
 export const EXPERIMENT_CORPUS_EXAMPLE = {
   experiment: 'cards', corpus: 'printing-smoke',
   contract: { fields: [
@@ -19,3 +19,11 @@ export const EXPERIMENT_CORPUS_EXAMPLE = {
   items: [{ label: 'Selected card — printing check', resources: { image: { path: 'inputs/card.jpg', label: 'Selected card photograph' } }, profile: 'card-identification-v1', input: {},
     expected: { identity: 'canonical-card-id', printing: 'canonical-printing-id' }, tags: ['selected'] }],
 };
+
+export const EXPERIMENT_CORPUS_CONTEXT_ALIAS_LIMIT = 32;
+export const EXPERIMENT_CORPUS_CHOICES = ['use', 'create', 'expand'];
+export const EXPERIMENT_CORPUS_JOB_STATES = { RUNNING: 'running', COMPLETE: 'complete', FAILED: 'failed', INTERRUPTED: 'interrupted' };
+export const EXPERIMENT_CORPUS_JOB_OBJECT = 'experiment_corpus_preparations';
+export const EXPERIMENT_CORPUS_OPERATIONS = { OPTIONS: 'experiment.corpus_options', CONTRACT: 'experiment.corpus_contract', PREPARE: 'experiment.corpus_prepare', STATUS: 'experiment.corpus_status', BIND: 'experiment.corpus_bind' };
+
+export const EXPERIMENT_CORPUS_EVALUATIONS_OBJECT = 'experiment_corpus_evaluations';

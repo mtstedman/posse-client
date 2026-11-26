@@ -69,3 +69,18 @@ export function recordContextTokens(record, role, stats) {
   const usage = record.context_usage?.[role]; if (!usage) return;
   usage.input_tokens += stats.inputTokens; usage.output_tokens += stats.outputTokens;
 }
+
+// Runtime bookkeeping and source digests remain with the owner. Agents get
+// the constraints that affect their edit, plus compact measured findings.
+export function agentPlan(plan) {
+  return { objective: plan.objective, entrypoint: plan.entrypoint, runtime: plan.runtime,
+    files: plan.files.map(({ path, mode, instructions }) => ({ path, mode, instructions })),
+    metrics: plan.metrics, acceptance: plan.acceptance };
+}
+export function actionSummary(previous) {
+  if (!previous) return null;
+  const result = previous.result;
+  return { action: previous.action, ...(previous.error ? { error: previous.error } : {}),
+    ...(result && Object.hasOwn(result, 'staged') ? { staged: result.staged, reason: brief(result.reason || result.review, 600) } : {}),
+    ...(result?.advice ? { advice: brief(result.advice, 2000) } : {}) };
+}

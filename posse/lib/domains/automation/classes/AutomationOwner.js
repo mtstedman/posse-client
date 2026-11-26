@@ -1,3 +1,4 @@
+import { EXPERIMENT_CORPUS_OPERATIONS } from '../../../catalog/experiment-corpus.js';
 import fs from "node:fs";
 import net from "node:net";
 import crypto from "node:crypto";
@@ -183,7 +184,7 @@ export class AutomationOwner {
   }
   dispatchOperator(operation, args, { signal } = {}) {
     if (operation === EXPERIMENT_OPERATIONS.SCHEMA || operation === EXPERIMENT_OPERATIONS.VALIDATE) return experimentPlanningRequest(operation, args);
-    if (Object.values(EXPERIMENT_OPERATIONS).includes(operation)) {
+    if ([...Object.values(EXPERIMENT_OPERATIONS), ...Object.values(EXPERIMENT_CORPUS_OPERATIONS)].includes(operation)) {
       demand(!this.service.stopping && this.service.ownsLease(), "Experiment owner is not ready", "owner_fenced");
       return this.experiments.request(operation, args);
     }
