@@ -10,6 +10,7 @@ import { validateToolArguments } from '../../../shared/tools/functions/schema-va
 import { viewImageWithinScope } from '../../../shared/tools/functions/toolkit/view-image.js';
 import { asMcpContentResult } from '../../../shared/tools/functions/mcp-content-result.js';
 import { downloadCorpusInput } from '../functions/corpus-download.js';
+import { downloadCorpusBatch } from '../functions/corpus-batch-download.js';
 import { corpusHash } from '../functions/corpus-archive.js';
 
 // Prep owns its small tool loop. The model never gets a shell, host file tools,
@@ -84,6 +85,13 @@ export class ExperimentCorpusPrep {
         this.record.downloads.push({ ...resource, ...source }); await this.save();
         return { ...resource, ...source };
       } finally { await fs.rm(receipt.path, { force: true }); }
+    }
+    if (call.name === 'download_batch') {
+      const batch = randomUUID();
+      return downloadCorpusBatch(args.items, { directory: this.staging, download: this.download,
+        archive: (filename, label, sha256) => this.store.archive(filename, label, sha256),
+        onDownloaded: async (receipt, index) => { this.record.downloads.push({ ...receipt, batch, index }); await this.save(); },
+        signal, budget: this.downloadBudget, concurrency: args.concurrency, delayMs: args.delay_ms });
     }
     if (call.name === 'import') return this.importItems(args.items);
     if (call.name === 'import_manifest') {

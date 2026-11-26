@@ -142,7 +142,15 @@ remain intact. `inspect` accepts `revision` and `include_answers:true` for revie
 For a prep agent, supply `{experiment, corpus, prompt}` and optionally `contract`,
 `model`, `reasoning_effort`, and `budget`. It can propose the contract for a new
 corpus, inventory/read the inputs directory, view image pixels, download public
-resources, and batch import cases. Defaults are standard/medium, 100 calls,
+resources, and batch import cases. `download_batch` fetches up to 100 labeled
+URLs in one agent call, with four transfers and 200 ms between starts by default.
+The agent can lower `concurrency` or adjust `delay_ms` for the source's limits.
+The compact result table preserves request order and individual errors, so only
+failed items need retrying. Each success retains full provenance; hash archives
+are shared and staging is purged, including on cancellation. Single and batch
+downloads share the same byte budget and public-HTTPS checks. Downloaded metadata
+remains evidence; inferred answer keys still require verification.
+Defaults are standard/medium, 100 calls,
 1,000,000 tokens, $25 and one hour. It uses bounded context with working notes and
 an operation ledger; usage and download provenance are saved in its report.
 Rerunning prep expands an existing corpus. Model decisions are never automatically
