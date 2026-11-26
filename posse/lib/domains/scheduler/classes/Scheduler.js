@@ -1,3 +1,4 @@
+import { SchedulerBootLockController } from "./SchedulerBootLockController.js";
 import { ATLAS_INDEXING_HOLD_MAX_MS, ATLAS_INDEXING_PAUSE_OFF_VALUES, ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES, RUN_BACKGROUND_JOB_TYPES, ATLAS_BACKGROUND_JOB_CONCURRENCY, RUN_LOOP_KEEPALIVE_INTERVAL_MS, RUNTIME_KILL_RETRY_MS, RUNTIME_KILL_WEDGED_MS, PARKED_UPSTREAM_STALL_GRACE_MS, AUTO_MERGE_STALL_GRACE_MS, STALE_MERGE_AUTHORIZATION_MS, SYSTEM_HOLD_HOLDER_TYPES } from "../../../catalog/scheduler-lifecycle.js";
 import { prepareCrossWiFileSyncHandoff } from "../functions/cross-wi-file-sync.js";
 import { resolveReviewedCircularOwnership } from "../functions/reviewed-circular-release.js";
@@ -17,16 +18,14 @@ import { releaseUnusedCompletedWorkItemLocks } from "../functions/unused-planned
 import crypto from "crypto";
 import { spawn } from "child_process";
 import { isBudgetPaused } from "../../queue/functions/admission-budget.js";
-import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, FORCE_ACQUIRE_LIVENESS_SEC, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, environmentSetupParking, grantEnvironmentSetupResume, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgeGateResolverAvailable, isPostCompletionGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
+import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, environmentSetupParking, grantEnvironmentSetupResume, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgeGateResolverAvailable, isPostCompletionGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
 import { WORK_ITEM_ORDER_WAIT_REASON } from "../../queue/functions/work-item-order.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getAttempts } from "../../queue/functions/attempts.js";
-import { reapOrphanedDaemons } from "../../../shared/tools/classes/daemon/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { primeProviderUsageAuthAsync } from "../../providers/functions/provider.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
-import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
-import { recordBootCrashResumeMarker, recordRunDiagnostic, recordSchedulerLockDiagnostic, startRunHeartbeat } from "../../../shared/telemetry/functions/run-diagnostics.js";
+import { recordRunDiagnostic, startRunHeartbeat } from "../../../shared/telemetry/functions/run-diagnostics.js";
 import { maybeRunRuntimeRetention } from "../../ui/functions/admin/retention.js";
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
 import { describeModelCatalogWarning } from "../../providers/functions/model-catalog-validate.js";
@@ -50,7 +49,7 @@ import { findFileConflict } from "../functions/file-scope.js";
 import { RUNTIME_NO_ESCALATION_BACKSTOP_MULTIPLIER, runtimeKillCanEscalate, runtimeWriteExtensionActive } from "../functions/runtime-escalation.js";
 import { jobWriteActivity } from "./JobWriteActivity.js";
 import { WORKTREE_TYPES, createHeldQueueLockIndex } from "../functions/held-locks.js";
-import { atlasWarmConcurrencyKey, formatSchedulerLockDuration, formatStaleHeartbeatReason, schedulerLockTiming } from "../functions/lock-timing.js";
+import { atlasWarmConcurrencyKey } from "../functions/lock-timing.js";
 import { recoverHeadlessHumanTimeouts, recoverOrphanedReviewJobs } from "../functions/headless-recovery.js";
 import { createSharedTrunkPoller } from "./SharedTrunkPoller.js";
 import { pollTrunkWithinBudget } from "../functions/trunk-poll-budget.js";
@@ -301,6 +300,7 @@ export class Scheduler {
     // These collaborators own substantive lock and dispatch policy; boot and
     // loop orchestration stay here until they have independent behavior.
     this._lockController = new SchedulerLockController(this);
+    this._bootLockController = new SchedulerBootLockController(this);
     this._dispatchPlanner = new SchedulerDispatchPlanner(this);
   }
 
@@ -839,279 +839,11 @@ export class Scheduler {
   }
 
   async _acquireBootLockPhases(emitBootEvent) {
-    this._stopRequested = false;
-    this._stopMarked = false;
-    this._lockLost = false;
-    this._lockLostKilledJobIds.clear();
-    // Log every decision so operators can diagnose boot stalls from the event log.
-    this._log(`Boot: scheduler=${this.ownerId} lease=${this.leaseSec}s concurrency=${this.concurrency} poll=${this.pollMs}ms repair=${this.repairPollMs}ms`);
-    // Reap native-binary daemon children orphaned by a crashed prior session
-    // (their ledgers' owner pid is dead). Idempotent + image-verified, so it's
-    // safe to run alongside other instances. Deferred OFF the boot critical
-    // path: it's best-effort cleanup whose cost scales with the ledger
-    // directory (and does synchronous image checks), so it must never gate or
-    // slow the scheduler coming up. Runs on the next tick instead.
-    setImmediate(() => {
-      try {
-        const reaped = reapOrphanedDaemons();
-        if (reaped.killed || reaped.ledgers) {
-          this._log(`Boot: reaped ${reaped.killed} orphaned daemon(s) from ${reaped.ledgers} stale ledger(s)${reaped.skipped ? ` (${reaped.skipped} skipped)` : ""}`);
-        }
-      } catch { /* the reaper is a safety net, never block boot on it */ }
-    });
-    recordBootCrashResumeMarker({
-      ownerId: this.ownerId,
-      lease_sec: this.leaseSec,
-      concurrency: this.concurrency,
-      poll_ms: this.pollMs,
-      repair_poll_ms: this.repairPollMs,
-    });
-    recordMemorySample("scheduler.boot.start", {
-      owner_id: this.ownerId,
-      concurrency: this.concurrency,
-    });
-    emitBootEvent("lock acquired", { section: "scheduler", status: "running" });
-
-    let gotLock = await this.schedulerLock.acquireWithRetry();
-    if (gotLock) {
-      this._log("Boot: lock acquired (no contention)");
-      recordSchedulerLockDiagnostic({
-        owner_id: this.ownerId,
-        phase: "acquire",
-        decision: "acquired_no_contention",
-      });
-      emitBootEvent("lock acquired", { section: "scheduler", status: "ok", detail: "no contention" });
-    } else {
-      const lockInfo = this.schedulerLock.info();
-      if (!lockInfo) {
-        this._log("Boot: lock acquire failed but no lock row exists — aborting", "red");
-        recordSchedulerLockDiagnostic({
-          owner_id: this.ownerId,
-          phase: "acquire",
-          decision: "failed_no_lock_row",
-        });
-        return false;
-      }
-
-      const lockDurationMs = LOCK_RENEW_SEC * 2 * 1000;
-      const {
-        heartbeatAge,
-        expiresIn,
-        heartbeatFromExpiresAt,
-        heartbeatInvalid,
-      } = schedulerLockTiming(lockInfo, lockDurationMs);
-      const STALE_THRESHOLD = LOCK_RENEW_SEC * 2 * 1000; // 60s — 2 missed renewals
-
-      this._log(
-        `Boot: lock contention — owner=${lockInfo.owner_id} ` +
-        `heartbeat_age=${formatSchedulerLockDuration(heartbeatAge)}${heartbeatFromExpiresAt ? " (from expires_at)" : ""}${heartbeatInvalid ? " (invalid)" : ""} ` +
-        `expires_in=${formatSchedulerLockDuration(expiresIn)} ` +
-        `stale_threshold=${STALE_THRESHOLD / 1000}s`,
-        "yellow"
-      );
-      recordSchedulerLockDiagnostic({
-        owner_id: this.ownerId,
-        phase: "contention",
-        decision: "inspect_existing_lock",
-        lockInfo,
-        heartbeat_age_ms: heartbeatAge,
-        expires_in_ms: expiresIn,
-        heartbeat_from_expires_at: heartbeatFromExpiresAt,
-        heartbeat_invalid: heartbeatInvalid,
-        stale_threshold_ms: STALE_THRESHOLD,
-      });
-
-      // IMPORTANT: orphan recovery has NOT run yet. Surface this explicitly
-      // so operators know the system is not yet self-healing.
-      this._log("Boot: ⚠ orphan recovery and worktree GC have NOT run yet (blocked by lock)", "yellow");
-
-      if (heartbeatAge > STALE_THRESHOLD) {
-        // No heartbeat in 2+ renewal cycles — holder crashed. Force-steal immediately.
-        this._log(`Boot: decision=FORCE_STEAL (heartbeat stale: ${formatStaleHeartbeatReason(heartbeatAge, STALE_THRESHOLD)})`, "yellow");
-        recordSchedulerLockDiagnostic({
-          owner_id: this.ownerId,
-          phase: "contention",
-          decision: "force_steal_stale_heartbeat",
-          lockInfo,
-          heartbeat_age_ms: heartbeatAge,
-          stale_threshold_ms: STALE_THRESHOLD,
-        });
-        gotLock = this.schedulerLock.forceAcquire();
-        if (!gotLock) {
-          this._log("Boot: decision=EXIT (lock heartbeat refreshed before force-steal — holder is alive)", "red");
-          recordSchedulerLockDiagnostic({
-            owner_id: this.ownerId,
-            phase: "contention",
-            decision: "exit_heartbeat_refreshed_before_force_steal",
-            lockInfo: this.schedulerLock.info(),
-          });
-          return false;
-        }
-      } else if (expiresIn <= LOCK_RENEW_SEC * 1000) {
-        // Lock expires within one renewal cycle — just wait for it instead of the
-        // full heartbeat verification dance. Much faster for post-crash restarts.
-        const waitMs = expiresIn + 1000; // 1s buffer
-        this._log(`Boot: decision=WAIT_FOR_EXPIRY (lock expires in ${formatSchedulerLockDuration(expiresIn)}, waiting ${formatSchedulerLockDuration(waitMs)})`, "yellow");
-        recordSchedulerLockDiagnostic({
-          owner_id: this.ownerId,
-          phase: "contention",
-          decision: "wait_for_expiry",
-          lockInfo,
-          wait_ms: waitMs,
-          expires_in_ms: expiresIn,
-        });
-        await this._interruptibleSleep(waitMs);
-        if (this._stopRequested) return false;
-        gotLock = this.schedulerLock.acquire();
-        if (!gotLock) {
-          // Lock was renewed — another scheduler is alive
-          this._log("Boot: decision=EXIT (lock renewed during wait — another scheduler is alive)", "red");
-          recordSchedulerLockDiagnostic({
-            owner_id: this.ownerId,
-            phase: "contention",
-            decision: "exit_lock_renewed_during_expiry_wait",
-            lockInfo: this.schedulerLock.info(),
-          });
-          return false;
-        }
-        this._log("Boot: lock acquired (expired during wait)");
-      } else {
-        // Recent heartbeat, lock won't expire soon — another scheduler may be alive.
-        // Wait one renewal cycle to confirm it's still renewing.
-        const waitMs = (LOCK_RENEW_SEC + 5) * 1000; // 35s
-        this._log(`Boot: decision=VERIFY_LIVENESS (waiting ${Math.ceil(waitMs / 1000)}s for heartbeat change)`, "yellow");
-        this._log("Boot: ⚠ startup blocked — workers idle until lock resolved", "red");
-        recordSchedulerLockDiagnostic({
-          owner_id: this.ownerId,
-          phase: "contention",
-          decision: "verify_liveness",
-          lockInfo,
-          wait_ms: waitMs,
-          heartbeat_age_ms: heartbeatAge,
-          expires_in_ms: expiresIn,
-        });
-        await this._interruptibleSleep(waitMs);
-        if (this._stopRequested) return false;
-
-        // Re-check heartbeat after waiting
-        gotLock = this.schedulerLock.acquire();
-        if (gotLock) {
-          this._log("Boot: lock acquired (expired during wait)");
-        } else {
-          const updated = this.schedulerLock.info();
-          if (!updated) {
-            gotLock = this.schedulerLock.acquire();
-            this._log(gotLock ? "Boot: lock acquired (vanished, then claimed)" : "Boot: lock still unavailable", gotLock ? "yellow" : "red");
-          } else {
-            // Did the holder's heartbeat advance during our wait? Compare
-            // acquired_at timestamps — a live scheduler renews on every
-            // LOCK_RENEW_SEC tick, so after a full wait cycle the timestamp
-            // must have changed. Checking age alone is wrong: a lock acquired
-            // just before a crash has low initial age, and adding the wait
-            // duration may not cross STALE_THRESHOLD in one pass.
-            const { heartbeatAge: newAge } = schedulerLockTiming(updated, LOCK_RENEW_SEC * 2 * 1000);
-            const heartbeatAdvanced = updated.acquired_at !== lockInfo.acquired_at;
-            this._log(`Boot: post-wait heartbeat_age=${formatSchedulerLockDuration(newAge)} (was ${formatSchedulerLockDuration(heartbeatAge)}) advanced=${heartbeatAdvanced}`);
-            if (!heartbeatAdvanced) {
-              this._log(`Boot: decision=FORCE_STEAL (heartbeat did not advance during wait — holder confirmed dead)`, "yellow");
-              recordSchedulerLockDiagnostic({
-                owner_id: this.ownerId,
-                phase: "contention",
-                decision: "force_steal_heartbeat_did_not_advance",
-                lockInfo: updated,
-                previous_heartbeat_age_ms: heartbeatAge,
-                heartbeat_age_ms: newAge,
-              });
-              gotLock = this.schedulerLock.forceAcquire();
-              if (!gotLock) gotLock = await this._retryForceStealAfterLivenessCutoff(updated);
-              if (!gotLock && this._stopRequested) return false;
-              if (!gotLock) {
-                this._log("Boot: decision=EXIT (lock heartbeat refreshed before force-steal — holder revived)", "red");
-                recordSchedulerLockDiagnostic({
-                  owner_id: this.ownerId,
-                  phase: "contention",
-                  decision: "exit_holder_revived_before_force_steal",
-                  lockInfo: this.schedulerLock.info(),
-                });
-                return false;
-              }
-            } else {
-              this._log(`Boot: decision=EXIT (heartbeat advanced — scheduler ${updated.owner_id} is alive)`, "red");
-              recordSchedulerLockDiagnostic({
-                owner_id: this.ownerId,
-                phase: "contention",
-                decision: "exit_heartbeat_advanced",
-                lockInfo: updated,
-                previous_heartbeat_age_ms: heartbeatAge,
-                heartbeat_age_ms: newAge,
-              });
-              return false;
-            }
-          }
-        }
-      }
-    }
-
-    if (!gotLock) {
-      this._log("Boot: could not acquire scheduler lock — aborting", "red");
-      recordSchedulerLockDiagnostic({
-        owner_id: this.ownerId,
-        phase: "acquire",
-        decision: "failed",
-        lockInfo: this.schedulerLock.info(),
-      });
-      return false;
-    }
-    recordSchedulerLockDiagnostic({
-      owner_id: this.ownerId,
-      phase: "acquire",
-      decision: "held",
-      lockInfo: this.schedulerLock.info(),
-    });
-
-    // Some contention paths acquire the lock after waiting/stealing rather
-    // than through the no-contention branch above. Always publish a terminal
-    // event once we know the lock is held so the boot panel cannot leave the
-    // row spinning for the rest of a long ATLAS warm.
-    emitBootEvent("lock acquired", { section: "scheduler", status: "ok", detail: "held" });
-
-    this._running = true;
-    if (!this._startLockRenewal()) return false;
-    return true;
+    return this._bootLockController.acquire(emitBootEvent);
   }
 
-  /**
-   * The verify wait showed the holder's heartbeat did not advance, but a holder
-   * that crashed within ~10 s of its last renewal is still inside
-   * forceAcquire's FORCE_ACQUIRE_LIVENESS_SEC cutoff when that 35 s wait ends.
-   * Wait out the rest of the cutoff (or to lock expiry, if sooner) and try once
-   * more. The cutoff still guards the steal itself: a holder that renews in the
-   * meantime is refused.
-   *
-   * @param {any} observed the lock row whose heartbeat did not advance
-   * @returns {Promise<boolean>} true if the lock is now held
-   */
   async _retryForceStealAfterLivenessCutoff(observed) {
-    const current = this.schedulerLock.info();
-    if (!current) return this.schedulerLock.acquire();
-    // A changed heartbeat means the holder did revive; leave it alone.
-    if (current.owner_id !== observed?.owner_id || current.acquired_at !== observed?.acquired_at) return false;
-    const { heartbeatAge, expiresIn } = schedulerLockTiming(current, LOCK_RENEW_SEC * 2 * 1000);
-    const untilCutoffMs = FORCE_ACQUIRE_LIVENESS_SEC * 1000 - heartbeatAge;
-    const waitMs = Math.max(0, Math.min(untilCutoffMs, expiresIn)) + 1000; // 1s buffer
-    this._log(`Boot: decision=WAIT_FOR_FORCE_STEAL_CUTOFF (heartbeat_age=${formatSchedulerLockDuration(heartbeatAge)} is inside the ${FORCE_ACQUIRE_LIVENESS_SEC}s force-steal cutoff, waiting ${formatSchedulerLockDuration(waitMs)})`, "yellow");
-    recordSchedulerLockDiagnostic({
-      owner_id: this.ownerId,
-      phase: "contention",
-      decision: "wait_for_force_steal_liveness_cutoff",
-      lockInfo: current,
-      wait_ms: waitMs,
-      heartbeat_age_ms: heartbeatAge,
-      expires_in_ms: expiresIn,
-    });
-    await this._interruptibleSleep(waitMs);
-    if (this._stopRequested) return false;
-    return this.schedulerLock.acquire() || this.schedulerLock.forceAcquire();
+    return this._bootLockController.retryAfterLivenessCutoff(observed);
   }
 
   /**

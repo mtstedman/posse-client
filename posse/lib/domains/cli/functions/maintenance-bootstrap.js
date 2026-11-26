@@ -1,4 +1,6 @@
 import { renderDoctorHelp, renderUpdateHelp } from "./maintenance-help.js";
+import { FIRST_TASK_FLAG } from "../../../catalog/first-task-readiness.js";
+import { firstTaskReadinessLines, uninitializedFirstTaskReport } from "./first-task-report.js";
 import { C } from "../../../shared/format/functions/colors.js";
 // Pure data module: keeps this bootstrap free of the SQLite-backed graph.
 import { pairingCommandOpensSession, REMOTE_ACCESS_COMMANDS } from "../../../catalog/pairing-command.js";
@@ -171,8 +173,13 @@ async function runDoctorBootstrap(argv) {
   const dryRun = hasArg(argv, "--dry-run");
   if (!isPosseProjectInitialized() && !isInstallationDoctor(process.cwd(), POSSE_ROOT, argv)) {
     const summary = "repository dependencies skipped; run posse add or posse go to initialize";
-    if (json) console.log(JSON.stringify({ ok: true, status: "skipped", project_dir: process.cwd(), dry_run: dryRun, doctor: { ok: true, summary } }, null, 2));
-    else console.log(`\n  [doctor] ${summary}\n`);
+    const firstTask = hasArg(argv, FIRST_TASK_FLAG) ? uninitializedFirstTaskReport() : null;
+    if (json) console.log(JSON.stringify({ ok: true, status: "skipped", project_dir: process.cwd(), dry_run: dryRun, doctor: { ok: true, summary }, ...(firstTask ? { first_task: firstTask } : {}) }, null, 2));
+    else {
+      console.log(`\n  [doctor] ${summary}\n`);
+      if (firstTask) console.log(firstTaskReadinessLines(firstTask).join("\n"));
+    }
+    if (firstTask) process.exitCode = 1;
     return;
   }
   const ownNode = process.env.POSSE_MAINTENANCE_NODE_REPAIRED === "1"

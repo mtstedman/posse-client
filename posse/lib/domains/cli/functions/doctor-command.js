@@ -1,4 +1,5 @@
 import { renderDoctorHelp } from "./maintenance-help.js";
+import { FIRST_TASK_FLAG, FIRST_TASK_READINESS } from "../../../catalog/first-task-readiness.js";
 import path from "path";
 
 import { C } from "../../../shared/format/functions/colors.js";
@@ -160,6 +161,7 @@ export async function cmdDoctor({
   formatResult = formatBootDependencySync,
   getAtlasConfig = getAtlasIntegrationConfig,
   getClientProvenance = resolveClientProvenance,
+  readFirstTaskReadiness = null,
   colors = C,
   log = console.log,
 } = {}) {
@@ -226,10 +228,17 @@ export async function cmdDoctor({
   }
 
   result.client_provenance = getClientProvenance();
+  let firstTaskLines = [];
+  if (argv.includes(FIRST_TASK_FLAG)) {
+    const { collectFirstTaskReadiness, firstTaskReadinessLines } = await import("./first-task-readiness.js");
+    result.first_task = await (readFirstTaskReadiness || collectFirstTaskReadiness)({ projectDir, initialized, doctorResult: result });
+    firstTaskLines = firstTaskReadinessLines(result.first_task);
+  }
+  const needsAttention = !result.ok || (result.first_task && result.first_task.state !== FIRST_TASK_READINESS.READY);
 
   if (json) {
     log(JSON.stringify(result, null, 2));
-    if (!result.ok) process.exitCode = 1;
+    if (needsAttention) process.exitCode = 1;
     return result;
   }
 
@@ -260,15 +269,19 @@ export async function cmdDoctor({
     log(`\n  ${colors.yellow}POSSE_KEY is not set${colors.reset} - ${result.credentials.remedy}`);
   }
 
-  if (!report.repaired?.length && !report.pending?.length && !report.failed?.length) {
+  if (initialized && !dryRun && result.status !== "skipped" && !report.repaired?.length && !report.pending?.length && !report.failed?.length) {
     if (result.credentials?.posse_key === "missing") {
       log(`\n  ${colors.green}Dependency/runtime requirements are ready${colors.reset} (except the missing POSSE_KEY above).`);
     } else {
       log(`\n  ${colors.green}All dependency/runtime requirements are ready.${colors.reset}`);
     }
   }
+  if (firstTaskLines.length) {
+    log("");
+    for (const line of firstTaskLines) log(`  ${line}`);
+  }
   log("");
 
-  if (!result.ok) process.exitCode = 1;
+  if (needsAttention) process.exitCode = 1;
   return result;
 }

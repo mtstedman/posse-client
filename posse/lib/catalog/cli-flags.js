@@ -1,3 +1,4 @@
+import { FIRST_TASK_FLAG } from "./first-task-readiness.js";
 // Single source of truth for every CLI flag the orchestrator accepts.
 // Each descriptor has:
 //   name        — the flag literal (with leading dashes; short aliases included)
@@ -80,6 +81,7 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--approve-plan", takesValue: false, category: "boolean" },
   { name: "--active", takesValue: false, category: "boolean" },
   { name: "--adopt-node-install", takesValue: false, category: "boolean" },
+  { name: FIRST_TASK_FLAG, takesValue: false, category: "boolean" },
   { name: "--auto-merge", takesValue: false, category: "boolean" },
   { name: "--cold-index", takesValue: false, category: "boolean" },
   { name: "--deepthink", takesValue: false, category: "boolean" },

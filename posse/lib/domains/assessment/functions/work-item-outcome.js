@@ -1,5 +1,7 @@
 import { OUTCOME_EXECUTION as E, OUTCOME_VERIFICATION as V, OUTCOME_VERIFIED_COVERAGE, WORK_ITEM_OUTCOME_VERSION } from "../../../catalog/work-item-outcome.js";
 import { reviewVisibleJobs, jobIsDisplayFailure, jobIsWriteStep } from "../../ui/functions/display/helpers/job-status.js";
+import { ASSESSMENT_ONLY_FAILURE_STATES } from "../../../catalog/job.js";
+import { outcomeGuidance } from "./outcome-guidance.js";
 
 // Read-side only: this projection never authorizes a merge or supplies a verdict.
 export function projectWorkItemOutcome({ workItem = {}, jobs = [], receipts = [], candidateCommit = null,
@@ -21,8 +23,10 @@ export function projectWorkItemOutcome({ workItem = {}, jobs = [], receipts = []
   // exact merge commit is named. Later descendants require ancestry evidence.
   const boundPublication = !!mergeCommit && publication.head === mergeCommit;
   const deployed = boundPublication && publication.deployment_state === "verified" && publication.deployment_head === mergeCommit;
-  return {
+  const outcome = {
     schema_version: WORK_ITEM_OUTCOME_VERSION,
+    merge_failed: workItem.merge_state === "merge_failed",
+    assessment_recovery: visible.some(job => ASSESSMENT_ONLY_FAILURE_STATES.includes(job.assessment_state)),
     execution: { state: execution },
     review: { verdict: reviewed ? "pass" : implemented.some(job => job.assessor_verdict === "fail") ? "fail" : "unknown" },
     verification: { state: verification, commit: candidateCommit, checks: current, passed: passed.length, waivers },
@@ -33,6 +37,7 @@ export function projectWorkItemOutcome({ workItem = {}, jobs = [], receipts = []
       merge_commit: mergeCommit, publication: boundPublication ? publication.publication_state : "unknown",
       deployment: deployed ? "verified" : "unverified" },
   };
+  return { ...outcome, guidance: outcomeGuidance(outcome) };
 }
 
 export function outcomeSummary(outcome) {
@@ -43,6 +48,7 @@ export function outcomeSummary(outcome) {
 // Phone/relay projection intentionally excludes commands, titles and raw evidence.
 export function safeOutcomeBrief(outcome) {
   return { execution: outcome.execution.state, review: outcome.review.verdict, verification: outcome.verification.state,
+    guidance: outcomeGuidance(outcome),
     budget_paused: !!(outcome.budget?.enabled && outcome.budget.paused_reason),
     acceptance: outcome.acceptance?.state || "untracked", unmet_required: outcome.acceptance?.unmet_required.length || 0,
     passed_checks: outcome.verification.passed, waived_checks: outcome.verification.waivers.length,

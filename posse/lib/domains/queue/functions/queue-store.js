@@ -1,3 +1,5 @@
+import { QueueShutdownRecovery } from "../classes/QueueShutdownRecovery.js";
+import { ASSESS_ONLY_PAYLOAD_SQL } from "../../../catalog/queue-recovery.js";
 import { canonicalHumanGatePayload } from "../../../catalog/human-input.js";
 import { recordUnusedScopeGrants } from "./scope-grant-usage.js";
 import { rankRunnableJobs } from "./unlock-ranking.js";
@@ -19,8 +21,8 @@ import { MUTATING_JOB_TYPES, NON_COMPLETION_BLOCKING_JOB_TYPES, ONESHOT_SCOPE_SE
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
 import { parseJobPayload, resetJobPayloadForReexecution } from "./payload.js";
-import { beginJobRetryGeneration, completeAttempt, hasImplementationAttempts, isLeaseValid, setAssessmentLifecycle } from "./attempts.js";
-import { ACTIVE_LEASE_STATUSES, ACTIVE_LEASE_STATUSES_SQL, DEADLOCK_TERMINAL_STATUSES_SQL, FAILED_JOB_STATUSES, LEASE_HOLDING_STATUSES, LEASE_HOLDING_STATUSES_SQL, TERMINAL_JOB_STATUSES, TERMINAL_JOB_STATUSES_SQL, TERMINAL_WORK_ITEM_STATUSES, isPushOfferJob, normalizeSkillsColumn, now, runImmediateTransaction } from "./common.js";
+import { beginJobRetryGeneration, hasImplementationAttempts, isLeaseValid, setAssessmentLifecycle } from "./attempts.js";
+import { ACTIVE_LEASE_STATUSES, ACTIVE_LEASE_STATUSES_SQL, DEADLOCK_TERMINAL_STATUSES_SQL, FAILED_JOB_STATUSES, LEASE_HOLDING_STATUSES, TERMINAL_JOB_STATUSES, TERMINAL_JOB_STATUSES_SQL, TERMINAL_WORK_ITEM_STATUSES, isPushOfferJob, normalizeSkillsColumn, now, runImmediateTransaction } from "./common.js";
 import { flushEventsNow, getEvents, logDurableEvent, logEvent } from "./events.js";
 import { APPLIED_DB_TASKS_KEY, POST_MERGE_DB_HOLD_KEY, appliedDbTaskEntries, hasActivePostMergeDbGate, isDbTaskJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, postMergeDbGateJobSpec, postMergeDbHoldRecord, supersededPostMergeDbMessage, supersededPostMergeDbPayload, supersedingPostMergeDbTask } from "./post-merge-db-tasks.js";
 import { findMergeHoldingGate } from "./merge-holding-gate.js";
@@ -281,13 +283,7 @@ export {
 // lapsed — without the grace, the scheduler would requeue immediately and
 // could dispatch a cross-WI conflicting job while the zombie is still live.
 
-const ASSESS_ONLY_PAYLOAD_SQL = `
-  payload_json = CASE
-    WHEN payload_json IS NULL OR trim(payload_json) = '' THEN json_set('{}', '$._assess_only', 1)
-    WHEN json_valid(payload_json) THEN json_set(payload_json, '$._assess_only', 1)
-    ELSE json_set(json_object('_legacy_invalid_payload_json', payload_json), '$._assess_only', 1)
-  END
-`;
+
 
 const STALL_RESUME_FLAG_PAYLOAD_SQL = `
   payload_json = CASE
@@ -2888,149 +2884,13 @@ export {
   settleJobScopeExpansionAttempt,
 };
 
-/**
- * Requeue a job for graceful shutdown: set status back to queued, clear lease,
- * and undo the attempt_count increment from the interrupted run.
- * Only affects jobs still in a leased/running/assessing state.
- */
-export function requeueForShutdown(jobId, { label = "graceful shutdown" } = {}) {
-  const db = getDb();
-  const ts = now();
-  const requeueOne = () => runImmediateTransaction(db, () => {
-    const row = db.prepare(`
-      SELECT status
-      FROM jobs
-      WHERE id = ?
-        AND status IN (${LEASE_HOLDING_STATUSES_SQL})
-    `).get(jobId);
-    if (!row) return { changes: 0, wasAssessing: false };
-
-    const update = db.prepare(`
-      UPDATE jobs
-      SET status = 'queued',
-          lease_owner = NULL,
-          lease_token = NULL,
-          lease_expires_at = NULL,
-          ready_at = ?,
-          attempt_count = CASE
-            WHEN status != 'running' OR NOT EXISTS (
-              SELECT 1 FROM job_attempts a WHERE a.job_id = jobs.id
-                AND a.id = (SELECT MAX(id) FROM job_attempts WHERE job_id = jobs.id)
-                AND a.status = 'running' AND a.attempt_kind IN ('implementation', 'human')
-            ) THEN attempt_count
-            ELSE MAX(0, attempt_count - 1)
-          END,
-          updated_at = ?
-      WHERE id = ?
-        AND status IN (${LEASE_HOLDING_STATUSES_SQL})
-    `).run(ts, ts, jobId);
-
-    const wasAssessing = row.status === "awaiting_assessment";
-    if (update.changes > 0 && wasAssessing) {
-      db.prepare(`
-        UPDATE jobs
-        SET ${ASSESS_ONLY_PAYLOAD_SQL}
-        WHERE id = ?
-      `).run(jobId);
-    }
-    if (update.changes > 0) {
-      _consumePendingHumanGateResume(jobId, { db });
-    }
-
-    return { changes: update.changes, wasAssessing };
-  });
-  const result = requeueOne();
-
-  if (result.changes > 0) {
-    releaseJobLocksForStatus(jobId, "queued");
-    logEvent({
-      job_id: jobId,
-      event_type: EVENT_TYPES.JOB_SHUTDOWN_REQUEUE,
-      actor_type: EVENT_ACTORS.SCHEDULER,
-      message: result.wasAssessing
-        ? `Assessment interrupted by ${label}, requeued as assess-only`
-        : `Requeued for ${label} (attempt not counted)`,
-    });
-    notifyQueueStateChanged({
-      reason: "job_shutdown_requeue",
-      jobId,
-    });
-  }
-  return result.changes > 0;
+// Preserve the public queue contract while shutdown settlement has one owner.
+const shutdownRecovery = new QueueShutdownRecovery({ refreshWorkItemStatus });
+export function requeueForShutdown(jobId, options) {
+  return shutdownRecovery.requeueForShutdown(jobId, options);
 }
-
-// A forced exit must not stall on a contended writer: the process is leaving
-// either way, and the next boot's force-requeue recovers anything left behind.
-const FORCED_EXIT_REQUEUE_BUSY_MS = 1000;
-
-/**
- * Requeue the active jobs one scheduler owner leased, for a forced exit
- * (second signal, shutdown watchdog). The process terminates synchronously, so
- * interrupted workers never reach their graceful-shutdown requeue. Each job
- * gets the same no-penalty requeue as graceful shutdown and its running
- * attempt is closed as interrupted, instead of the next boot recording it as
- * "Orphaned by scheduler crash". Jobs leased by any other owner are untouched.
- * Synchronous and best-effort: never throws.
- */
-export function requeueOwnedJobsForForcedExit(ownerId, {
-  reason = "Forced shutdown",
-  busyTimeoutMs = FORCED_EXIT_REQUEUE_BUSY_MS,
-} = {}) {
-  const empty = () => ({ requeued: 0, interruptedAttempts: 0, jobIds: [] });
-  let summary = empty();
-  if (!ownerId) return summary;
-  let affectedWorkItems = new Set();
-  let db;
-  let prevBusyMs = null;
-  try {
-    db = getDb();
-    prevBusyMs = Number(db.pragma("busy_timeout", { simple: true }) ?? 10000);
-    db.pragma(`busy_timeout = ${Math.max(0, Math.floor(Number(busyTimeoutMs) || 0))}`);
-    runImmediateTransaction(db, () => {
-      const owned = db.prepare(`
-        SELECT id, work_item_id
-        FROM jobs
-        WHERE lease_owner = ?
-          AND status IN (${ACTIVE_LEASE_STATUSES_SQL})
-        ORDER BY id
-      `).all(String(ownerId));
-      const runningAttempts = db.prepare(`
-        SELECT id, started_at FROM job_attempts WHERE job_id = ? AND status = 'running'
-      `);
-      const nowMs = Date.now();
-      for (const job of owned) {
-        const attempts = runningAttempts.all(job.id);
-        // requeueForShutdown refunds the attempt only while it is still
-        // running, so the attempt is closed after the requeue.
-        if (!requeueForShutdown(job.id, { label: "forced shutdown" })) continue;
-        summary.requeued += 1;
-        summary.jobIds.push(job.id);
-        if (job.work_item_id != null) affectedWorkItems.add(job.work_item_id);
-        for (const attempt of attempts) {
-          const startedMs = Date.parse(attempt.started_at || "");
-          completeAttempt(attempt.id, {
-            status: "interrupted",
-            duration_ms: Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : null,
-            error_text: String(reason || "Forced shutdown"),
-          });
-          summary.interruptedAttempts += 1;
-        }
-      }
-    });
-  } catch {
-    // Rolled back (or never started): the next boot's force-requeue recovers
-    // these jobs, so report nothing requeued.
-    summary = empty();
-    affectedWorkItems = new Set();
-  } finally {
-    if (db && prevBusyMs != null) {
-      try { db.pragma(`busy_timeout = ${prevBusyMs}`); } catch { /* connection is closing */ }
-    }
-  }
-  for (const wiId of affectedWorkItems) {
-    try { refreshWorkItemStatus(wiId); } catch { /* next boot refreshes status */ }
-  }
-  return summary;
+export function requeueOwnedJobsForForcedExit(ownerId, options) {
+  return shutdownRecovery.requeueOwnedJobsForForcedExit(ownerId, options);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

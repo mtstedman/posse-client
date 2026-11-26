@@ -99,15 +99,31 @@ Posse to work on**, rather than the Posse installation directory:
 
 ```bash
 cd /path/to/your/git-project
-posse doctor
-posse admin
 posse add "Describe the change you want"
-posse go
+posse admin
+posse doctor --first-task
+posse go --approve-plan --no-auto-merge
+posse review
 ```
 
 `posse admin` lets you configure providers and account settings. `posse go`
 plans and runs queued work. Work that modifies the repository uses Git
 worktrees. Review the resulting changes before publishing them.
+
+For the first task, choose a small change and state an observable result.
+Use `posse add --guided` in place of the example add command for guided intake;
+do not queue the task twice. Adding it initializes the project without running
+its implementation. The first-task doctor report identifies Git, provider,
+runtime, and verification setup that needs attention. Its provider checks are
+local; declared test commands have not been executed. If tests live in a nested
+package or the task needs manual acceptance, identify that in the plan.
+
+The example run pauses for plan approval and disables auto-merge for that run.
+Inspect the waiting plan in the monitor or with `posse plan review <wi-id>`, then
+approve it when ready. `posse plan` by itself only queues planning jobs. After execution, `posse review` explains
+saved work, check evidence, unresolved requirements, delivery, and the next
+available inspection step. Execution completion and assessor approval alone
+do not establish that every requirement was tested or that work was deployed.
 
 | Command | Purpose |
 |---|---|

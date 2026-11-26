@@ -185,7 +185,7 @@ the parent's transcript or dispatch tools. Existing citation-only `sub_agent`
 behavior remains available to its existing callers; gated planners receive only
 `dispatch_agent` for delegation.
 
-Account settings bound total children per planner call (default 2), child turns
+Account settings bound total children per planner call (see [Planner research](#planner-research) for the current default), child turns
 (24), timeout (1200 seconds), effort (medium by default with a high ceiling),
 and returned report-size target (12000 characters; longer reports remain intact).
 The runtime converts the triage turn setting into a planner repository-read
@@ -396,9 +396,10 @@ After installation, run commands in the Git project you want Posse to work on:
 ```bash
 cd /path/to/your/git-project
 posse add "Describe the change you want"
-posse doctor
 posse admin
-posse go
+posse doctor --first-task
+posse go --approve-plan --no-auto-merge
+posse review
 ```
 
 `posse add`, `posse go`, `posse admin init`, and session joins initialize the project. Other repository commands
@@ -409,6 +410,19 @@ shared tools from Posse's own checkout.
 `posse go` plans and runs queued work. Boot checks required dependencies,
 attempts doctor repair when unhealthy, and stops if verification still fails.
 Use `posse help` for the full CLI reference.
+
+`posse doctor --first-task` adds one readiness report for Git and commit identity,
+the configured planner/developer/assessor provider pools, runtime requirements,
+and declared root verification commands. It sends no model request and does not
+execute those commands. A declared check is not passing evidence. The report
+explains missing prerequisites and the queue → plan → run → review workflow;
+the example above requests plan approval and disables auto-merge for that run.
+`posse plan` alone queues planning jobs; it does not execute or display a plan.
+Use `posse plan review <wi-id>` to inspect an existing plan.
+`--json` includes `first_task`; exit status is nonzero when first-task readiness
+is blocked or needs attention, even if the dependency-only `ok` field is true.
+Run `posse add` first to initialize a new project; a skipped doctor check never
+claims that project's runtime is ready.
 
 Interactive `run`, `go`, and session starts offer to refresh Posse when its
 installation is behind `origin/main`. Accepting saves local tracked and

@@ -1,4 +1,4 @@
-import { outcomeSummary } from "../../../assessment/functions/work-item-outcome.js";
+import { outcomeDetailLines } from "../../../assessment/functions/outcome-guidance.js";
 // lib/display.js - Split-screen terminal UI with input handling
 //
 // Layout:
@@ -571,7 +571,7 @@ export class DisplayApprovalRenderer {
     const statusColor = paletteStatusColor(displayStatus, C);
     lines.push(` ${C.bold}WI#${wi.id}:${C.reset} ${wi.title}`);
     lines.push(` ${C.dim}Status:${C.reset} ${statusColor}${displayStatus.toUpperCase()}${C.reset}  ${C.dim}Priority:${C.reset} ${wi.priority}  ${C.dim}Branch:${C.reset} ${wi.branch_name || "(none)"}`);
-    if (data.outcome) lines.push(` ${outcomeSummary(data.outcome)}`);
+    if (data.outcome) lines.push(...outcomeDetailLines(data.outcome, { workItemId: wi.id }).flatMap(line => this._wrapText(line, inner - 2).map(part => ` ${part}`)));
     if (data.finalAssessment || getReviewDirtyState(data.worktreeStatus).dirty) {
       const assessment = effectiveReviewAssessment(data);
       const color = assessment.status === "PASS" ? C.green : assessment.status === "FAIL" ? C.red : C.yellow;
@@ -1177,7 +1177,7 @@ export class DisplayApprovalRenderer {
     }
 
     // ── Final Assessment ──
-    if (data.outcome) lines.push(` ${outcomeSummary(data.outcome)}`);
+    if (data.outcome) lines.push(...outcomeDetailLines(data.outcome, { workItemId: data.wi.id }).flatMap(line => this._wrapText(line, inner - 2).map(part => ` ${part}`)));
     if (data.finalAssessment || getReviewDirtyState(data.worktreeStatus).dirty) {
       const assessment = effectiveReviewAssessment(data);
       const color = assessment.status === "PASS" ? C.green : assessment.status === "FAIL" ? C.red : C.yellow;

@@ -1,4 +1,6 @@
 import path from "node:path";
+import { readWorkItemOutcome } from "../../queue/functions/work-item-outcome.js";
+import { safeOutcomeBrief } from "../../assessment/functions/work-item-outcome.js";
 
 import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES, EXECUTING_JOB_STATUSES } from "../../../catalog/job.js";
 import { BRIDGE_NON_AGENT_JOB_TYPES, BRIDGE_OPEN_GATE_STATUSES } from "../../../catalog/bridge.js";
@@ -393,6 +395,14 @@ export async function projectWorkItemOverview(args = {}, context = {}) {
       latest_event_ids: latestIds,
       capabilities: ["question.answer", "agent.nudge"],
     };
+    // The evidence readers own the current repository connection. Never mix
+    // it with an explicitly supplied alternate database during projections.
+    if (db === getDb()) {
+      try {
+        const outcome = readWorkItemOutcome(selectedWorkItem.id);
+        if (outcome) selected.outcome = safeOutcomeBrief(outcome);
+      } catch { /* unavailable evidence must not break the interaction surface */ }
+    }
   }
   return {
     ...commonEnvelope(WORK_ITEM_OVERVIEW_PROTOCOL, binding.repoPath, context, db),

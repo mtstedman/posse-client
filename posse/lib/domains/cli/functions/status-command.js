@@ -1,5 +1,5 @@
 import { readWorkItemOutcome } from "../../queue/functions/work-item-outcome.js";
-import { outcomeSummary } from "../../assessment/functions/work-item-outcome.js";
+import { outcomeDetailLines } from "../../assessment/functions/outcome-guidance.js";
 import { statusColor, statusIcon } from "../../ui/functions/display/status-palette.js";
 import {
   computeJobProgressStats,
@@ -350,7 +350,7 @@ function renderHumanStatus(data, { C }) {
           workItem.merge_state === "merge_failed" ? ` ${C.red}[MERGE FAILED]${C.reset}` : "";
       write(`\n    ${wiIcon} WI#${workItem.id}${C.reset} ${String(workItem.title || "").slice(0, 50)} ${C.dim}(${progress.succeeded}/${foreground.length} jobs${progress.recovered > 0 ? `; ${progress.recovered} recovered` : ""})${C.reset}${mergeTag}`);
 
-      write(`      ${outcomeSummary(outcome)}`);
+      for (const line of outcomeDetailLines(outcome, { workItemId: workItem.id })) write(`      ${line}`);
       for (const job of foreground) {
         const displayStatus = jobDisplayStatus(job, foreground);
         const icon = statusIcon(displayStatus, { kind: "job", colors: C });

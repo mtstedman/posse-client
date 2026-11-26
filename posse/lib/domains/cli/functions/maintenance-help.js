@@ -14,6 +14,11 @@ export function renderDoctorHelp({ log, colors }) {
     posse doctor --dry-run
     posse doctor --json
     posse doctor --adopt-node-install
+    posse doctor --first-task
+
+  --first-task adds a first-task readiness report for Git, configured providers,
+  runtime dependencies, and declared verification commands. It sends no model
+  request and does not execute tests. Use --json for structured first_task data.
 
   Each package-manager command is capped at 30 minutes and Jina download/deploy
   at 2 hours, so an unhealthy child process cannot hang doctor indefinitely.
