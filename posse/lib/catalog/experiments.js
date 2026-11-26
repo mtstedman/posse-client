@@ -43,7 +43,7 @@ export const EXPERIMENT_PLAN_ISSUES = Object.freeze({
   MISSING_GOAL: "missing_goal", BASELINE_REFERENCE: "baseline_reference", STALE_INTERVAL: "stale_interval",
   DUPLICATE_DEPENDENCY: "duplicate_dependency",
 });
-export const EXPERIMENT_USAGE = "posse experiment setup-schema | setup-validate < setup.json | launch < approved-setup-request.json\nposse experiment integrate < integration-request.json | integration-log < check-request.json\nposse experiment schema | validate < plan.json | report < measurements.json\nposse experiment list | create|get|stage|run|decide|files|progress|status|cancel|stop < request.json\nExecution requires an operator-provisioned private runtime. status emits a campaign report; report previews supplied measurements.";
+export const EXPERIMENT_USAGE = "posse experiment init-schema | init < experiment.json\nposse experiment launch|status|progress|stop <workspace-directory>\nposse experiment setup-schema | setup-validate < setup.json | launch < approved-setup-request.json\nposse experiment integrate < integration-request.json | integration-log < check-request.json\nposse experiment schema | validate < plan.json | report < measurements.json\nposse experiment list | create|get|stage|run|decide|files|progress|status|cancel|stop < request.json\ninit provisions a private runtime; raw launch requires a provisioned owner. status emits a campaign report; report previews supplied measurements.";
 
 const text = maxLength => ({ type: "string", minLength: 1, maxLength });
 const count = maximum => ({ type: "integer", minimum: 1, maximum });

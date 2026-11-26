@@ -55,7 +55,69 @@ budget usage, history and charts using the existing UI components. Human review
 buttons are bound to the displayed candidate revision. Reports update from
 owner telemetry without model calls, and remain available after completion.
 
-Operator CLI:
+### Standalone workspace preparation
+
+Run `posse experiment init-schema` for the input example, then supply the
+experiment-specific objective, metrics, file scope, JSONL entrypoint, frozen
+evaluation, and repository checks:
+
+```sh
+posse experiment init-schema > init-contract.json
+posse experiment init < experiment.json
+# init returns the prepared directory and exact commands:
+posse experiment launch /path/to/repo/.posse/experiments/algorithm-v1
+posse experiment progress /path/to/repo/.posse/experiments/algorithm-v1
+posse experiment status /path/to/repo/.posse/experiments/algorithm-v1
+posse experiment stop /path/to/repo/.posse/experiments/algorithm-v1
+```
+
+`init` resolves the checked-out `main` or `master` destination, pins its commit,
+reads declared source from Git, fills source/evaluation digests, and prepares
+an immutable launch request. Specify `trunk_branch` if the destination is
+ambiguous or uses another name. Paths after `work/` map to repository paths by
+default; provide `mapping: [{source, target}]` for different writable paths.
+Inline initial contents, especially a read-only adapter, belong in `setup.files`.
+Mapped existing source must match the pinned commit; pending edits to those
+files block preparation. Unrelated dirty files are preserved and may block
+final merging until trunk is clean.
+
+The input is `{name, setup, evaluation, checks}` with optional `mapping`,
+`prepare`, `trunk_branch`, `image`, and `runtime_path`. `setup.plan` supplies
+`objective`, `entrypoint`, `files`, and `metrics`; ordinary plan/settings fields
+can be overridden. Defaults are ten iterations, automatic acceptance against
+the first goal metric, **standard / medium for all roles**, and a shared budget
+of 100 model calls, 1,000,000 tokens, $25, and one hour. These are ceilings, not
+spending targets. Checks remain explicit argv commands; initialization never
+guesses evaluation answers or treats an arbitrary package script as the
+experiment's success criterion.
+
+Preparation provisions a separate private owner under
+`~/.local/state/posse/experiment-owners/`, pins a locally available Docker image,
+and pulls the profile's default image if missing. Supply `image` to choose a
+different tag or immutable ID. Linux Docker isolation and user systemd are
+checked before preparation succeeds. Existing evaluations/images can be copied
+from `runtime_path`, the repository's `.posse/experiment-owner` runtime, or the
+configured/default owner. Evaluation labels stay in the private owner runtime.
+No global owner is restarted or rewritten. Docker and systemd themselves must
+already be installed and accessible.
+
+Each directory selects its own owner automatically: no environment exports,
+digest copying, launch-envelope construction, or campaign-ID copying are needed.
+`init` performs no model calls. `launch` starts the validated setup and is safe
+to replay after a lost response. `status` saves `report.json`. Changed prepared
+setup/runtime data is rejected; initialize a new name to change the experiment.
+The prepared branch/worktree path is unique; the integration worktree is created
+when an accepted result is ready, then the direct strategy checks, commits, and
+merges it into trunk without model inference.
+
+Separate initialized experiments can run concurrently, including alongside
+ordinary work in other worktrees. Their owners and snapshots are isolated;
+trunk updates use shared Posse Git locks and check the combined tree when trunk
+has advanced. This does not reserve work-item file claims or coordinate arbitrary
+external writes. Raw launches against one shared owner retain its one-runner
+limit. Concurrent owners share the machine's CPU/memory and provider capacity.
+
+Raw operator CLI (for callers managing their own owner and setup):
 
 ```sh
 posse experiment setup-schema

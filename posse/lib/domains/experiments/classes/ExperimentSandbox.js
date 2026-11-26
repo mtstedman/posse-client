@@ -17,7 +17,7 @@ const environment = () => ({ PATH: "/usr/bin:/bin", HOME: os.homedir(), XDG_RUNT
 export class ExperimentSandbox {
   constructor({ images = {} } = {}) { this.images = structuredClone(images); }
   fingerprint(plan) { return experimentDigest({ profile: plan.runtime.profile, image: this.images[plan.runtime.profile], evaluation: plan.evaluation.digest, protocol: "jsonl.numeric.v1" }); }
-  async command(file, args) { return (await exec(file, args, { env: environment(), timeout: 15000, maxBuffer: 1048576 })).stdout.trim(); }
+  async command(file, args, { timeout = 15000 } = {}) { return (await exec(file, args, { env: environment(), timeout, maxBuffer: 1048576 })).stdout.trim(); }
   identity(runId) {
     if (!/^[a-f0-9-]{36}$/.test(runId)) throw new Error("Invalid sandbox identity.");
     return `posse-experiment-${runId}`;

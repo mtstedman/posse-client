@@ -1,17 +1,24 @@
+import { experimentInitContract, EXPERIMENT_WORKSPACE_ACTIONS } from "../../../catalog/experiment-workspace.js";
+import { initializeExperiment } from "./workspace-init.js";
+import { workspaceExperimentCommand } from "./workspace-cli.js";
 import { EXPERIMENT_LIMITS, EXPERIMENT_OPERATIONS, EXPERIMENT_USAGE } from "../../../catalog/experiments.js";
 import { experimentPlanningRequest } from "./planning-api.js";
 import { createExperimentReport } from "./report.js";
 import { experimentSetupContract, validateExperimentSetup } from "./setup.js";
 
-export async function runExperimentCli(argv = [], { input = process.stdin, print = value => console.log(value), request = ownerRequest } = {}) {
+export async function runExperimentCli(argv = [], { input = process.stdin, print = value => console.log(value), request = ownerRequest, initialize = initializeExperiment, workspace = workspaceExperimentCommand } = {}) {
   const [action = "help", ...rest] = argv;
-  if (rest.length) throw new Error(EXPERIMENT_USAGE);
+  if (rest.length) {
+    if (rest.length !== 1 || !EXPERIMENT_WORKSPACE_ACTIONS.includes(action) || rest[0].startsWith("-")) throw new Error(EXPERIMENT_USAGE);
+    print(JSON.stringify(await workspace(action, rest[0]))); return 0;
+  }
   if (["help", "--help", "-h"].includes(action)) { print(EXPERIMENT_USAGE); return 0; }
   let result;
-  if (action === "schema") result = experimentPlanningRequest(EXPERIMENT_OPERATIONS.SCHEMA);
+  if (action === "init-schema") result = experimentInitContract();
+  else if (action === "schema") result = experimentPlanningRequest(EXPERIMENT_OPERATIONS.SCHEMA);
   else if (action === "setup-schema") result = experimentSetupContract();
   else if (action === "list") result = await request(EXPERIMENT_OPERATIONS.LIST, {});
-  else if (["validate", "setup-validate", "launch", "integrate", "integration-log", "stop", "report", "create", "get", "stage", "run", "decide", "files", "progress", "status", "cancel"].includes(action)) {
+  else if (["init", "validate", "setup-validate", "launch", "integrate", "integration-log", "stop", "report", "create", "get", "stage", "run", "decide", "files", "progress", "status", "cancel"].includes(action)) {
     const limit = action === "validate" ? EXPERIMENT_LIMITS.planBytes : EXPERIMENT_LIMITS.reportBytes;
     const chunks = []; let bytes = 0;
     for await (const chunk of input) {
@@ -21,7 +28,7 @@ export async function runExperimentCli(argv = [], { input = process.stdin, print
     }
     let plan;
     try { plan = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new Error("Experiment plan must be valid JSON."); }
-    result = action === "setup-validate" ? validateExperimentSetup(plan) : action === "validate" ? experimentPlanningRequest(EXPERIMENT_OPERATIONS.VALIDATE, { plan })
+    result = action === "init" ? await initialize(plan) : action === "setup-validate" ? validateExperimentSetup(plan) : action === "validate" ? experimentPlanningRequest(EXPERIMENT_OPERATIONS.VALIDATE, { plan })
       : action === "report" ? createExperimentReport(plan) : await request(`experiment.${action === "status" ? "report" : action.replaceAll("-", "_")}`, plan);
   } else throw new Error(EXPERIMENT_USAGE);
   print(JSON.stringify(result));
