@@ -176,6 +176,22 @@ receives its identity and compact findings. Resource aliases are sampled to 32
 with an explicit omitted count; use stable aliases across cases. Interface text
 is limited to 8 KiB and the complete contract to 16 KiB.
 
+Corpus-backed writers and assessors also receive `test.corpus_cases` and
+`test.inspect_resource`. They can list ten labeled cases at a time and inspect
+one resource by case index and alias: PNG/JPEG/WebP/GIF pixels, UTF-8 text, or hex
+bytes for ROMs and other binaries. Inspection resolves only the frozen corpus's
+resource bindings, verifies archive integrity and never returns answer keys.
+The prep agent retains its own scoped inputs/inspect/download tools.
+
+Previews are requested on demand. Text is limited to 4 KiB and hex to 512 input
+bytes per page; images use the shared bounded image viewer. Only the next agent
+decision receives the requested pixels, and the last four inspection/source
+results remain in context. Temporary preview files are purged after success,
+failure or cancellation. Inspection follow-up calls count against the existing
+budget; the coordinator receives no inspection tools or pixels. Specialized
+formats still require an appropriate adapter; inspection does not execute ROMs
+or automatically render PDFs/audio/video.
+
 To run a corpus, replace the inline `evaluation` in an init request with
 `corpus:{experiment,corpus,revision?}`. Metric IDs are `score` or contract field
 IDs; use higher-is-better fraction metrics. Selected field metrics require answer

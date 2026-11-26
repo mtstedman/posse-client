@@ -10,6 +10,12 @@ export function validResourceBinding(binding) {
   return binding && /^[a-f0-9]{64}$/.test(binding.resource_id || '') && binding.file_id === 'payload' && validCorpusFilename(binding.name);
 }
 
+export async function readCorpusResource(resource) {
+  const info = await fs.lstat(resource.archive_path);
+  if (!info.isFile() || info.isSymbolicLink() || info.size > L.resourceBytes + 1048576 || await fs.realpath(resource.archive_path) !== resource.archive_path) throw new Error('Invalid corpus archive file.');
+  return unpackCorpusResource(await fs.readFile(resource.archive_path), resource.manifest);
+}
+
 // Called inside the sandbox's temporary run directory. Only public resource
 // bytes are staged; manifests, answer keys and corpus metadata stay with owner.
 // The existing sandbox finally/recovery cleanup removes this entire directory.
@@ -25,9 +31,7 @@ export async function stageCorpusInputs(evaluation, runDirectory) {
       if (!resource || resource.manifest.resource_id !== id) throw new Error('Resource registry binding is missing.');
       const resourceDirectory = path.join(directory, id);
       if (!staged.has(id)) {
-        const info = await fs.lstat(resource.archive_path);
-        if (!info.isFile() || info.isSymbolicLink() || info.size > L.resourceBytes + 1048576 || await fs.realpath(resource.archive_path) !== resource.archive_path) throw new Error('Invalid corpus archive file.');
-        const bytes = await unpackCorpusResource(await fs.readFile(resource.archive_path), resource.manifest);
+        const bytes = await readCorpusResource(resource);
         bytesTotal += bytes.length; if (bytesTotal > L.importBytes) throw new Error('Run input byte budget exceeded.');
         await fs.mkdir(resourceDirectory, { mode: 0o755 });
         await fs.writeFile(path.join(resourceDirectory, 'payload'), bytes, { flag: 'wx', mode: 0o444 });

@@ -15,7 +15,7 @@ export function validateCorpusInterface(value) {
 }
 export function publicCorpusContract(evaluation) {
   const aliases = [...new Set(evaluation.cases.flatMap(item => Object.keys(item.resources)))].sort();
-  return { id: evaluation.corpus_id, revision: evaluation.corpus_revision, contract: evaluation.contract,
+  return { id: evaluation.corpus_id, revision: evaluation.corpus_revision, cases: evaluation.cases.length, contract: evaluation.contract,
     resource_aliases: aliases.slice(0, ALIAS_LIMIT),
     ...(aliases.length > ALIAS_LIMIT ? { resource_aliases_omitted: aliases.length - ALIAS_LIMIT } : {}) };
 }
