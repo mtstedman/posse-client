@@ -534,6 +534,9 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
         path: invocation.path,
         language: invocation.language,
         runner: invocation.runner,
+        execution_scope: invocation.runner === "repository_script" ? "repository_script" : "selected_file",
+        selected_path: invocation.path,
+        execution_argv: [invocation.executable, ...invocation.args],
         command,
         exit_code: code,
         signal,
@@ -567,6 +570,9 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
         path: invocation.path,
         language: invocation.language,
         runner: invocation.runner,
+        execution_scope: invocation.runner === "repository_script" ? "repository_script" : "selected_file",
+        selected_path: invocation.path,
+        execution_argv: [invocation.executable, ...invocation.args],
         command,
         error: error?.message || String(error),
       }));
@@ -617,7 +623,7 @@ export async function runUnitTestFiles({ projectDir, paths = [], capability = nu
     abortSignal?.throwIfAborted();
     const invocation = resolveUnitTestInvocation(projectDir, testPath, discovered);
     const key = invocation?.runner === "repository_script"
-      ? JSON.stringify([invocation.executable, invocation.args]) : null;
+      ? JSON.stringify([invocation.executable, invocation.args, invocation.cwd || projectDir]) : null;
     const reused = key && repositoryRuns.has(key);
     let result = (key && repositoryRuns.get(key))
       || (Date.now() >= deadline
@@ -632,7 +638,7 @@ export async function runUnitTestFiles({ projectDir, paths = [], capability = nu
         reason: "verification_plan_wall_budget_exhausted" });
     }
     if (key) repositoryRuns.set(key, result);
-    results.push({ ...result, path: testPath, ...(reused ? { reused: true, duration_ms: 0 } : {}) });
+    results.push({ ...result, path: testPath, selected_path: testPath, ...(reused ? { reused: true, duration_ms: 0 } : {}) });
   }
   // A real failure is the actionable result; otherwise anything that did not
   // run keeps the whole set unverified.

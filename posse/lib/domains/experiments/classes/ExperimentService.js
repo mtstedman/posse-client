@@ -1,3 +1,6 @@
+import { CORPUS_RESULT_SELECTORS } from '../../../catalog/experiment-corpus-prep.js';
+import { EXPERIMENT_CORPUS_EVALUATION_SCHEMA } from '../../../catalog/experiment-corpus.js';
+import { corpusCaseReport, corpusCaseSummary } from '../functions/corpus-report.js';
 import { EXPERIMENT_OPERATIONS as O, EXPERIMENT_OBJECTS as K, EXPERIMENT_STATES as S } from "../../../catalog/experiments.js";
 import { ExperimentCampaigns } from "./ExperimentCampaigns.js";
 import { ExperimentProgress } from "./ExperimentProgress.js";
@@ -17,7 +20,7 @@ export class ExperimentService {
   }
   async request(operation, args = {}) {
     const keys = {
-      [O.SETUP_SCHEMA]: [], [O.SETUP_VALIDATE]: ["setup"], [O.LAUNCH]: ["setup", "setup_digest", "idempotency_key"], [O.STOP]: ["id"], [O.INTEGRATE]: ["id", "snapshot_digest", "integration", "idempotency_key"], [O.INTEGRATION_LOG]: ["id", "stage", "check"],
+      [O.SETUP_SCHEMA]: [], [O.SETUP_VALIDATE]: ["setup"], [O.LAUNCH]: ["setup", "setup_digest", "idempotency_key"], [O.STOP]: ["id"], [O.INTEGRATE]: ["id", "snapshot_digest", "integration", "idempotency_key"], [O.INTEGRATION_LOG]: ["id", "stage", "check"], [O.CASE_RESULTS]: ["id", "which"],
       [O.CREATE]: ["idempotency_key", "plan", "files"], [O.GET]: ["id"], [O.LIST]: [], [O.FILES]: ["id"], [O.REPORT]: ["id"], [O.PROGRESS]: ["id"],
       [O.STAGE]: ["id", "idempotency_key", "expected_revision", "changes", "hypothesis"],
       [O.RUN]: ["id", "idempotency_key", "expected_revision", "snapshot_digest"],
@@ -35,7 +38,11 @@ export class ExperimentService {
     if (operation === O.GET) return this.campaigns.get(args.id);
     if (operation === O.LIST) return this.campaigns.list().map(c => ({ ...c, runner: this.runner.status(c.id), integration: this.integration.status(c.id) }));
     if (operation === O.FILES) return this.campaigns.files(args.id);
-    if (operation === O.REPORT) return { ...campaignReport(this.campaigns.load(args.id)), runner: this.runner.status(args.id), integration: this.integration.status(args.id) };
+    if (operation === O.CASE_RESULTS) return this.caseResults(args.id, args.which);
+    if (operation === O.REPORT) {
+      const cases = this.caseResults(args.id, 'latest');
+      return { ...campaignReport(this.campaigns.load(args.id)), runner: this.runner.status(args.id), integration: this.integration.status(args.id), ...(cases ? { case_summary: corpusCaseSummary(cases) } : {}) };
+    }
     if (operation === O.PROGRESS) return { ...campaignProgress(this.campaigns.load(args.id)), runner: this.runner.status(args.id), integration: this.integration.status(args.id) };
     if (operation === O.STAGE) return this.campaigns.stage(args);
     if (operation === O.DECIDE) { const result = this.campaigns.decide(args); this.runner.resume(args.id); return result; }
@@ -43,6 +50,12 @@ export class ExperimentService {
     const active = this.active.get(args.id);
     if (!active || active.runID !== args.run_id) throw new Error("No matching active experiment run.");
     active.controller.abort(); await active.promise; return this.campaigns.get(args.id);
+  }
+  caseResults(id, which) {
+    if (!CORPUS_RESULT_SELECTORS.includes(which)) throw new Error('Select latest, accepted, or baseline case results.');
+    const campaign = this.campaigns.load(id);
+    const runID = which === 'baseline' ? campaign.starting_baseline.run_id : which === 'accepted' ? campaign.current_baseline.run_id : campaign.iterations.at(-1)?.run_id || campaign.starting_baseline.run_id;
+    return runID ? this.campaigns.store.get(K.CASE_RESULTS, runID) : null;
   }
   async run(args) {
     if (this.stopping || !this.backend) throw new Error("Experiment execution backend is unavailable.");
@@ -53,10 +66,11 @@ export class ExperimentService {
     if (this.stopping) throw new Error("Experiment owner is stopping.");
     // One sandbox per owner, including unresolved runs after a crash.
     if (this.campaigns.store.list(K.CAMPAIGNS).some(c => c.active_run && c.id !== args.id)) throw new Error("Another experiment run needs to finish or be reconciled.");
-    const receipt = this.campaigns.reserveRun({ ...args, ...(this.backend.fingerprint ? { environment_digest: this.backend.fingerprint(before.plan) } : {}) });
+    const receipt = this.campaigns.reserveRun({ ...args, ...(this.backend.fingerprint ? { environment_digest: this.backend.fingerprint(before.plan, evaluation) } : {}) });
     const c = this.campaigns.load(args.id);
     // An idempotent replay after completion returns its receipt, never reruns.
     if (c.active_run?.id !== receipt.active_run?.id || c.state !== S.RUNNING || this.active.has(c.id)) return receipt;
+    const observations = [];
     const run = c.active_run; const controller = new AbortController();
     const progress = new ExperimentProgress({ plan: c.plan, runId: run.id, baseline: c.current_baseline.metrics || {}, total: evaluation.cases.length });
     const publish = () => { this.assertOwner(); return this.campaigns.progress(c.id, run.id, progress.snapshot()); };
@@ -66,11 +80,12 @@ export class ExperimentService {
     task.promise = Promise.resolve().then(async () => {
       try {
         const result = await this.backend.run({ runId: run.id, plan: c.plan, files: this.campaigns.snapshot(run.snapshot_digest).files, evaluation,
-          signal: controller.signal, onObservation: observation => progress.observe({ ...observation, run_id: run.id }) });
+          signal: controller.signal, onObservation: observation => { if (progress.observe({ ...observation, run_id: run.id })) observations.push(observation); } });
         if (controller.signal.aborted) throw new Error("cancelled");
         this.assertOwner();
         const snapshot = progress.snapshot();
         if (snapshot.completed !== evaluation.cases.length) throw new Error("incomplete_evidence");
+        if (evaluation.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA) this.campaigns.store.put(K.CASE_RESULTS, run.id, corpusCaseReport(evaluation, observations, { campaignID: c.id, runID: run.id }));
         this.campaigns.complete(c.id, run.id, { metrics: Object.fromEntries(snapshot.metrics.map(m => [m.id, m.current])), evidence_digest: result.evidence_digest });
       } catch (error) {
         // Guest diagnostics must not leak private host paths or become policy.

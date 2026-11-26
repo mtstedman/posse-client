@@ -1,3 +1,4 @@
+import { recordRecoveredCommitAttempt } from "../../../queue/functions/attempts.js";
 import {
   beginJobRetryGeneration, createJob, getAttempts, getJob, getWorkItem, listActiveFileLocks,
   requestParkedJobResumeAfterGate, runInTransaction, setAttemptCommitHash,
@@ -139,13 +140,25 @@ export async function applyDirtyWorktreeRecovery({ worker, job, payload, action,
       const commitBase = String(await gitExecAsync(["rev-parse", `${result.hash}^1`], cwd)).trim();
       const commit = { commit_hash: result.hash, commit_base_hash: commitBase };
       next[DIRTY_WORKTREE_RECOVERY_KEY].commits = [...priorCommits, commit];
-      if (sourceAttempt && !sourceAttempt.commit_hash) setAttemptCommitHash(sourceAttempt.id, result.hash, commitBase);
-      setJobResult(original.id, { commit_hash: result.hash, recovery_gate_id: job.id });
+      runInTransaction(() => {
+        if (sourceAttempt && !sourceAttempt.commit_hash) setAttemptCommitHash(sourceAttempt.id, result.hash, commitBase);
+        setJobResult(original.id, { commit_hash: result.hash, recovery_gate_id: job.id });
+        updateJobPayload(original.id, JSON.stringify(next));
+      });
     }
     // A stale prompt can be answered after the owner already committed. Keep
     // the completed assessment checkpoint only when neither scope nor tree
-    // changed. A new candidate still needs fresh developer validation.
+    // changed. A new candidate still needs fresh assessment.
     if (wasAssessOnly && !requiresDevelopment && result.hash === base && base === assessmentBase) next._assess_only = wasAssessOnly;
+    const recovered = next[DIRTY_WORKTREE_RECOVERY_KEY].commits.at(-1);
+    const recordedSource = loadAssessmentSource(original.id);
+    if (recovered && (!recordedSource.ok || recordedSource.commitHash !== recovered.commit_hash)) {
+      const recoveryAttempt = recordRecoveredCommitAttempt(original.id, recovered.commit_hash, recovered.commit_base_hash);
+      storeArtifact({ work_item_id: original.work_item_id, job_id: original.id, attempt_id: recoveryAttempt.id,
+        artifact_type: "response", content_long: `Operator selected commit at recovery gate #${job.id}. Preserved files were committed as ${recovered.commit_hash}. This is an operator recovery record, not a developer completion or verification claim. Validate the committed candidate against the task contract.${feedback ? ` Operator feedback: ${feedback}` : ""}` });
+      next._final_review_invalidated_attempt_id = recoveryAttempt.id;
+    }
+    if (recovered) next._assess_only = true;
     const source = loadAssessmentSource(original.id);
     if ((payload.candidate_identity || payload.recovery_phase === "commit") && !requiresDevelopment && source.ok
       && Number(source.attempt.id) === Number(payload.source_attempt_id)) {

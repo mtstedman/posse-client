@@ -1,3 +1,6 @@
+import { baselineChecksHaveNewEvidence } from "../../../verification/functions/baseline-check-evidence.js";
+import { PlanBaselineChecks } from "../../classes/PlanBaselineChecks.js";
+import { baselineRuntimeClock } from "../../classes/BaselineRuntimeClock.js";
 import { unfinishedTestOwners } from "../../../queue/functions/job-test-scope.js";
 import { scopeJobTestPlan } from "./job-test-plan.js";
 // Deterministic test execution owned by the worker, outside model context.
@@ -18,7 +21,7 @@ import { resolveFrozenTestPlan, frozenTestPlanFromReceipt, prunedTestPlan } from
 export { resolveFrozenTestPlan } from "./frozen-test-plan.js";
 import { currentCommit, currentHeadRef, repositoryFingerprint, repositoryRoot, worktreeFingerprint, dirtyPathDigests, dirtyFingerprintFromDigests, environmentFilesFingerprint, isAncestorCommit, porcelain, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
 export { dirtyWorktreeFingerprint, environmentFilesFingerprint, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
-import { unitTestCommandResult, effectiveVerificationPolicy, runVerificationChecks, runFrozenTestPlanOnce, runUnitTestFilesInSlot, didInvokeTestFile, testCoverageStatus, aggregateCheckCoverageStatus } from "./frozen-test-execution.js";
+import { unitTestCommandResult, effectiveVerificationPolicy, runVerificationCheck, runVerificationChecks, runFrozenTestPlanOnce, runUnitTestFilesInSlot, didInvokeTestFile, testCoverageStatus, aggregateCheckCoverageStatus } from "./frozen-test-execution.js";
 export { runFrozenTestPlanOnce, testCoverageStatus, aggregateCheckCoverageStatus } from "./frozen-test-execution.js";
 import { testExecutionDelta, scopedTypecheckAttribution } from "./test-receipt-evidence.js";
 export { testExecutionDelta, scopedTypecheckAttribution, renderTestExecutionEvidence, postChangeTestLogSummary, testReceiptObservationDetail } from "./test-receipt-evidence.js";
@@ -202,6 +205,7 @@ export function workItemCommandReceipts(workItemId, {
 async function findRepositoryFrozenTestBaseline({
   jobId,
   planId,
+  plan,
   commitHash,
   policy,
   projectDir,
@@ -210,7 +214,7 @@ async function findRepositoryFrozenTestBaseline({
   if (!jobId || !planId || !commitHash || !projectDir || !treeFingerprint) return null;
   const repositoryFingerprintValue = await repositoryFingerprint(projectDir);
   if (!repositoryFingerprintValue) return null;
-  return repositoryReceiptCandidates(jobId).find((receipt) => (
+  const receipt = repositoryReceiptCandidates(jobId).find((receipt) => (
     receipt.phase === "baseline"
     && !receipt.reuse_scope
     && receipt.repository_fingerprint === repositoryFingerprintValue
@@ -219,6 +223,9 @@ async function findRepositoryFrozenTestBaseline({
     && receipt.tree_fingerprint === treeFingerprint
     && isReusableReceipt(receipt, policy, { projectDir })
   )) || null;
+  if (receipt && baselineChecksHaveNewEvidence(plan.execution_checks?.length ? plan.execution_checks : [plan],
+    { cwd: projectDir, policy }, receipt.artifact_id)) return null;
+  return receipt;
 }
 
 function storeRepositoryBaselineReference(job, receipt, { reuseScope = "repository_commit" } = {}) {
@@ -648,6 +655,7 @@ export async function executeReceipt({
   baselinePlanJobId = null,
 } = {}) {
   signal?.throwIfAborted();
+  if (phase === "baseline" && !baselineChecks) baselineChecks = new PlanBaselineChecks();
   // Every run below takes the work item's verification slot and stops when
   // the job is aborted.
   const execution = { signal, slotKey };
@@ -839,6 +847,9 @@ export async function executeReceipt({
   const rawResult = hasExecutionChecks
     ? await runVerificationChecks(plan, { cwd, policy: effectivePolicy, phase, baselineChecks, ...execution,
         baselineCommit: plan.capability_base_commit || (baselineReceipt?.status === "passed" ? baselineReceipt.commit_hash : null) || "HEAD" })
+    : phase === "baseline"
+    ? await baselineChecks.run(plan, { cwd, policy: effectivePolicy, signal }, () => runVerificationCheck(plan, {
+        cwd, policy: effectivePolicy, phase, ...execution, baselineCommit: plan.capability_base_commit || "HEAD" }))
     : Array.isArray(plan.unit_test_paths)
     ? await runUnitTestFilesInSlot({
         projectDir: cwd,
@@ -955,6 +966,8 @@ export async function executeReceipt({
     ...receiptIdentity,
     ...(siblingPaths.size > 0 ? { tree_state: "mixed" } : {}),
     duration_ms: result.duration_ms,
+    ...(result.baseline_shared ? { baseline_shared: true } : {}),
+    ...(result.baseline_source_artifact_id ? { baseline_source_artifact_id: result.baseline_source_artifact_id } : {}),
     failure_fingerprint: (hasExecutionChecks && checkRunsFailureFingerprint(result.check_runs)) || testFailureFingerprint(result, { executionRoot: cwd }),
     failure_inventory: testFailureInventory(result, { executionRoot: cwd }),
     execution_root: cwd,
@@ -1068,7 +1081,7 @@ function pruneJobTests(job, payload, cwd) {
   return payload;
 }
 
-export async function ensurePreDevelopmentTestBaseline({
+async function collectPreDevelopmentTestBaseline({
   job,
   payload,
   cwd,
@@ -1111,6 +1124,7 @@ export async function ensurePreDevelopmentTestBaseline({
     ? await findRepositoryFrozenTestBaseline({
         jobId: job?.id,
         planId: plan.plan_id,
+        plan,
         commitHash: headCommit,
         policy: effectivePolicy,
         projectDir: cwd,
@@ -1519,4 +1533,8 @@ export function __testRunDeterministicTestCommand(command, options = {}) {
 
 export function __testParseCommandArguments(command) {
   return parseCommandArguments(command);
+}
+
+export function ensurePreDevelopmentTestBaseline(options = {}) {
+  return baselineRuntimeClock.run(options.job, options.signal, (signal) => collectPreDevelopmentTestBaseline({ ...options, signal }));
 }

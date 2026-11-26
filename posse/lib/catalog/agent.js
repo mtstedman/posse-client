@@ -4,6 +4,8 @@ export const AGENT_DEFINITION_SCHEMA = "bossy.agent.v1";
 export const AGENT_TURN_PROTOCOL = "bossy.agent_turn.v1";
 // Caller-owned chats share provider dispatch without inheriting agent tools.
 export const AGENT_DISPATCH_PROTOCOL = "posse.agent_dispatch.v1";
+export const AGENT_INPUT_IMAGES = Object.freeze({ maxCount: 4, maxBase64Chars: 262144,
+  mimeTypes: ["image/png", "image/jpeg", "image/webp", "image/gif"], providers: ["codex", "openai", "anthropic", "grok"] });
 export const AGENT_DISPATCH_PROTOCOL_ERROR = "agent_protocol_error";
 export const AGENT_DEFINITION_MAX_BYTES = 256 * 1024;
 export const AGENT_NAME_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;

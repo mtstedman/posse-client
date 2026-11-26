@@ -171,3 +171,5 @@ export const RESEARCH_INFRASTRUCTURE_REFUND_LIMIT = 2;
 export const TOOL_OBSERVATION_OUTCOMES = readonlySet(["succeeded", "rejected", "failed"]);
 
 export const READ_NOT_FOUND_OBSERVATION = "tool.read.not_found";
+
+export const BASELINE_RUNTIME_OBSERVATION_TYPE = "job.baseline_runtime";

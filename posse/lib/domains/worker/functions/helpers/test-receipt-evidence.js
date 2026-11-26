@@ -42,7 +42,8 @@ export function compactTestFailureOutput(receipt) {
   const blockBudget = Math.floor((MAX_EVIDENCE_OUTPUT_CHARS - 2 * Math.max(0, failed.length - 1)) / Math.max(1, failed.length));
   const blocks = failed.map((check) => {
     const header = [
-      `[${check.path || check.check_id || "check"}] ${check.status}: ${check.reason || ""}`,
+      `[${check.execution_scope === "repository_script" ? "repository runner" : check.path || check.check_id || "check"}] ${check.status}: ${check.reason || ""}`,
+      ...(check.execution_scope === "repository_script" ? [`Selected path: ${check.selected_path || check.path}; the command covers a broader repository suite.`] : []),
       `Command: ${check.command || receipt.command || "unknown"}`,
       `Working directory: ${check.execution_root || check.cwd_relative || receipt.execution_root || "."}`,
     ].join("\n");

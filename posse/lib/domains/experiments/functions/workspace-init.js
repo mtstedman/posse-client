@@ -1,3 +1,4 @@
+import { ExperimentCorpora } from '../classes/ExperimentCorpora.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -98,7 +99,8 @@ export async function initializeExperiment(request, { cwd = process.cwd(), git =
   }
   const runtime = await runtimeSource(request, repo);
   if (runtime.schema !== EXPERIMENT_RUNTIME_SCHEMA) throw new Error('Invalid runtime configuration schema.');
-  const evaluation = request.evaluation || runtime.evaluations?.[partial.evaluation?.ref];
+  if (request.corpus && request.evaluation) throw new Error('Choose either a registered corpus or an inline evaluation.');
+  const evaluation = request.corpus ? await new ExperimentCorpora(repo).evaluation(request.corpus, plan.metrics) : request.evaluation || runtime.evaluations?.[partial.evaluation?.ref];
   if (!evaluation) throw new Error('Supply evaluation cases/scorers, or a plan.evaluation.ref registered in the existing runtime.');
   const evaluationDigest = experimentDigest(evaluation);
   if (partial.evaluation?.digest && partial.evaluation.digest !== evaluationDigest) throw new Error('Declared evaluation digest changed.');

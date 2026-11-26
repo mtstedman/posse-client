@@ -1,3 +1,4 @@
+import { baselineRuntimeClock } from "../../worker/classes/BaselineRuntimeClock.js";
 import { SchedulerBootLockController } from "./SchedulerBootLockController.js";
 import { ATLAS_INDEXING_HOLD_MAX_MS, ATLAS_INDEXING_PAUSE_OFF_VALUES, ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES, RUN_BACKGROUND_JOB_TYPES, ATLAS_BACKGROUND_JOB_CONCURRENCY, RUN_LOOP_KEEPALIVE_INTERVAL_MS, RUNTIME_KILL_RETRY_MS, RUNTIME_KILL_WEDGED_MS, PARKED_UPSTREAM_STALL_GRACE_MS, AUTO_MERGE_STALL_GRACE_MS, STALE_MERGE_AUTHORIZATION_MS, SYSTEM_HOLD_HOLDER_TYPES } from "../../../catalog/scheduler-lifecycle.js";
 import { prepareCrossWiFileSyncHandoff } from "../functions/cross-wi-file-sync.js";
@@ -2453,6 +2454,7 @@ export class Scheduler {
             })
             .finally(() => {
               if (activeWorkers.get(job.id)?.promise === workerPromise) {
+                baselineRuntimeClock.release(leasedJob);
                 activeWorkers.delete(job.id);
                 killedForRuntime.delete(job.id);
                 jobWriteActivity.clear(job.id);
@@ -2835,7 +2837,7 @@ function runtimeWatchdogElapsedMs(entry, job, nowMs = Date.now()) {
   if (creditedRuntimeExemption(entry, jobHasLiveEnvironmentSetup(job, { nowMs }), nowMs, {
     sinceKey: "environmentSetupExemptSince", creditKey: "environmentSetupExemptCreditMs", capMs: ENVIRONMENT_SETUP_RUNTIME_CREDIT_CAP_MS,
   })) return null;
-  return Math.max(0, nowMs - entry.startTime);
+  return Math.max(0, nowMs - entry.startTime - baselineRuntimeClock.elapsed(entry.job, nowMs));
 }
 
 // Exemption is honored only while cumulative credit remains; past the ceiling

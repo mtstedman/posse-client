@@ -81,6 +81,7 @@ export async function callProvider(promptText, {
   deleteFiles = null,
   stableContext = null,
   remoteSystemPrompt = null,
+  inputImages = [],
   maxTurns = null,
   maxOutputTokens = null,
   complexity = null,
@@ -282,7 +283,7 @@ export async function callProvider(promptText, {
     }
 
     const request = buildNativeDispatchRequest("codex", finalPrompt, {
-          jobId, workItemId, attemptId, agentCallId,
+          inputImages, jobId, workItemId, attemptId, agentCallId,
           authMode: preferredAuthMode,
           baseInstructions: role === "researcher" ? fs.readFileSync(CODEX_RESEARCH_BASE_INSTRUCTIONS_PATH, "utf8") : null,
           systemPrompt: developerInstructionRoute.developerInstructions,

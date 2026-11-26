@@ -1,3 +1,4 @@
+import { baselineCheckIdentity, baselineCheckStillMatches, storeBaselineCheck } from "../../../verification/functions/baseline-check-evidence.js";
 import { runCommand, MAX_STREAM_CHARS } from "./test-command-process.js";
 import path from "path";
 import fs from "node:fs";
@@ -44,7 +45,7 @@ export function unitTestCommandResult(aggregate, { finalReview = false, cwd = nu
     duration_ms: results.reduce((sum, result) => sum + Number(result.duration_ms || 0), 0),
     stdout: results.map((result) => {
       const label = (finalReview && result.outcome) || result.status || "unknown";
-      return `[${result.path}] ${String(label)}\n${String(result.stdout || "")}`.trim();
+      return `[${result.execution_scope === "repository_script" ? result.command : result.path}] ${String(label)}\n${String(result.stdout || "")}`.trim();
     }).join("\n\n"),
     stderr: results.map((result) => String(result.stderr || "")).filter(Boolean).join("\n\n"),
     reason: [TEST_RUNNER_REMOVED_REASON, TEST_REQUIRED_FILE_MISSING_REASON].includes(aggregate.reason) ? aggregate.reason : finalReview ? aggregate.reason || null
@@ -89,7 +90,7 @@ export function runUnitTestFilesInSlot({ slotKey = null, onSlotWait = null, ...o
     () => runUnitTestFiles(options));
 }
 
-async function runVerificationCheck(check, { cwd, policy, phase = null, signal = null, baselineCommit = "HEAD", filesToCreate = [], slotKey = null, onSlotWait = null } = {}) {
+export async function runVerificationCheck(check, { cwd, policy, phase = null, signal = null, baselineCommit = "HEAD", filesToCreate = [], slotKey = null, onSlotWait = null } = {}) {
   const executionCommand = check.execution_command || check.command;
   const raw = Array.isArray(check.unit_test_paths)
     ? await runUnitTestFilesInSlot({
@@ -206,11 +207,16 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
     const checkWall = Math.min(wall, remaining);
     const checkPolicy = { ...policy, wall_timeout_ms: checkWall, idle_timeout_ms: policy.idle_timeout_ms == null
       ? null : Math.min(policy.idle_timeout_ms, checkWall) };
+    const evidenceIdentity = phase === "post_change" ? baselineCheckIdentity(check, { cwd, policy: checkPolicy }) : null;
     const execute = () => runVerificationCheck(check, { cwd, baselineCommit,
       filesToCreate: plan.files_to_create || [], policy: checkPolicy, phase, signal, slotKey, onSlotWait: onCheckSlotWait });
     const result = baselineChecks && phase === "baseline"
       ? await baselineChecks.run(check, { cwd, policy: checkPolicy, signal }, execute)
       : await execute();
+    if (evidenceIdentity
+      && baselineCheckStillMatches(evidenceIdentity, check, { cwd, policy: checkPolicy })) {
+      storeBaselineCheck(evidenceIdentity, result, { source: "post_change" });
+    }
     const run = { ...result, check_id: check.id || check.check_id || null,
       command: check.command, required: check.required !== false, intent: check.intent || "test" };
     runs.push(run.status === "timed_out" && run.timeout_kind !== "idle" && checkWall < wall
@@ -244,6 +250,7 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
       stdout: String(run.stdout || "").slice(0, MAX_STREAM_CHARS), stderr: String(run.stderr || "").slice(0, MAX_STREAM_CHARS),
       file_results: run.file_results || [],
       ...(run.baseline_shared ? { baseline_shared: true } : {}),
+      ...(run.baseline_source_artifact_id ? { baseline_source_artifact_id: run.baseline_source_artifact_id } : {}),
       ...(run.required != null ? { required: run.required } : isUnrunnableTestResult(run) ? { required: false } : {}),
       status: run.status, ok: run.ok, reason: run.reason, exit_code: run.code,
       duration_ms: run.duration_ms, test_counts: run.test_counts || null,

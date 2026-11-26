@@ -1,8 +1,8 @@
 import { EXPERIMENT_RUNNER_ROLES, EXPERIMENT_NUMERIC_SCHEMA } from './experiments.js';
 
 export const EXPERIMENT_WORKSPACE_SCHEMA = 'posse.experiment.workspace.v1';
-export const EXPERIMENT_INIT_FIELDS = ['name', 'setup', 'evaluation', 'image', 'runtime_path', 'trunk_branch', 'mapping', 'checks', 'prepare'];
-export const EXPERIMENT_WORKSPACE_ACTIONS = ['launch', 'status', 'progress', 'stop'];
+export const EXPERIMENT_INIT_FIELDS = ['name', 'setup', 'evaluation', 'corpus', 'image', 'runtime_path', 'trunk_branch', 'mapping', 'checks', 'prepare'];
+export const EXPERIMENT_WORKSPACE_ACTIONS = ['launch', 'status', 'progress', 'stop', 'case-results'];
 export const EXPERIMENT_INIT_DEFAULTS = {
   images: { node: 'node:22-bookworm-slim', python: 'python:3.12-slim' },
   models: Object.fromEntries(EXPERIMENT_RUNNER_ROLES.map(role => [role, { model: 'standard', reasoning_effort: 'medium' }])),

@@ -187,6 +187,7 @@ export function buildNativeDispatchRequest(provider, promptText, {
   priorSessionHandle = null,
   recyclingMode = "fresh",
   transcript = null,
+  inputImages = [],
 } = {}) {
   if (!PROVIDER_DISPATCH_PROVIDERS.includes(provider)) {
     throw new Error(`Unsupported provider dispatch adapter: ${String(provider)}`);
@@ -225,6 +226,7 @@ export function buildNativeDispatchRequest(provider, promptText, {
   const textFindings = [];
   const safeSystemPrompt = systemPrompt == null ? null : dispatchSafeText(systemPrompt, "prompt.system", textFindings);
   const prompt = {
+    ...(inputImages.length ? { inputImages } : {}),
     text: dispatchSafeText(promptText || "", "prompt.text", textFindings),
     ...(provider === "anthropic" && promptCache ? { cache: true } : {}),
     ...(baseInstructions == null ? {} : { baseInstructions: dispatchSafeText(baseInstructions, "prompt.baseInstructions", textFindings) }),

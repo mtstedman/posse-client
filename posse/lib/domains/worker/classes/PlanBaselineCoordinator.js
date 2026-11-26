@@ -1,3 +1,4 @@
+import { baselineRuntimeClock } from "./BaselineRuntimeClock.js";
 import { getJob, listJobsByWorkItem } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
@@ -11,7 +12,11 @@ import { PlanBaselineChecks } from "./PlanBaselineChecks.js";
 export class PlanBaselineCoordinator {
   #pending = new Map();
 
-  async ensure({ job, cwd, signal = null, repairDependencies = null, onProgress = () => {} }) {
+  ensure(options) {
+    return baselineRuntimeClock.run(options.job, options.signal, (signal) => this.#ensure({ ...options, signal }));
+  }
+
+  async #ensure({ job, cwd, signal = null, repairDependencies = null, onProgress = () => {} }) {
     const planId = job.job_type === "plan" ? job.id : parseJobPayload(job)._plan_baseline_job_id;
     if (!planId || !cwd) return;
     const parent = getJob(planId);

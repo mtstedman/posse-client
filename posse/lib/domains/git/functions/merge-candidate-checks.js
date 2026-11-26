@@ -1,3 +1,4 @@
+import { baselineCheckIdentity, baselineCheckStillMatches, storeBaselineCheck } from "../../verification/functions/baseline-check-evidence.js";
 import { implicitTypechecks } from "../../verification/functions/implicit-typechecks.js";
 import { resolveUnitTestInvocation } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { testExecutionCounts } from "../../../shared/tools/functions/toolkit/test-output-counts.js";
@@ -78,21 +79,33 @@ export function declaredMergeCandidateCommands(jobs = []) {
 function runSelectedTests(paths, checkout, run, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   const results = [];
+  const seen = new Set();
   const quote = (arg) => `"${String(arg).replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
   for (const file of paths) {
     const invocation = resolveUnitTestInvocation(checkout, file);
     if (!invocation?.runner) return { ok: false, status: null, error_code: "ENOENT", output: `Selected test unavailable: ${file}` };
+    const invocationKey = JSON.stringify([invocation.executable, invocation.args, invocation.cwd || checkout]);
+    if (seen.has(invocationKey)) continue;
+    seen.add(invocationKey);
     const remaining = deadline - Date.now();
     if (remaining < 1) return { ok: false, status: null, timed_out: true, error_code: "ETIMEDOUT", output: "Selected tests exceeded merge budget" };
     const result = run([invocation.executable, ...invocation.args].map(quote).join(" "), {
       cwd: invocation.cwd || checkout, timeoutMs: remaining,
     });
     const counts = testExecutionCounts(result.output);
-    results.push({ ...result, no_tests: result.ok && counts && (counts.total === 0 || counts.total === counts.skipped) });
+    results.push({ ...result, no_tests: result.ok && counts && (counts.total === 0 || counts.total === counts.skipped),
+      file_result: { path: file, selected_path: file, runner: invocation.runner,
+        execution_scope: invocation.runner === "repository_script" ? "repository_script" : "selected_file",
+        command: [invocation.executable, ...invocation.args].map(quote).join(" "),
+        execution_argv: [invocation.executable, ...invocation.args], execution_root: invocation.cwd || checkout,
+        status: result.ok ? "passed" : "failed", ok: result.ok, test_counts: counts,
+        stdout: result.stdout || result.output || "", stderr: result.stderr || "" },
+    });
   }
   const failure = results.find((result) => !result.ok);
   return { ...(failure || results[0]), ok: !failure,
     no_tests: results.some((result) => result.no_tests),
+    file_results: results.map(result => result.file_result),
     stdout: results.map((result) => result.stdout || result.output || "").join("\n"),
     stderr: results.map((result) => result.stderr || "").join("\n"),
     output: results.map((result) => result.output || "").join("\n") };
@@ -118,6 +131,9 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
         test: { name: command }, note: validation.reason };
       const cwdRelative = validation.cwd_relative || null;
       const timeoutMs = Math.min(10 * 60_000, remainingMs);
+      const check = { ...validation, command, intent: implicit.has(command) ? "typecheck" : "test" };
+      const baselineIdentity = baselineCheckIdentity(check, { cwd: checkout });
+      const startedAt = Date.now();
       const result = Array.isArray(validation.unit_test_paths)
         ? runSelectedTests(validation.unit_test_paths, checkout, run, timeoutMs)
         : run(validation.execution_command || command, {
@@ -147,7 +163,7 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
             : result.signal ? MERGE_CHECK_FAILURE_KINDS.SIGNAL
               : result.error_code || result.status == null ? MERGE_CHECK_FAILURE_KINDS.SPAWN_ERROR
                 : !result.ok ? MERGE_CHECK_FAILURE_KINDS.TEST_FAILURE : null;
-      return { ok: !unavailable && result.ok && !abnormal, status: unavailable ? "unavailable" : result.ok && !abnormal ? "passed" : "failed",
+      const outcome = { ok: !unavailable && result.ok && !abnormal, status: unavailable ? "unavailable" : result.ok && !abnormal ? "passed" : "failed",
         ...(failureKind ? { failure_kind: failureKind } : {}),
         ...(classified.missing_runtime_capabilities ? { missing_runtime_capabilities: classified.missing_runtime_capabilities } : {}),
         source: "job_test_command", implicit_typecheck: implicit.has(command),
@@ -156,6 +172,20 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
         exit_code: result.status, signal: result.signal ?? null,
         ...(!unavailable && (!result.ok || abnormal) ? { failure: { message: result.output || `merge check ended without a result (${failureKind})` } } : {}),
       };
+      if (baselineIdentity && (!outcome.ok || counts?.skipped > 0)
+        && baselineCheckStillMatches(baselineIdentity, check, { cwd: checkout })) {
+        storeBaselineCheck(baselineIdentity, { ...outcome, reason: outcome.failure_kind || "tests_skipped" }, { source: "merge_candidate" });
+      }
+      if (outcome.ok && !(counts?.skipped > 0)
+        && baselineIdentity?.idle_timeout_ms == null && Date.now() - startedAt <= baselineIdentity?.wall_timeout_ms
+        && baselineIdentity && baselineCheckStillMatches(baselineIdentity, check, { cwd: checkout })) {
+        storeBaselineCheck(baselineIdentity, { status: "passed", ok: true,
+          code: result.status, signal: null, timed_out: false, duration_ms: 0,
+          stdout: outcome.stdout, stderr: outcome.stderr, test_counts: counts,
+          file_results: result.file_results || [],
+          coverage_status: implicit.has(command) ? "not_applicable" : counts?.total > 0 ? "reported_executed" : "unknown" }, { source: "merge_candidate" });
+      }
+      return outcome;
     });
     for (const result of results) {
       result.source = "job_test_command";

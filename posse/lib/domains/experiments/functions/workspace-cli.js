@@ -31,10 +31,11 @@ export async function workspaceExperimentCommand(action, directory, { request = 
     let receipt;
     try { receipt = await privateJson(path.join(directory, 'launch-receipt.json')); }
     catch (error) { if (error.code === 'ENOENT') throw new Error('Launch this workspace first. Replaying launch safely recovers a missing receipt.'); throw error; }
-    args = { id: receipt.id };
+    args = { id: receipt.id, ...(action === 'case-results' ? { which: 'latest' } : {}) };
   }
-  const result = await request(manifest.owner, `experiment.${action === 'status' ? 'report' : action}`, args);
+  const result = await request(manifest.owner, `experiment.${action === 'status' ? 'report' : action.replaceAll('-', '_')}`, args);
   if (action === 'launch') await save(path.join(directory, 'launch-receipt.json'), result);
+  if (action === 'case-results') await save(path.join(directory, 'case-results.json'), result);
   if (action === 'status') await save(path.join(directory, 'report.json'), result);
   return result;
 }

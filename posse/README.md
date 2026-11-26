@@ -55,6 +55,121 @@ budget usage, history and charts using the existing UI components. Human review
 buttons are bound to the displayed candidate revision. Reports update from
 owner telemetry without model calls, and remain available after completion.
 
+### Reusable labeled corpora
+
+`posse experiment corpus schema` prints the import example, prep defaults and
+prep tools. `corpus list` lists every registered corpus in the project, including
+when called from a task worktree. Other actions take one JSON request on stdin:
+
+```sh
+posse experiment corpus create < corpus.json
+posse experiment corpus import < items.json
+posse experiment corpus prep < prep.json
+posse experiment corpus inspect < corpus-reference.json
+posse experiment corpus update < corrections.json
+```
+
+Use `{experiment:"cards", corpus:"selected", contract:{fields:[...]}}` to
+create an empty corpus. Batch import accepts up to 100 `items` per request and
+can create the corpus when supplied a contract. Each item has `label`, `tags`,
+`profile`, `input`, `resources`, and `expected`. Resource bindings accept a local
+`path` relative to the experiment directory, a public HTTPS `url`, or an existing
+resource `id`; each can supply a human-readable `label`, a safe filename `name`,
+and an optional expected `sha256`. A case may bind several resources, such as
+`rom`, `controller_trace`, and `save_state`. Downloads have byte/time limits,
+validate redirects and public destinations, and purge temporary raw files.
+
+```json
+{
+  "experiment": "cards", "corpus": "selected",
+  "contract": {"fields": [
+    {"id":"identity","path":["identity"],"kind":"exact","weight":0.7},
+    {"id":"printing","path":["printing"],"kind":"exact","weight":0.3,"depends_on":["identity"]}
+  ]},
+  "items": [{
+    "label":"Selected card — glare photo", "tags":["glare"],
+    "resources":{"image":{"path":"inputs/card.jpg","label":"Selected card photograph","name":"image.jpg"}},
+    "profile":"card-identification-v1", "input":{},
+    "expected":{"identity":"canonical-card-id","printing":"canonical-printing-id"}
+  }]
+}
+```
+
+Resource and case labels lead inspection and per-case reports; hashes identify
+immutable bytes and bindings internally. Changing labels or tags creates a new
+corpus revision without duplicating resources, cases or answer keys. Storage is:
+
+```text
+.posse/experiments/
+  .resources/<sha256>.zip           # shared resource archive
+  .resources/<sha256>.json          # archive and payload integrity manifest
+  .resources/<sha256>.labels.json   # human-readable resource labels
+  corpora.json                     # project registry
+  cards/
+    inputs/                        # operator-owned originals; never purged
+    items/<case-id>.json            # resource bindings + profile + scenario
+    answers/<answer-id>.json        # expected answers bound to the complete case
+    corpora/selected.json           # current membership and labels
+    corpora/selected/<revision>.json
+    prep/<run-id>/report.json
+```
+
+Another corpus in the same experiment can import `entries` containing existing
+`case_id`, `answer_id`, `label`, and `tags`, instead of supplying `items` again.
+Resources are deduplicated project-wide. An archive currently contains one
+opaque resource file; multiple named bindings form a bundle. User-supplied ZIPs
+are treated as opaque files, never automatically extracted as arbitrary paths.
+Hashes of both the archive and expanded bytes are checked before staging.
+
+`update` requires `expected_revision`. Supply `items` to correct answers, or
+`entries:[{case_id,label,tags,resource_labels}]` to change annotations. Resource or
+scenario changes produce a new case ID; use `remove` with `case_ids` and
+`expected_revision` to remove obsolete membership. Older revisions and keys
+remain intact. `inspect` accepts `revision` and `include_answers:true` for review.
+`register` repairs registration from the current stored corpus head.
+
+For a prep agent, supply `{experiment, corpus, prompt}` and optionally `contract`,
+`model`, `reasoning_effort`, and `budget`. It can propose the contract for a new
+corpus, inventory/read the inputs directory, view image pixels, download public
+resources, and batch import cases. Defaults are standard/medium, 100 calls,
+1,000,000 tokens, $25 and one hour. It uses bounded context with working notes and
+an operation ledger; usage and download provenance are saved in its report.
+Rerunning prep expands an existing corpus. Model decisions are never automatically
+replayed after interruption. Staging is purged on completion/cancellation; the
+next prep invocation also cleans staging from dead local prep processes.
+
+Operator CLI imports are verified answer keys. Agent-inferred answers remain
+**draft** and prevent launching that corpus until corrected/verified or removed.
+The prep agent can import an operator-provided JSON answer manifest from inputs:
+`{items:[...]}`, with resource paths relative to that manifest and a required
+`sha256` for each resource. The exact manifest contents are imported and its hash
+recorded; the agent cannot edit that file or certify its own downloaded manifest.
+Review draft answers with `inspect` and promote corrections through `update`.
+
+Scoring contracts support weighted exact values (including explicit accepted
+alternatives), numeric tolerance and linear partial credit, set F1, and one-to-one
+object matching by bounding-box IoU with optional attribute scores. Missing or
+extra objects lose credit; duplicate detections cannot match multiple answers.
+Dependencies can require correct card identity before printing earns credit.
+Unknown answer fields are excluded from the denominator; they are not invented.
+The contract and answer keys freeze when a run is initialized.
+
+To run a corpus, replace the inline `evaluation` in an init request with
+`corpus:{experiment,corpus,revision?}`. Metric IDs are `score` or contract field
+IDs; use higher-is-better fraction metrics. Selected field metrics require answer
+coverage in every case. The Node/Python JSONL adapter receives
+`{case_id,input,files}` and returns `{case_id,prediction:{...}}`. `files.<alias>`
+resolves to a read-only path under `/input-files/`; labels, keys, and registry
+manifests remain outside the sandbox. Temporary expanded files are removed after
+success, failure, cancellation or owner recovery; archives remain reusable.
+Custom programs such as an emulator still require their experiment-specific
+adapter and a suitable pinned runtime image.
+
+`posse experiment case-results <prepared-directory>` saves a labeled component
+score table to `case-results.json`. `status` includes the weakest cases and tag
+summaries. Raw `case-results` requests accept `{id,which}` with `latest`, `accepted`
+or `baseline`. Detailed answer keys are never included in optimizer context.
+
 ### Standalone workspace preparation
 
 Run `posse experiment init-schema` for the input example, then supply the
@@ -555,8 +670,23 @@ Submitting a development plan registers its starting commits for shared baseline
 verification. Before its developers begin, Posse collects each starting point in
 one detached checkout and shares identical checks across the plan's tasks.
 Each task retains its own frozen receipt, including existing failures. Completed
-receipts survive restarts; different commits, policies, and environments remain
-separate. Post-change checks still verify each task's resulting code.
+receipts survive restarts. Checks use the actual runner invocation, so files mapped
+to the same repository section share one execution and report the broader scope.
+Baseline collection and waiting have their own bounded wall budget and do not
+consume the agent's runtime allowance; phase observations report both durations.
+
+Passing merge-candidate and post-change checks can supply a later baseline on the
+exact same Git tree, including a squash commit with a different commit hash.
+Evidence is bound to the project, invocation, policy, toolchain and environment;
+only missing or invalidated checks run again. Failed or waived merge checks never
+become passing baseline evidence, and ancestry alone cannot prove a new tree.
+In-flight tasks retain their original baseline. Post-change checks still verify
+each task's resulting code.
+
+Choosing **commit** at a preserved-work recovery gate commits the authorized files
+and resumes validation of that candidate. An interrupted developer's missing
+final response is recorded as an operator recovery, without claiming verification
+passed. **Send back** resumes development with the supplied feedback.
 
 The flag applies only to that run. Omitting it, or using `--scope-mode=default`,
 preserves the existing `scope_auto_approval` policy and interactive or

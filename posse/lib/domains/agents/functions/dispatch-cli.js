@@ -1,4 +1,4 @@
-import { AGENT_DISPATCH_PROTOCOL, AGENT_DISPATCH_PROTOCOL_ERROR, AGENT_REASONING_EFFORTS } from "../../../catalog/agent.js";
+import { AGENT_DISPATCH_PROTOCOL, AGENT_DISPATCH_PROTOCOL_ERROR, AGENT_REASONING_EFFORTS, AGENT_INPUT_IMAGES } from "../../../catalog/agent.js";
 import { buildAgentToolInstructions, TOOL_BATCH_MAX_CALLS } from "../classes/AgentRuntime.js";
 import { agentProviderSuppliesToolProtocol, agentProviderUsesNativeTools, callAgentProvider, resolveAgentProvider } from "./provider-route.js";
 import { dispatchTranscript, renderConversation, toolCallId } from "./transcript.js";
@@ -38,6 +38,12 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
   demand(request.idle_seconds === undefined || Number.isInteger(request.idle_seconds) && request.idle_seconds > 0 && request.idle_seconds <= 14400, "idle_seconds must be 1 to 14400");
   const batching = request.allow_tool_batching === true;
   const route = (dependencies.resolve || resolveAgentProvider)(request.model || "auto", request.provider || "");
+  const images = request.images || [];
+  demand(Array.isArray(images) && images.length <= AGENT_INPUT_IMAGES.maxCount, "Invalid image input count");
+  for (const image of images) demand(image && Object.keys(image).every(key => ["mimeType", "data"].includes(key))
+    && AGENT_INPUT_IMAGES.mimeTypes.includes(image.mimeType) && typeof image.data === "string" && image.data.length > 0
+    && image.data.length <= AGENT_INPUT_IMAGES.maxBase64Chars && image.data.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(image.data), "Invalid inline image input");
+  demand(!images.length || AGENT_INPUT_IMAGES.providers.includes(route.provider), "This provider does not support inline image decisions");
   const native = (dependencies.native || agentProviderUsesNativeTools)(route.provider);
   const toolInstructions = agentProviderSuppliesToolProtocol(route.provider) ? ""
     : native
@@ -59,7 +65,7 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
   let generated;
   try {
     generated = await (dependencies.call || callAgentProvider)(route.provider, renderConversation(request.messages), {
-      modelName: route.modelName, reasoningEffort: request.reasoning_effort || undefined, idleSeconds: request.idle_seconds || 1800,
+      inputImages: images, modelName: route.modelName, reasoningEffort: request.reasoning_effort || undefined, idleSeconds: request.idle_seconds || 1800,
       systemPrompt: [request.system_prompt, toolInstructions].filter(Boolean).join("\n\n"),
       tools: request.tools, allowToolBatching: batching, promptCache: true,
       cwd: dependencies.cwd || process.cwd(), signal: stop.signal,

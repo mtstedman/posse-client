@@ -367,3 +367,19 @@ export function getLatestAttempt(jobId) {
   const db = getDb();
   return db.prepare(`SELECT * FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`).get(jobId);
 }
+
+// An explicit operator commit is a new assessment candidate, even when a
+// killed developer never emitted its terminal response. It consumes no model
+// retry budget and never claims that the implementation passed verification.
+export function recordRecoveredCommitAttempt(jobId, commitHash, commitBaseHash) {
+  const db = getDb();
+  return runImmediateTransaction(db, () => {
+    const existing = db.prepare("SELECT * FROM job_attempts WHERE job_id = ? AND worker_type = 'human' AND commit_hash = ? ORDER BY id DESC LIMIT 1").get(jobId, commitHash);
+    if (existing) return existing;
+    const number = (db.prepare("SELECT MAX(attempt_number) AS mx FROM job_attempts WHERE job_id = ?").get(jobId)?.mx || 0) + 1;
+    const row = db.prepare(`INSERT INTO job_attempts
+      (job_id, attempt_number, attempt_kind, worker_type, status, commit_hash, commit_base_hash, duration_ms, finished_at)
+      VALUES (?, ?, 'human', 'human', 'succeeded', ?, ?, 0, ?)`).run(jobId, number, commitHash, commitBaseHash, now());
+    return db.prepare("SELECT * FROM job_attempts WHERE id = ?").get(row.lastInsertRowid);
+  });
+}

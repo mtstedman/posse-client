@@ -60,6 +60,7 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
   const transcript = options.transcript?.length && provider.supportsAgentTranscript?.() ? options.transcript : null;
   if ((options.tools?.length || transcript) && typeof provider.callAgentTurn === "function") {
     return await provider.callAgentTurn(prompt, {
+      inputImages: options.inputImages,
       modelName: options.modelName || null,
       systemPrompt: options.systemPrompt || null,
       tools: options.tools || [],
@@ -75,6 +76,7 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
     });
   }
   return await provider.callProvider(prompt, {
+    inputImages: options.inputImages,
     role: "preflight",
     modelName: options.modelName || null,
     reasoningEffort: options.reasoningEffort || "medium",

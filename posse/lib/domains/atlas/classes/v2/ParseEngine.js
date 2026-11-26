@@ -1966,7 +1966,13 @@ export class ParseEngine {
         sourceProof: payload.source_proof, repoRoot: this.#repoRoot,
       })) throw new Error("Merge replay cannot reuse ledger content that differs from the proven target source");
       const rec = this.#ledger.getBranch(sourceBranch);
-      if (rec && rec.status === "active") {
+      // Historical WI roots cannot be made terminal by the native ledger.
+      // Replay is still valid; retain that partition instead of failing an
+      // already indexed merge. Only the payload's canonical WI is eligible.
+      const legacyWiRoot = rec?.parent_branch == null && payload.work_item_id != null
+        && sourceBranch === ledgerBranchForWi(payload.work_item_id) && sourceBranch !== ontoBranch;
+      if (legacyWiRoot) await this.#emitStage("merge", `preserving historical root ${sourceBranch} after replay onto ${ontoBranch}`);
+      if (rec && rec.status === "active" && !legacyWiRoot) {
         await this.#emitStage("merge", `marking ${sourceBranch} merged`);
         await this.#ledger.setBranchStatus(sourceBranch, "merged", {
           label: "ParseEngine.replayMerge.setBranchStatus",
@@ -2006,7 +2012,13 @@ export class ParseEngine {
         return base;
       }
       const rec = this.#ledger.getBranch(sourceBranch);
-      if (rec && rec.status === "active") {
+      // Historical WI roots cannot be made terminal by the native ledger.
+      // Replay is still valid; retain that partition instead of failing an
+      // already indexed merge. Only the payload's canonical WI is eligible.
+      const legacyWiRoot = rec?.parent_branch == null && payload.work_item_id != null
+        && sourceBranch === ledgerBranchForWi(payload.work_item_id) && sourceBranch !== ontoBranch;
+      if (legacyWiRoot) await this.#emitStage("merge", `preserving historical root ${sourceBranch} after replay onto ${ontoBranch}`);
+      if (rec && rec.status === "active" && !legacyWiRoot) {
         await this.#emitStage("merge", `marking ${sourceBranch} merged`);
         await this.#ledger.setBranchStatus(sourceBranch, "merged", {
           label: "ParseEngine.replayMerge.idempotentSetBranchStatus",

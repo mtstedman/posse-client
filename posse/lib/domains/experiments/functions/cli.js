@@ -1,3 +1,4 @@
+import { runCorpusCli } from "./corpus-cli.js";
 import { experimentInitContract, EXPERIMENT_WORKSPACE_ACTIONS } from "../../../catalog/experiment-workspace.js";
 import { initializeExperiment } from "./workspace-init.js";
 import { workspaceExperimentCommand } from "./workspace-cli.js";
@@ -8,6 +9,7 @@ import { experimentSetupContract, validateExperimentSetup } from "./setup.js";
 
 export async function runExperimentCli(argv = [], { input = process.stdin, print = value => console.log(value), request = ownerRequest, initialize = initializeExperiment, workspace = workspaceExperimentCommand } = {}) {
   const [action = "help", ...rest] = argv;
+  if (action === "corpus") return runCorpusCli(rest, { input, print });
   if (rest.length) {
     if (rest.length !== 1 || !EXPERIMENT_WORKSPACE_ACTIONS.includes(action) || rest[0].startsWith("-")) throw new Error(EXPERIMENT_USAGE);
     print(JSON.stringify(await workspace(action, rest[0]))); return 0;
@@ -18,7 +20,7 @@ export async function runExperimentCli(argv = [], { input = process.stdin, print
   else if (action === "schema") result = experimentPlanningRequest(EXPERIMENT_OPERATIONS.SCHEMA);
   else if (action === "setup-schema") result = experimentSetupContract();
   else if (action === "list") result = await request(EXPERIMENT_OPERATIONS.LIST, {});
-  else if (["init", "validate", "setup-validate", "launch", "integrate", "integration-log", "stop", "report", "create", "get", "stage", "run", "decide", "files", "progress", "status", "cancel"].includes(action)) {
+  else if (["init", "validate", "setup-validate", "launch", "integrate", "integration-log", "case-results", "stop", "report", "create", "get", "stage", "run", "decide", "files", "progress", "status", "cancel"].includes(action)) {
     const limit = action === "validate" ? EXPERIMENT_LIMITS.planBytes : EXPERIMENT_LIMITS.reportBytes;
     const chunks = []; let bytes = 0;
     for await (const chunk of input) {

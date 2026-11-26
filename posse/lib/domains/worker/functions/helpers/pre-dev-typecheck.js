@@ -1,3 +1,4 @@
+import { baselineRuntimeClock } from "../../classes/BaselineRuntimeClock.js";
 // Pre-development typecheck briefing. After a dev or fix job holds the write
 // locks for its scope and its worktree is ready, run the repository's
 // configured typecheck once and keep the diagnostics for the files the job may
@@ -113,7 +114,7 @@ function countByFile(diagnostics) {
   return counts;
 }
 
-export async function runPreDevTypecheck({
+async function collectPreDevTypecheck({
   worker,
   job,
   payload,
@@ -265,4 +266,8 @@ export function renderPreDevTypecheckContext(summary, editableFiles = null) {
     lines.push(`(${diagnostics.length - rendered} more not shown; run \`${command}\` for the full list)`);
   }
   return lines.join("\n");
+}
+
+export function runPreDevTypecheck(options) {
+  return baselineRuntimeClock.run(options.job, options.signal, (signal) => collectPreDevTypecheck({ ...options, signal }));
 }

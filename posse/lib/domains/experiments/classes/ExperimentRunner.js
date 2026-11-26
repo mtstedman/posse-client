@@ -1,3 +1,4 @@
+import { EXPERIMENT_CORPUS_EVALUATION_SCHEMA, EXPERIMENT_CORPUS_PAYLOAD_API } from '../../../catalog/experiment-corpus.js';
 import { EXPERIMENT_OBJECTS as K, EXPERIMENT_STATES as S, EXPERIMENT_RUNNER_STATES as R, EXPERIMENT_PAYLOAD_API } from "../../../catalog/experiments.js";
 import { AGENT_DISPATCH_PROTOCOL } from "../../../catalog/agent.js";
 import { dispatchAgentTurn } from "../../agents/functions/dispatch-cli.js";
@@ -116,7 +117,7 @@ export class ExperimentRunner {
     if (c.state !== S.READY) throw new Error("Campaign is not ready for a candidate.");
     const accepted = this.service.campaigns.files(c.id);
     const context = { instructions, plan: c.plan, inventory: fileInventory(c.plan, accepted.files), findings: campaignProgress(c), decision_tables: decisionTables(c) };
-    const writer = await this.sourceDecision(record, "writer", { ...context, editable_files: editableFiles(c.plan, accepted.files), payload_api: EXPERIMENT_PAYLOAD_API }, [candidateTool, patchTool], accepted.files, null, signal);
+    const writer = await this.sourceDecision(record, "writer", { ...context, editable_files: editableFiles(c.plan, accepted.files), payload_api: this.service.evaluations[c.plan.evaluation.ref]?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? { ...EXPERIMENT_CORPUS_PAYLOAD_API, scoring_contract: this.service.evaluations[c.plan.evaluation.ref].contract } : EXPERIMENT_PAYLOAD_API }, [candidateTool, patchTool], accepted.files, null, signal);
     const candidate = writer.name === patchTool.name ? { changes: {}, hypothesis: writer.arguments.hypothesis } : writer.arguments;
     if (writer.name === patchTool.name) for (const edit of writer.arguments.edits) {
       const source = candidate.changes[edit.path] ?? accepted.files[edit.path];

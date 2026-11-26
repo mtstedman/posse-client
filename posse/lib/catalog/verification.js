@@ -248,3 +248,7 @@ export const SCOPE_ATTRIBUTABLE_DELTAS = readonlySet([
 
 // Shared by setting options and lock-backed dependency repair.
 export const VERIFICATION_DEPENDENCY_NETWORK_POLICIES = Object.freeze(["cache_only", "allow", "disabled"]);
+
+// Independent ceiling for baseline collection, including waits for shared checks.
+export const BASELINE_RUNTIME_WALL_MS = 2 * 60 * 60_000;
+export const BASELINE_CHECK_EVIDENCE_MIME = "application/vnd.posse.baseline-check+json";

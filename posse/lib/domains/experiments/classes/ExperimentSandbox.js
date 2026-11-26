@@ -1,3 +1,5 @@
+import { EXPERIMENT_CORPUS_EVALUATION_SCHEMA } from '../../../catalog/experiment-corpus.js';
+import { stageCorpusInputs } from '../functions/corpus-inputs.js';
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
@@ -16,7 +18,7 @@ const environment = () => ({ PATH: "/usr/bin:/bin", HOME: os.homedir(), XDG_RUNT
 // A transient systemd service owns the deadline even if the Node owner dies.
 export class ExperimentSandbox {
   constructor({ images = {} } = {}) { this.images = structuredClone(images); }
-  fingerprint(plan) { return experimentDigest({ profile: plan.runtime.profile, image: this.images[plan.runtime.profile], evaluation: plan.evaluation.digest, protocol: "jsonl.numeric.v1" }); }
+  fingerprint(plan, evaluation) { return experimentDigest({ profile: plan.runtime.profile, image: this.images[plan.runtime.profile], evaluation: plan.evaluation.digest, protocol: evaluation?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? "jsonl.corpus.v1" : "jsonl.numeric.v1" }); }
   async command(file, args, { timeout = 15000 } = {}) { return (await exec(file, args, { env: environment(), timeout, maxBuffer: 1048576 })).stdout.trim(); }
   identity(runId) {
     if (!/^[a-f0-9-]{36}$/.test(runId)) throw new Error("Invalid sandbox identity.");
@@ -56,6 +58,7 @@ export class ExperimentSandbox {
         await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o755 });
         await fs.writeFile(destination, content, { flag: "wx", mode: 0o444 });
       }
+      const corpus = evaluation.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? await stageCorpusInputs(evaluation, directory) : null;
       if (signal.aborted) throw new Error("Cancelled.");
       const executable = plan.runtime.profile === "node" ? "/usr/local/bin/node" : "/usr/local/bin/python3";
       await this.command(docker, ["create", "--name", name, "--pull=never", "--network=none", "--read-only", "--user=65534:65534",
@@ -64,6 +67,7 @@ export class ExperimentSandbox {
         "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16m", "--shm-size=8m", "--ulimit=nofile=256:256", "--ulimit=core=0:0",
         "--log-driver=none", "--no-healthcheck", "--init", "--interactive", "--workdir=/payload", "--env=HOME=/tmp", "--env=PYTHONDONTWRITEBYTECODE=1",
         "--mount", `type=bind,src=${directory},dst=/payload,readonly,bind-propagation=rprivate`,
+        ...(corpus ? ["--mount", `type=bind,src=${corpus.directory},dst=/input-files,readonly,bind-propagation=rprivate`] : []),
         "--entrypoint", executable, this.images[plan.runtime.profile], ...(plan.runtime.profile === "python" ? ["-I", "-u"] : []), `/payload/${plan.entrypoint}`]);
       if (signal.aborted) throw new Error("Cancelled.");
       const messages = [];
@@ -101,7 +105,7 @@ export class ExperimentSandbox {
           try { if (!error && buffer) consume(buffer); } catch { error = new Error("Invalid sandbox output."); }
           if (error || code !== 0 || messages.length !== evaluation.cases.length) reject(error || new Error("Incomplete or failed test execution.")); else resolve();
         });
-        child.stdin.end(evaluation.cases.map(item => JSON.stringify({ case_id: item.id, input: item.input })).join("\n") + "\n");
+        child.stdin.end(evaluation.cases.map(item => JSON.stringify({ case_id: item.id, input: item.input, ...(corpus ? { files: corpus.cases.get(item.id) } : {}) })).join("\n") + "\n");
         if (signal.aborted) abort();
       });
       result = { evidence_digest: experimentDigest({ evaluation: plan.evaluation.digest, image: this.images[plan.runtime.profile], files, messages }) };
