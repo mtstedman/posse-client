@@ -1,6 +1,8 @@
 import { EXPERIMENT_SETUP_SCHEMA, EXPERIMENT_PLAN_JSON_SCHEMA, EXPERIMENT_RUNNER_ROLES, experimentPlanExample } from "./experiments.js";
 import { AGENT_REASONING_EFFORTS } from "./agent.js";
 
+import { EXPERIMENT_INTEGRATION_SCHEMA } from "./experiment-integration.js";
+
 const object = properties => ({ type: "object", additionalProperties: false, required: Object.keys(properties), properties });
 const text = maxLength => ({ type: "string", minLength: 1, maxLength });
 const count = maximum => ({ type: "integer", minimum: 1, maximum });
@@ -11,6 +13,8 @@ export const experimentSetupSchema = object({
   models: object(Object.fromEntries(EXPERIMENT_RUNNER_ROLES.map(role => [role, object({ model: text(128), reasoning_effort: { enum: AGENT_REASONING_EFFORTS } })]))),
   budget: object({ model_calls: count(1000), wall_seconds: count(3600), tokens: count(1000000), spend_usd: { type: "number", exclusiveMinimum: 0, maximum: 100 } }),
 });
+
+experimentSetupSchema.properties.integration = EXPERIMENT_INTEGRATION_SCHEMA;
 
 export function experimentSetupContract() {
   const plan = experimentPlanExample();

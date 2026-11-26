@@ -21,7 +21,7 @@ export class ExperimentRunner {
   save(record) { record.updated_at = this.now(); this.store.put(K.RUNNERS, record.id, record); }
   status(id) {
     const r = this.load(id); if (!r) return null;
-    return { state: r.state, phase: r.phase, setup_digest: r.setup_digest, usage: r.usage, budget: r.setup.budget, models: r.setup.models, started_at: r.started_at, updated_at: r.updated_at, error: r.error || null };
+    return { state: r.state, phase: r.phase, setup_digest: r.setup_digest, usage: r.usage, budget: r.setup.budget, models: r.setup.models, started_at: r.started_at, updated_at: r.updated_at, error: r.error || null, integration_error: r.integration_error || null };
   }
   async launch({ setup, setup_digest, idempotency_key }) {
     const validation = validateExperimentSetup(setup);
@@ -78,15 +78,29 @@ export class ExperimentRunner {
     if (!tool || !validateToolArguments(tool, call.arguments).ok) throw new Error("Invalid runner tool request.");
     return call;
   }
+  async toolDecision(record, role, messages, tools, signal) {
+    // A decision-only provider can return prose about unavailable native tools.
+    // Repair that response in the same delegated conversation, without making the
+    // coordinator rediscover the files and reissue the whole preparation action.
+    let message = await this.decision(record, role, messages, tools, signal);
+    try { return this.checkedCall(message, tools); }
+    catch {
+      const correction = `Your response did not request a valid tool. These are caller-executed JSON tools, even when no native tools are exposed. Return exactly one request using one of: ${tools.map(tool => tool.name).join(", ")}. Match its declared argument schema. Do not claim execution or give a final answer.`;
+      message = await this.decision(record, role, [...messages,
+        { role: "assistant", content: String(message?.content || "").slice(0, 4000) },
+        { role: "user", content: correction }], tools, signal);
+      return this.checkedCall(message, tools);
+    }
+  }
   async prepare(record, instructions, signal) {
     const c = this.service.campaigns.load(record.id);
     if (c.state !== S.READY) throw new Error("Campaign is not ready for a candidate.");
     const accepted = this.service.campaigns.files(c.id);
-    const writer = await this.decision(record, "writer", [{ role: "user", content: JSON.stringify({ instructions, plan: c.plan, accepted_files: accepted.files, findings: campaignProgress(c), payload_api: EXPERIMENT_PAYLOAD_API }) }], [candidateTool], signal);
-    const candidate = this.checkedCall(writer, [candidateTool]).arguments;
+    const writer = await this.toolDecision(record, "writer", [{ role: "user", content: JSON.stringify({ instructions, plan: c.plan, accepted_files: accepted.files, findings: campaignProgress(c), payload_api: EXPERIMENT_PAYLOAD_API }) }], [candidateTool], signal);
+    const candidate = writer.arguments;
     snapshotFiles(c.plan, candidate.changes, accepted.files);
-    const assessed = await this.decision(record, "assessor", [{ role: "user", content: JSON.stringify({ plan: c.plan, instructions, accepted_files: accepted.files, candidate }) }], [reviewTool], signal);
-    const review = this.checkedCall(assessed, [reviewTool]).arguments;
+    const assessed = await this.toolDecision(record, "assessor", [{ role: "user", content: JSON.stringify({ plan: c.plan, instructions, accepted_files: accepted.files, candidate }) }], [reviewTool], signal);
+    const review = assessed.arguments;
     if (!review.approved) return { staged: false, reason: review.reason };
     this.check(record, signal);
     const staged = this.service.campaigns.stage({ id: c.id, expected_revision: c.revision, idempotency_key: `runner_stage_${record.usage.model_calls}`, changes: candidate.changes, hypothesis: candidate.hypothesis.slice(0, 2000) });
@@ -120,7 +134,14 @@ export class ExperimentRunner {
     const remaining = Math.max(1, record.deadline_at - this.now());
     const timer = setTimeout(() => controller.abort(Object.assign(new Error("Runner wall budget exhausted."), { code: "experiment_budget" })), remaining);
     const task = { controller, promise: null }; this.active.set(id, task);
-    task.promise = this.drive(record, controller.signal).finally(() => { clearTimeout(timer); this.active.delete(id); });
+    task.promise = this.drive(record, controller.signal).finally(() => { clearTimeout(timer); this.active.delete(id);
+      this.integrate(record);
+    });
+  }
+  integrate(record) {
+    if (![R.COMPLETE, R.BUDGET].includes(record.state) || !record.setup.integration || this.service.stopping) return;
+    try { this.service.integration.launch({ id: record.id, snapshot_digest: this.service.campaigns.files(record.id).snapshot_digest, integration: record.setup.integration, idempotency_key: "automatic_integration" }); }
+    catch (error) { record.integration_error = error.message; this.save(record); }
   }
   async drive(record, signal) {
     let previous = null;
@@ -131,10 +152,13 @@ export class ExperimentRunner {
         if (c.state === S.REVIEW) { record.state = R.REVIEW; record.phase = "review"; record.paused_at = this.now(); break; }
         if (c.state === S.RUNNING) throw new Error("Unreconciled sandbox run.");
         this.check(record, signal);
+        // Do not offer actions that cannot execute in the current campaign state.
+        const tools = managerTools.filter(tool => tool.name === "test.run" ? [S.BASELINE, S.STAGED].includes(c.state)
+          : tool.name === "test.prepare" ? c.state === S.READY : true);
         const message = await this.decision(record, "coordinator", [{ role: "user", content: JSON.stringify({ plan: c.plan, findings: campaignProgress(c), last_action: previous,
-          next: c.state === S.BASELINE ? "Run the starting baseline." : c.state === S.STAGED ? "Run the reviewed candidate." : "Prepare the next general improvement. Continue until goals or budget stop the campaign." }) }], managerTools, signal);
+          next: c.state === S.BASELINE ? "Run the starting baseline." : c.state === S.STAGED ? "Run the reviewed candidate." : "Prepare the next general improvement. Continue until goals or budget stop the campaign." }) }], tools, signal);
         let call;
-        try { call = this.checkedCall(message, managerTools); }
+        try { call = this.checkedCall(message, tools); }
         catch { previous = { error: "No valid tool was requested. The campaign still needs work; choose an available action." }; continue; }
         try { previous = { action: call.name, result: await this.execute(record, call, signal) }; }
         catch (error) {

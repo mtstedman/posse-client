@@ -41,6 +41,20 @@ export function normalizeFailureFingerprintText(value) {
   return text.replace(/[ \t]+$/gm, "").trim();
 }
 
+function nodeFailureDiagnostic(diagnostic) {
+  // Command wrappers assert the child's exit status and embed its entire
+  // output in their message. Explicit success records in that output are not
+  // failure identities (their counts/timings often vary). Only recognize this
+  // wrapper shape: an ordinary assertion's actual/expected strings, unknown
+  // output, and all child failure diagnostics remain significant.
+  const exitAssertion = /^AssertionError \[ERR_ASSERTION\]: [^\n]+ failed:\n/.test(diagnostic)
+    && /\n    generatedMessage: false,\n    code: 'ERR_ASSERTION',\n    actual: [1-9]\d*,\n    expected: 0,\n    operator: '(?:strictEqual|equal)',/.test(diagnostic)
+    && /^  (?:\w*Error(?: \[[^\]]+\])?:)/m.test(diagnostic);
+  return normalizeFailureFingerprintText(exitAssertion
+    ? diagnostic.replace(/^  PASS:[^\n]*(?:\n|$)/gm, "")
+    : diagnostic);
+}
+
 // Parse only a complete, single Node spec report. Nested/suite failures and
 // unfamiliar reporters fall back to full diagnostics, never a partial list.
 export function nodeSpecFailureReport(output) {
@@ -73,7 +87,7 @@ export function nodeSpecFailureReport(output) {
     return {
       location: normalizeFailureFingerprintText(header[1]),
       name: header[2],
-      diagnostic: normalizeFailureFingerprintText(regexAssertion ? message[1] : diagnostic),
+      diagnostic: nodeFailureDiagnostic(regexAssertion ? message[1] : diagnostic),
     };
   });
   if (headers.some((header, index) => {

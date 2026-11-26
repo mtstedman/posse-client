@@ -231,7 +231,15 @@ function _extractFixInstructionEditTargets(text = "") {
   // A failed command is execution evidence, not an instruction to edit its
   // runner. Otherwise generic "repair the change" prose near a receipt
   // acquires the shared runner's write lane for every unrelated feature.
-  const source = String(text || "").replace(/^\s*(?:Command|Working directory):[^\r\n]*$/gm, "");
+  const source = String(text || "")
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/^\s*(?:Command|Working directory):[^\r\n]*$/gm, "")
+    // Stack frames and compact failure summaries are evidence, not edit
+    // instructions. Keep explicit prose such as "Fix src/a.js:12" intact.
+    .replace(/^\s*(?:at |test at |File ")[^\r\n]*$/gm, "")
+    .replace(/^[ \t]*- [^\r\n]*\([^\r\n)]*:\d+(?::\d+)?\):[^\r\n]*$/gm, "")
+    .replace(/^[ \t]*(?:\w*Error(?: \[[^\]]+\])?:|PASS:|FAIL:|[✖✔])[^\r\n]*$/gm, "");
   if (!source.trim()) return [];
   const lowerSource = source.toLowerCase();
   const targets = [];
@@ -242,14 +250,18 @@ function _extractFixInstructionEditTargets(text = "") {
   for (const candidate of _collectFixScopeCandidates(source)) {
     if (_looksLikeReadOnlyCopySourceMention(source, candidate)) continue;
     const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const wrapped = `[\\s"'\\x60]*${escaped}[\\s"'\\x60]*`;
-    const editBeforeRe = new RegExp(`${editWord}(?:\\s+(?:the\\s+file|file|target|module|tests?\\s+in|validation\\s+in))?\\s+${wrapped}`, "i");
+    const wrapped = `[ \\t"'\\x60]*${escaped}[ \\t"'\\x60]*`;
+    const editBeforeRe = new RegExp(`${editWord}(?:[ \\t]+(?:the[ \\t]+file|file|target|module|tests?[ \\t]+in|validation[ \\t]+in))?[ \\t]+${wrapped}`, "i");
     const editAfterRe = new RegExp(`${wrapped}[^\\r\\n]{0,120}\\b${editWord}(?:ed|ing)?\\b`, "i");
     let inferredEdit = editBeforeRe.test(source) || editAfterRe.test(source);
     if (!inferredEdit) {
       const idx = lowerSource.indexOf(candidate.toLowerCase());
       if (idx >= 0) {
-        const context = lowerSource.slice(Math.max(0, idx - 90), Math.min(lowerSource.length, idx + candidate.length + 90));
+        // An edit verb on a neighboring line must not grant this path. In
+        // particular generic repair prose can precede an unrelated receipt.
+        const lineStart = lowerSource.lastIndexOf("\n", idx) + 1;
+        const nextLine = lowerSource.indexOf("\n", idx);
+        const context = lowerSource.slice(Math.max(lineStart, idx - 90), Math.min(nextLine < 0 ? lowerSource.length : nextLine, idx + candidate.length + 90));
         const mentionsCreateOnly = new RegExp(`\\b${createWord}\\b`, "i").test(context);
         const mentionsDeleteOnly = new RegExp(`\\b${deleteWord}\\b`, "i").test(context);
         const mentionsEdit = new RegExp(`\\b${editWord}\\b`, "i").test(context);

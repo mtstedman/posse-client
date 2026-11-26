@@ -7,14 +7,17 @@ import { ExperimentRunner } from "./ExperimentRunner.js";
 import { experimentSetupContract, validateExperimentSetup } from "../functions/setup.js";
 import { experimentDigest } from "../functions/snapshots.js";
 
+import { ExperimentIntegration } from "./ExperimentIntegration.js";
+
 export class ExperimentService {
-  constructor(store, { backend = null, evaluations = {}, assertOwner = () => {}, dispatch, now } = {}) {
+  constructor(store, { backend = null, evaluations = {}, assertOwner = () => {}, dispatch, now, integrationWorkspace } = {}) {
     this.campaigns = new ExperimentCampaigns(store); this.backend = backend; this.evaluations = structuredClone(evaluations); this.active = new Map(); this.stopping = false; this.assertOwner = assertOwner;
     this.runner = new ExperimentRunner(this, { dispatch, now });
+    this.integration = new ExperimentIntegration(this, { dispatch, now, workspace: integrationWorkspace });
   }
   async request(operation, args = {}) {
     const keys = {
-      [O.SETUP_SCHEMA]: [], [O.SETUP_VALIDATE]: ["setup"], [O.LAUNCH]: ["setup", "setup_digest", "idempotency_key"], [O.STOP]: ["id"],
+      [O.SETUP_SCHEMA]: [], [O.SETUP_VALIDATE]: ["setup"], [O.LAUNCH]: ["setup", "setup_digest", "idempotency_key"], [O.STOP]: ["id"], [O.INTEGRATE]: ["id", "snapshot_digest", "integration", "idempotency_key"],
       [O.CREATE]: ["idempotency_key", "plan", "files"], [O.GET]: ["id"], [O.LIST]: [], [O.FILES]: ["id"], [O.REPORT]: ["id"], [O.PROGRESS]: ["id"],
       [O.STAGE]: ["id", "idempotency_key", "expected_revision", "changes", "hypothesis"],
       [O.RUN]: ["id", "idempotency_key", "expected_revision", "snapshot_digest"],
@@ -25,13 +28,14 @@ export class ExperimentService {
       evaluations: Object.entries(this.evaluations).map(([ref, evaluation]) => ({ ref, digest: experimentDigest(evaluation), cases: evaluation.cases?.length ?? 0, scorers: evaluation.scorers || {} })) } };
     if (operation === O.SETUP_VALIDATE) return validateExperimentSetup(args.setup);
     if (operation === O.LAUNCH) return this.runner.launch(args);
-    if (operation === O.STOP) return this.runner.stop(args.id);
+    if (operation === O.INTEGRATE) return this.integration.launch(args);
+    if (operation === O.STOP) { await this.integration.stop(args.id); return { ...(this.runner.load(args.id) ? await this.runner.stop(args.id) : { id: args.id }), integration: this.integration.status(args.id) }; }
     if (operation === O.CREATE) return this.campaigns.create(args);
     if (operation === O.GET) return this.campaigns.get(args.id);
-    if (operation === O.LIST) return this.campaigns.list().map(c => ({ ...c, runner: this.runner.status(c.id) }));
+    if (operation === O.LIST) return this.campaigns.list().map(c => ({ ...c, runner: this.runner.status(c.id), integration: this.integration.status(c.id) }));
     if (operation === O.FILES) return this.campaigns.files(args.id);
-    if (operation === O.REPORT) return { ...campaignReport(this.campaigns.load(args.id)), runner: this.runner.status(args.id) };
-    if (operation === O.PROGRESS) return { ...campaignProgress(this.campaigns.load(args.id)), runner: this.runner.status(args.id) };
+    if (operation === O.REPORT) return { ...campaignReport(this.campaigns.load(args.id)), runner: this.runner.status(args.id), integration: this.integration.status(args.id) };
+    if (operation === O.PROGRESS) return { ...campaignProgress(this.campaigns.load(args.id)), runner: this.runner.status(args.id), integration: this.integration.status(args.id) };
     if (operation === O.STAGE) return this.campaigns.stage(args);
     if (operation === O.DECIDE) { const result = this.campaigns.decide(args); this.runner.resume(args.id); return result; }
     if (operation === O.RUN) return this.run(args);
@@ -79,6 +83,7 @@ export class ExperimentService {
   }
   async recover() {
     this.runner.recover();
+    await this.integration.recover();
     for (const c of this.campaigns.store.list(K.CAMPAIGNS)) {
       if (!c.active_run) continue;
       // Never reset the allowance or infer completion from an orphan's output.
@@ -86,7 +91,9 @@ export class ExperimentService {
       this.assertOwner();
       this.campaigns.fail(c.id, c.active_run.id, "owner_interrupted");
     }
+    // Close a crash window between terminal runner persistence and handoff.
+    for (const record of this.campaigns.store.list(K.RUNNERS)) this.runner.integrate(record);
   }
-  async shutdown() { this.stopping = true; await this.runner.shutdown(); for (const task of this.active.values()) task.controller.abort(); await Promise.all([...this.active.values()].map(task => task.promise)); }
-  activeCount() { return new Set([...this.runner.active.keys(), ...this.campaigns.store.list(K.CAMPAIGNS).filter(c => c.active_run).map(c => c.id)]).size; }
+  async shutdown() { this.stopping = true; await this.runner.shutdown(); await this.integration.shutdown(); for (const task of this.active.values()) task.controller.abort(); await Promise.all([...this.active.values()].map(task => task.promise)); }
+  activeCount() { return new Set([...this.runner.active.keys(), ...[...this.integration.active.values()].map(t => t.campaignID), ...this.campaigns.store.list(K.CAMPAIGNS).filter(c => c.active_run).map(c => c.id)]).size; }
 }

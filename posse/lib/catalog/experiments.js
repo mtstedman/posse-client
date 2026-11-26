@@ -5,10 +5,10 @@ export const EXPERIMENT_PROGRESS_SCHEMA = "posse.experiment.progress.v1";
 export const EXPERIMENT_REPORT_SCHEMA = "posse.experiment.report.v1";
 export const EXPERIMENT_REPORT_STATUSES = Object.freeze(["completed", "failed", "cancelled", "running"]);
 export const EXPERIMENT_OPERATIONS = Object.freeze({ SCHEMA: "experiment.schema", VALIDATE: "experiment.validate",
-  SETUP_SCHEMA: "experiment.setup_schema", SETUP_VALIDATE: "experiment.setup_validate", LAUNCH: "experiment.launch", STOP: "experiment.stop",
+  SETUP_SCHEMA: "experiment.setup_schema", SETUP_VALIDATE: "experiment.setup_validate", LAUNCH: "experiment.launch", INTEGRATE: "experiment.integrate", STOP: "experiment.stop",
   CREATE: "experiment.create", GET: "experiment.get", LIST: "experiment.list", STAGE: "experiment.stage",
   RUN: "experiment.run", DECIDE: "experiment.decide", FILES: "experiment.files", REPORT: "experiment.report", PROGRESS: "experiment.progress", CANCEL: "experiment.cancel" });
-export const EXPERIMENT_OBJECTS = Object.freeze({ CAMPAIGNS: "experiment_campaigns", SNAPSHOTS: "experiment_snapshots", REQUESTS: "experiment_requests", RUNNERS: "experiment_runners" });
+export const EXPERIMENT_OBJECTS = Object.freeze({ CAMPAIGNS: "experiment_campaigns", SNAPSHOTS: "experiment_snapshots", REQUESTS: "experiment_requests", RUNNERS: "experiment_runners", INTEGRATIONS: "experiment_integrations" });
 export const EXPERIMENT_STATES = Object.freeze({ BASELINE: "baseline_required", READY: "ready", STAGED: "staged", RUNNING: "running", REVIEW: "awaiting_decision", GOAL: "goal_met", EXHAUSTED: "iterations_exhausted", BLOCKED: "blocked", CANCELLED: "cancelled" });
 export const EXPERIMENT_ACCEPTANCE_MODES = Object.freeze(["human", "automatic"]);
 export const EXPERIMENT_DECISIONS = Object.freeze(["accept", "reject"]);
@@ -43,7 +43,7 @@ export const EXPERIMENT_PLAN_ISSUES = Object.freeze({
   MISSING_GOAL: "missing_goal", BASELINE_REFERENCE: "baseline_reference", STALE_INTERVAL: "stale_interval",
   DUPLICATE_DEPENDENCY: "duplicate_dependency",
 });
-export const EXPERIMENT_USAGE = "posse experiment setup-schema | setup-validate < setup.json | launch < approved-setup-request.json\nposse experiment schema | validate < plan.json | report < measurements.json\nposse experiment list | create|get|stage|run|decide|files|progress|status|cancel|stop < request.json\nExecution requires an operator-provisioned private runtime. status emits a campaign report; report previews supplied measurements.";
+export const EXPERIMENT_USAGE = "posse experiment setup-schema | setup-validate < setup.json | launch < approved-setup-request.json\nposse experiment integrate < integration-request.json\nposse experiment schema | validate < plan.json | report < measurements.json\nposse experiment list | create|get|stage|run|decide|files|progress|status|cancel|stop < request.json\nExecution requires an operator-provisioned private runtime. status emits a campaign report; report previews supplied measurements.";
 
 const text = maxLength => ({ type: "string", minLength: 1, maxLength });
 const count = maximum => ({ type: "integer", minimum: 1, maximum });
