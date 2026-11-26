@@ -739,6 +739,13 @@ are rejected explicitly rather than silently widened.
 
 ### Native provider and admin JSON
 
+Account-wide quota, authentication, unavailable-provider, and incompatible-CLI
+failures mark the provider dead for the rest of the run. All workers skip it
+and use an eligible alternative; a pause expiring or a concurrent call succeeding
+does not revive it. Starting a new run clears this state, while existing timed
+quota pauses still apply. Model-specific limits and transient server failures
+retain their normal recovery behavior.
+
 `posse usage --json` emits one bounded `posse.provider_usage.v1` document on
 stdout. Use `--refresh` for a normal provider refresh and `--force-refresh` for
 an operator-forced probe; diagnostics remain on stderr. The payload preserves

@@ -1911,6 +1911,7 @@ async function v2JoinResultAsync(args = {}) {
       attempted: true,
       skipped: "mount_failed",
       error: formatAtlasError(err),
+      errorCode: err?.code || null,
       disableAtlas: true,
       config: ctx.config,
       graphDbPath: ctx.graphDbPath,

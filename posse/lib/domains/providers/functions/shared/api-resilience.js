@@ -25,13 +25,13 @@ export function clampRetryAfterSeconds(sec, fallback = 30, max = MAX_RETRY_AFTER
 // A native CLI adapter reports a provider refusal as one generic failure
 // ("Claude reported an unsuccessful result", "Codex reported a failed turn")
 // and carries the provider's own notice beside the message: the CLI's result
-// text as partial output, or the adapter's diagnostic reason. Only that
-// generic class qualifies, and only a notice-sized output: longer output is
+// text as partial output, or the adapter's diagnostic reason. Generic CLI
+// failures and typed rate limits qualify, and only a notice-sized output: longer output is
 // model prose, which must never be classified as a provider error.
 const PROVIDER_NOTICE_MAX_CHARS = 400;
 
 export function nativeProviderNoticeText(err) {
-  const genericCliFailure = err?.classification === "provider_failure"
+  const genericCliFailure = ["provider_failure", "rate_limit"].includes(err?.classification)
     || (!err?.classification && err?.code === "provider_failed");
   if (!genericCliFailure) return "";
   const output = String(err?.partialOutput || err?.output || "").trim();
@@ -257,7 +257,7 @@ export function classifyProviderError(err, {
     };
   }
 
-  if (status === 429 || /rate.?limit|\b429\b|too many requests/i.test(msg)) {
+  if (err?.classification === "rate_limit" || status === 429 || /rate.?limit|\b429\b|too many requests/i.test(msg)) {
     return { backoffSec: rateLimitBackoffSec, isRateLimit: true, source: "rate_limit" };
   }
 

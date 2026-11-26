@@ -155,6 +155,10 @@ const LENIENT_PIPELINE_HANDOFF_PROFILES = new Set([
 
 const LENIENT_HANDOFF_PROSE_PROFILES = new Set([
   ...LENIENT_PIPELINE_HANDOFF_PROFILES,
+  // Child reports feed their parent agent too. Redact detected prose with
+  // the same post-redaction check, without relaxing citation validation.
+  AGENT_HANDOFF_PROFILES.RESEARCH_INVESTIGATION,
+  AGENT_HANDOFF_PROFILES.CITATION_SYNTHESIS,
   AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT,
 ]);
 

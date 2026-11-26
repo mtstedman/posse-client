@@ -57,6 +57,8 @@ export const AGENT_HANDOFF_CLAIM_CITATION_FIELDS = Object.freeze(
 );
 
 export const AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES = Object.freeze(["high", "medium", "low"]);
+// Accepted planner risk labels are projected onto the canonical 1–5 scale.
+export const AGENT_HANDOFF_PLANNER_RISK_LABEL_SCORES = Object.freeze({ low: 1, medium: 3, high: 5 });
 export const AGENT_HANDOFF_PLANNER_METADATA_ENUMS = Object.freeze({
   dev_mode: DEV_MODE_ORDER,
   scope_confidence: AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES,

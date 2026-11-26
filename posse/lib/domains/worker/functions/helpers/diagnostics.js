@@ -4,7 +4,7 @@
 // context, and execution-provider summaries.
 
 import { isPermanentProviderRuntimeBlock } from "./block-reason.js";
-import { providerTurnLimitMode, TURN_LIMIT_MODES, PERMANENT_AGENT_SETUP_ERROR_CODES } from "../../../../catalog/provider.js";
+import { providerTurnLimitMode, TURN_LIMIT_MODES, PERMANENT_AGENT_SETUP_ERROR_CODES, UNUSABLE_PROVIDER_FAILURE_CLASSES } from "../../../../catalog/provider.js";
 import { providerErrorSource } from "../../../providers/functions/shared/api-resilience.js";
 
 export function buildPromptExcerpt(text = "", maxChars = 1200) {
@@ -134,6 +134,7 @@ function partialOutputMayBeProviderError(error) {
 
 export function isPermanentProviderConfigError(errorDetailsOrErr = null) {
   if (PERMANENT_AGENT_SETUP_ERROR_CODES.includes(providerFailureCode(errorDetailsOrErr))) return true;
+  if (UNUSABLE_PROVIDER_FAILURE_CLASSES.includes(errorDetailsOrErr?.classification)) return true;
   const errorDetails = errorDetailsOrErr && typeof errorDetailsOrErr === "object"
     && ("fullText" in errorDetailsOrErr || "summary" in errorDetailsOrErr || "stderr" in errorDetailsOrErr || "partialOutput" in errorDetailsOrErr)
     ? errorDetailsOrErr

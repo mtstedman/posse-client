@@ -2,11 +2,27 @@ export class ProviderRuntimeState {
   constructor({ now = () => Date.now() } = {}) {
     this.now = now;
     this.rateLimits = new Map();
+    this.deadProviders = new Map();
     this.usageAuthPrimed = false;
   }
 
   _providerKey(providerName) {
     return String(providerName || "").trim().toLowerCase() || "unknown";
+  }
+
+  markDeadForRun(providerName, reason) {
+    const key = this._providerKey(providerName);
+    if (this.deadProviders.has(key)) return false;
+    this.deadProviders.set(key, Object.freeze({ reason, markedAt: this.now() }));
+    return true;
+  }
+
+  getRunFailure(providerName) {
+    return this.deadProviders.get(this._providerKey(providerName)) || null;
+  }
+
+  resetRunFailures() {
+    this.deadProviders.clear();
   }
 
   tripRateLimit(providerName, backoffSec, reason = "") {

@@ -33,6 +33,9 @@ import {
   getProvider,
   getProviderRateLimitState,
   pauseProviderForQuota,
+  markProviderDeadForRun,
+  getProviderRunFailure,
+  assertProviderAvailableForRun,
   selectProviderName,
 } from "../../providers/functions/provider.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
@@ -427,6 +430,9 @@ const DEFAULT_DEPS = {
   getProvider,
   getProviderRateLimitState,
   pauseProviderForQuota,
+  markProviderDeadForRun,
+  getProviderRunFailure,
+  assertProviderAvailableForRun,
   selectProviderName,
   filterProviderToolUseReplay,
   reconcileProviderToolUseReplay,
@@ -1045,15 +1051,16 @@ export class TrackedProviderClient {
     return this.isProviderCircuitOpen(providerName);
   }
 
-  // Pause a provider the moment a call reports an account-wide subscription
-  // quota, before the runtime fallback runs. Concurrent and later calls then
-  // preflight-route to an unpaused fallback (or wait) instead of each
-  // relaunching into the same limit; attempt failure handling only sees the
-  // error when no fallback rescued the call.
-  _noteProviderQuotaFailure(callProviderName, err, jobId) {
+  // Latch unusable providers for this run and persist any account quota pause
+  // before fallback. Later calls cannot revive the provider when its timed
+  // pause expires; a new run still honors the persisted account pause.
+  _noteProviderFailure(callProviderName, err, jobId) {
     if (!callProviderName || !err) return null;
     // An error stamped by a nested call names the provider that hit the quota.
     const providerName = providerErrorSource(err) || callProviderName;
+    if (this.deps.markProviderDeadForRun(providerName, err)) {
+      this.emitStatus(jobId, `${C.yellow}[provider] ${providerName} marked dead for the rest of this run${C.reset}`);
+    }
     let quota = null;
     try {
       quota = this.deps.pauseProviderForQuota?.(providerName, err) || null;
@@ -1355,6 +1362,7 @@ export class TrackedProviderClient {
   }
 
   async _executeOneAttempt(prompt, opts, context) {
+    this.deps.assertProviderAvailableForRun(context.providerName);
     const reservation = reserveBudget({ workItemId: context.work_item_id, jobId: context.job_id,
       attemptId: context.observationContext?.attempt_id, parentCallId: opts._parentAgentCallId, provider: context.providerName, model: context.modelName, role: opts.role });
     let callCreated = false;
@@ -2157,7 +2165,10 @@ export class TrackedProviderClient {
       try {
         providerResult = await runWithObservationContext(
           callObservationContext,
-          () => provider.call(prompt, attemptOpts),
+          () => {
+            this.deps.assertProviderAvailableForRun(providerName);
+            return provider.call(prompt, attemptOpts);
+          },
         );
       } catch (error) {
         providerReturnedAt = Date.now();
@@ -2921,7 +2932,7 @@ export class TrackedProviderClient {
     }, () => getProviderRateLimitState(providerName));
     if (rlState.blocked) {
       recordAttemptedProvider(attemptedProviders, providerName);
-      if (buildFallbackPrompt && !opts._fallbackAttempted) {
+      if ((buildFallbackPrompt || (rlState.dead && !opts.sessionPacket && !preparedAgent)) && !opts._fallbackAttempted) {
         const fallbackName = this._selectFallbackCandidate({
           configuredPool: capacityPool(),
           currentProvider: providerName,
@@ -2943,7 +2954,7 @@ export class TrackedProviderClient {
               }),
             });
             prompt = preparedAgent.handoff;
-          } else {
+          } else if (buildFallbackPrompt) {
             prompt = await timeProviderSetupPhase("provider.fallback_prompt", {
               role: opts.role,
               provider: fallbackName,
@@ -2998,10 +3009,11 @@ export class TrackedProviderClient {
               reason: "rate_limit_preflight",
             },
           });
-          this.emitStatus(job_id, `${C.yellow}[fallback] ${previousProviderName} rate-limited (${rlState.reason}) -> trying ${fallbackName}${C.reset}`);
+          this.emitStatus(job_id, `${C.yellow}[fallback] ${previousProviderName} ${rlState.dead ? "dead for this run" : "rate-limited"} (${rlState.reason}) -> trying ${fallbackName}${C.reset}`);
         }
       }
       if (!preflightFallback) {
+        if (rlState.dead) this.deps.assertProviderAvailableForRun(providerName);
         const err = new Error(`${providerName} rate-limited (${rlState.reason}) - retry in ${rlState.retryInSec}s`);
         err._rateLimitPreFlight = true;
         // Structured pause facts: attempt handling waits out this pause
@@ -3302,11 +3314,11 @@ export class TrackedProviderClient {
       }
       if (this.isProviderError(activeErr) || isRuntimeModelError(activeErr)) {
         recordAttemptedProvider(attemptedProviders, providerName);
-        const quotaFailure = this.isProviderError(activeErr)
-          ? this._noteProviderQuotaFailure(providerName, activeErr, job_id)
+        let quotaFailure = this.isProviderError(activeErr)
+          ? this._noteProviderFailure(providerName, activeErr, job_id)
           : null;
-        const fallbackName = this._selectFallbackCandidate({
-          configuredPool: quotaFailure ? capacityPool() : configuredPool,
+        let fallbackName = this._selectFallbackCandidate({
+          configuredPool: quotaFailure || this.deps.getProviderRunFailure(providerName) ? capacityPool() : configuredPool,
           currentProvider: providerName,
           attemptedProviders,
           needsImageGeneration: !!opts.needsImageGeneration,
@@ -3314,7 +3326,8 @@ export class TrackedProviderClient {
           getProviderRateLimitState,
         });
 
-        if (fallbackName) {
+        while (fallbackName) {
+          recordAttemptedProvider(attemptedProviders, fallbackName);
           try {
             if (preparedAgent && typeof dispatcher?.rebindAgent === "function") {
               await dispatcher.rebindAgent(preparedAgent, {
@@ -3473,7 +3486,19 @@ export class TrackedProviderClient {
             this.emitStatus(job_id, `${C.red}[fallback] ${fallbackName} also failed: ${fbErr.message?.split("\n")[0]?.slice(0, 100)}${C.reset}`);
             // The primary error is what propagates, so a fallback's own quota
             // must pause that provider here or the next job would retry it.
-            if (this.isProviderError(fbErr)) this._noteProviderQuotaFailure(fallbackName, fbErr, job_id);
+            const providerFailure = this.isProviderError(fbErr);
+            if (providerFailure) quotaFailure = this._noteProviderFailure(fallbackName, fbErr, job_id) || quotaFailure;
+            if (!providerFailure && !isRuntimeModelError(fbErr)) break;
+            // Each eligible provider gets at most one attempt. A failed
+            // alternative must not hide another usable configured provider.
+            fallbackName = this._selectFallbackCandidate({
+              configuredPool: quotaFailure || this.deps.getProviderRunFailure(fallbackName) ? capacityPool() : configuredPool,
+              currentProvider: fallbackName,
+              attemptedProviders,
+              needsImageGeneration: !!opts.needsImageGeneration,
+              selectFallbackProvider,
+              getProviderRateLimitState,
+            });
           }
         }
       }

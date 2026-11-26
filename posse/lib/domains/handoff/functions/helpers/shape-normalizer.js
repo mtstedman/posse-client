@@ -16,7 +16,7 @@
 
 import path from "node:path";
 
-import { AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_CLAIM_REF_FIELDS, AGENT_HANDOFF_CLAIM_CITATION_FIELDS } from "../../../../catalog/handoff.js";
+import { AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_CLAIM_REF_FIELDS, AGENT_HANDOFF_CLAIM_CITATION_FIELDS, AGENT_HANDOFF_PLANNER_RISK_LABEL_SCORES } from "../../../../catalog/handoff.js";
 
 export const AGENT_HANDOFF_COMPLETION_PROSE_MAX_CHARS = 1000;
 
@@ -276,11 +276,23 @@ function relativizePathList(object, fields, label, roots, note) {
   return out;
 }
 
+function normalizePlannerRisk(object, label, note) {
+  if (typeof object.risk !== "string") return object;
+  const text = object.risk.trim().toLowerCase();
+  const risk = /^[1-5]$/.test(text) ? Number(text)
+    : Object.hasOwn(AGENT_HANDOFF_PLANNER_RISK_LABEL_SCORES, text)
+      ? AGENT_HANDOFF_PLANNER_RISK_LABEL_SCORES[text] : null;
+  if (risk == null) return object;
+  note(`${label}.risk`, "risk_score_normalized");
+  return { ...object, risk };
+}
+
 function normalizeReport(report, label, roots, note) {
   const coerced = coerceObject(report);
   if (!coerced) return report;
   if (coerced.how) note(label, `object_from_${coerced.how}`);
   let out = coerceListFields(coerced.value, REPORT_LIST_FIELDS, label, note);
+  out = normalizePlannerRisk(out, label, note);
   if (out.claims != null) out = { ...out, claims: relativizeClaimSelectors(out.claims, roots, note, `${label}.claims`) };
   const scope = coerceObject(out.scope);
   if (scope) {
@@ -401,6 +413,7 @@ function normalizePlannerTasks(source, roots, note) {
     if (!coerced) return raw;
     if (coerced.how) note(label, `object_from_${coerced.how}`);
     let task = coerceListFields(coerced.value, PLANNER_TASK_LIST_FIELDS, label, note);
+    task = normalizePlannerRisk(task, label, note);
     if (task.claims != null) task = { ...task, claims: relativizeClaimSelectors(task.claims, roots, note, `${label}.claims`) };
     const scope = coerceObject(task.scope);
     if (scope) {

@@ -28,6 +28,12 @@ export const RUN_BACKGROUND_JOB_TYPES = readonlySet(["atlas_warm", WAITING_LANE_
 // agent work. A constant, derived from runtime state — NOT a user setting.
 export const ATLAS_BACKGROUND_JOB_CONCURRENCY = 1;
 
+// A dev worktree must acquire and reconcile its Atlas view before dispatch.
+// Queue contention retries setup without spending model attempts. Match the
+// warm-job recovery window, then stop visibly rather than silently losing tools.
+export const ATLAS_JOIN_MAX_REQUEUES = 3;
+export const ATLAS_JOIN_REQUEUE_DELAY_MS = 60_000;
+
 export const RUN_LOOP_KEEPALIVE_INTERVAL_MS = 30_000;
 
 // Runtime-watchdog escalation. After the first runtime kill the worker owns

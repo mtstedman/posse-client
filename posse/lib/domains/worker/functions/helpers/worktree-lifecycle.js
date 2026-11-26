@@ -3,6 +3,7 @@ import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnosti
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { parkDirtyWorktreeRecovery } from "./dirty-worktree-recovery.js";
 import { settleWorktreeLockTimeout } from "./worktree-lock-recovery.js";
+import { attachWorktreeAtlas, deferAtlasJoinAfterQueueBusy, isAtlasJoinQueueBusy } from "./worktree-atlas-join.js";
 import { DIRTY_WORKTREE_RECOVERY_ERROR, DIRTY_WORKTREE_RECOVERY_KEY, PRESERVED_WORK_RESUME_KEY } from "../../../../catalog/human-input.js";
 // lib/domains/worker/functions/helpers/worktree-lifecycle.js
 //
@@ -31,7 +32,7 @@ const MAX_SETUP_TRANSIENT_INFRA_RETRIES = 3;
 const setupDeferNoticeLastSeen = new Map();
 import { WORKTREE_JOB_TYPES, DEV_ROLE_JOB_TYPES } from "../../../../catalog/job.js";
 import { jobNeedsGitWorktreeAsync } from "../../../git/functions/policy.js";
-import { disposeWorkItemAtlasGraph, ensureWorkItemAtlasJoinAsync, getAtlasIntegrationConfig } from "../../../integrations/functions/atlas.js";
+import { disposeWorkItemAtlasGraph } from "../../../integrations/functions/atlas.js";
 import { atlasRuntimeDisabledReasonForRepo } from "../execution/atlas-warm-job.js";
 import { emitDevLeased as emitAtlasV2DevLeased, emitWiCleanup as emitAtlasV2WiCleanup, isAtlasV2EmissionEnabled } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { classifyDirtyWorktreeAsync, configureWorktreeScopeAsync, gitWorktreeAddAsync, isMergeInProgressAsync, mergeTargetIntoWorktreeAsync, resolveTargetBranchAsync, safeSnapshotAndRemoveWorktreeAsync, snapshotAndResetDirtyWorktreeAsync, withWorktreeLockAsync, worktreePathAsync } from "../../../git/functions/worktree.js";
@@ -1203,12 +1204,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     });
 
     await yieldNow({ signal });
-    await withPhase("atlas_join", prepTrace, async () => {
-      // Prepared views may predate the rebase or cross-WI sync above. Always
-      // reconcile from this checkout before allowing agent reads.
-      try {
-        // The evidence gate or the run already turned ATLAS off for this job:
-        // joining a graph that will not be used only waits on a failing index.
+    try {
+      await withPhase("atlas_join", prepTrace, async () => {
+        // A prepared view can predate rebase/cross-WI sync. Reconcile this
+        // checkout before issuing tools, even when a background warm succeeded.
         const atlasOffReason = job._atlasDisabledForWorkItem
           ? "ATLAS is off for this job"
           : atlasRuntimeDisabledReasonForRepo(worker.projectDir);
@@ -1219,56 +1218,22 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
           disableWorkItemAtlas(job);
           emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} join check skipped while merge is in progress${C.reset}`);
         } else {
-          emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} preparing worktree graph before dev join${C.reset}`);
-          let joined = null;
-          try {
-            joined = await ensureWorkItemAtlasJoinAsync({
-              projectDir: worker.projectDir,
-              worktreePath: wtPath,
-              workItemId: wi.id,
-              config: getAtlasIntegrationConfig(),
-              signal,
-              onStatus: ({ ok, error, status }) => {
-                if (ok) {
-                  emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph refresh complete${C.reset}`);
-                } else {
-                  const detail = error || (status != null ? `exit ${status}` : "unknown");
-                  worker.emit(job.id, `${C.yellow}[atlas] WI#${wi.id} worktree graph refresh failed: ${detail}${C.reset}`);
-                }
-              },
-            });
-            job._atlasConfig = joined.config || null;
-            job._atlasGraphDbPath = joined.graphDbPath || null;
-            job._atlasDisabledForWorkItem = !!job._atlasDisabledForWorkItem || !!joined.disableAtlas;
-            if (joined.state === "up_to_date") {
-              emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph up to date${C.reset}`);
-            } else if (joined.state === "seeded_refresh") {
-              const refreshReady = joined.refreshWait?.completed && joined.refreshWait?.ok !== false;
-              let refreshState = joined.attempted ? "started" : "queued/skipped";
-              if (refreshReady) refreshState = "complete";
-              else if (joined.refreshWait?.skipped === "refresh_wait_timeout") refreshState = "still running after wait";
-              emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} seeded worktree graph; refresh ${refreshState}${C.reset}`);
-            } else if (joined.state === "refresh") {
-              const refreshReady = joined.refreshWait?.completed && joined.refreshWait?.ok !== false;
-              let refreshState = joined.attempted ? "started" : "queued/skipped";
-              if (refreshReady) refreshState = "complete";
-              else if (joined.refreshWait?.skipped === "refresh_wait_timeout") refreshState = "still running after wait";
-              emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph refresh ${refreshState}${C.reset}`);
-            } else if (joined.state === "primary_graph_absent") {
-              emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} no primary graph available; ATLAS disabled for this worktree join${C.reset}`);
-            } else if (joined.state === "seed_busy") {
-              emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} graph seed busy; ATLAS disabled for this worktree join${C.reset}`);
-            }
-          } finally {
-            try { joined?.view?.close?.(); } catch { /* best effort */ }
-          }
+          await attachWorktreeAtlas(job, { projectDir: worker.projectDir, worktreePath: wtPath, signal });
+          emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph join complete${C.reset}`);
         }
-      } catch (atlasErr) {
-        if (isAbortError(atlasErr)) throw atlasErr;
-        disableWorkItemAtlas(job);
-        worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree join skipped: ${atlasErr.message.split("\n")[0]}${C.reset}`);
-      }
-    });
+      });
+    } catch (atlasErr) {
+      // A busy writer is temporary infrastructure contention, not permission
+      // to launch a dev without Atlas. Let setup release and retry its lease.
+      if (isAbortError(atlasErr) || isAtlasJoinQueueBusy(atlasErr)) throw atlasErr;
+      disableWorkItemAtlas(job);
+      const message = `ATLAS disabled for worktree join: ${atlasErr.message.split("\n")[0]}`;
+      logEvent({ work_item_id: job.work_item_id, job_id: job.id,
+        event_type: EVENT_TYPES.ATLAS_FRESHNESS_GATE_DEGRADED, actor_type: EVENT_ACTORS.ATLAS,
+        message, event_json: { source: "worktree_join", error: atlasErr.message,
+          code: atlasErr.code || null, provider_execution_blocked: false } });
+      worker.emit(job.id, `${C.yellow}[atlas] WI#${wi.id} ${message}${C.reset}`);
+    }
 
     finalizePrepTrace(prepTrace, { ok: true });
     if (isAtlasV2EmissionEnabled() && !job._waitingLaneActivated) {
@@ -1294,6 +1259,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     return { ok: true, wtPath, branchName, sentinelPath: job._activeWorktreeSentinel || null };
   } catch (gitErr) {
     if (prepTrace) finalizePrepTrace(prepTrace, { ok: false, error: gitErr?.message || String(gitErr) });
+    if (isAtlasJoinQueueBusy(gitErr)) {
+      deferAtlasJoinAfterQueueBusy(worker, job, leaseToken, gitErr);
+      return { ok: false, wtPath, branchName, sentinelPath: job._activeWorktreeSentinel || null };
+    }
     if (gitErr?.code === DIRTY_WORKTREE_RECOVERY_ERROR) {
       parkDirtyWorktreeRecovery(worker, job, leaseToken, { paths: gitErr.paths, phase: "setup" });
       return { ok: false, wtPath: null, branchName: null, sentinelPath: null };

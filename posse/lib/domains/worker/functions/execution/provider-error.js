@@ -3,6 +3,7 @@
 // errors and never apply to an error Posse raised itself.
 
 import { PROVIDER_WINDOW_LIMIT_REACHED_RE } from "../../../providers/functions/shared/quota-reset.js";
+import { UNUSABLE_PROVIDER_FAILURE_CLASSES } from "../../../../catalog/provider.js";
 import { isPosseRaisedError, nativeProviderNoticeText } from "../../../providers/functions/shared/api-resilience.js";
 
 // The provider-side text of a native CLI failure that is itself a quota or
@@ -11,7 +12,9 @@ const NATIVE_NOTICE_QUOTA_RE = /rate.?limit|too many requests|out of.*usage|usag
 
 // Classes the native dispatch host assigns to provider-side infrastructure
 // failures. Their messages are fixed strings the patterns below predate.
-const NATIVE_PROVIDER_FAILURE_CLASSES = new Set(["rate_limit", "transient_provider"]);
+const NATIVE_PROVIDER_FAILURE_CLASSES = new Set([
+  "rate_limit", "transient_provider", ...UNUSABLE_PROVIDER_FAILURE_CLASSES,
+]);
 
 const PROVIDER_ERROR_PATTERNS = [
   /overloaded_error/i,

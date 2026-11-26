@@ -32,6 +32,7 @@ import { nativeBinaries as defaultNativeBinaries } from "../../../shared/tools/c
 import { daemonSupervisor as defaultDaemonSupervisor } from "../../../shared/tools/classes/daemon/index.js";
 import { persistentMcpOwner as defaultPersistentMcpOwner } from "../../../shared/tools/classes/PersistentMcpOwner.js";
 import { RunBootPanelController } from "./RunBootPanelController.js";
+import { resetProviderRunFailures } from "../../providers/functions/provider.js";
 import { RunCloseoutController } from "./RunCloseoutController.js";
 import { RunDisplayActions } from "./RunDisplayActions.js";
 import { RunDisplaySnapshotController } from "./RunDisplaySnapshotController.js";
@@ -71,6 +72,7 @@ export class RunSession {
   }
 
   async run() {
+    resetProviderRunFailures();
     const stopThemeSong = startThemeSong();
     try {
       return await this.#run();

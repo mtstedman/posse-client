@@ -58,36 +58,52 @@ async function runFinalReviewerInContext({
   providerName = finalReviewerProvider(cwd);
   const execution = resolveAssessmentExecution({ payload });
   const { modelTier: tier, reasoningEffort: effort } = execution;
-  const packet = buildHandoffPacket(job, {
-    workItem: getWorkItem(workItemId),
-    payload,
-    role: "assessor",
-    attemptCount: 1,
-    maxAttempts: 1,
-    lastError: null,
-    cwd,
-    atlasConfig,
-    disableAtlas,
-    disableAtlasReason: disableAtlas ? "Parent worktree ATLAS attachment unavailable" : null,
+  let packet;
+  let composedProvider;
+  // Reissue the read-only child contract for each fallback provider. Reusing
+  // the first provider's packet would retain its prompt and native tool grant.
+  const buildPromptForProvider = async (providerName, signal = abortSignal) => {
+    signal?.throwIfAborted();
+    packet = buildHandoffPacket(job, {
+      workItem: getWorkItem(workItemId),
+      payload,
+      role: "assessor",
+      attemptCount: 1,
+      maxAttempts: 1,
+      lastError: null,
+      cwd,
+      atlasConfig,
+      disableAtlas,
+      disableAtlasReason: disableAtlas ? "Parent worktree ATLAS attachment unavailable" : null,
+    });
+    // Handoff validates the parent call before issuing reviewer coordination.
+    await handoff(packet, { providerName, reviewerChildIdentity: {
+      kind: AGENT_CALL_CHILD_KINDS.FINAL_REVIEW,
+      parentAgentCallId,
+    } });
+    signal?.throwIfAborted();
+    // Composition issues the reviewer's tool surface, so how the reviewer
+    // reports is chosen after it: full final-review instructions are reduced to
+    // their mode-neutral core first. Only a surface that carries final_review
+    // gets the report-and-wait lines; without an issued surface the reviewer
+    // reports in its terminal handoff.
+    const coreInstructions = [true, false].some((reportAndWait) => instructions === finalReviewInstructions({ reportAndWait }))
+      ? finalReviewCoreInstructions() : instructions;
+    const composed = await composePrompt(packet, coreInstructions, { providerName });
+    signal?.throwIfAborted();
+    const canReportAndWait = Array.isArray(packet.remote_tool_surface)
+      && packet.remote_tool_surface.includes("tools.final_review");
+    const modeInstructions = finalReviewModeInstructions({ reportAndWait: canReportAndWait });
+    composedProvider = providerName;
+    return [composed, modeInstructions, evidence].filter(Boolean).join("\n\n");
+  };
+  const packetOptions = () => ({
+    skipRolePrompt: !!packet.remote_prompt_composed,
+    stableContext: packet.stable_context || null,
+    sessionPacket: packet,
+    remoteSystemPrompt: packet.remote_system_prompt || null,
   });
-  // Handoff validates the parent call before issuing reviewer coordination.
-  await handoff(packet, { providerName, reviewerChildIdentity: {
-    kind: AGENT_CALL_CHILD_KINDS.FINAL_REVIEW,
-    parentAgentCallId,
-  } });
-  abortSignal?.throwIfAborted();
-  // Composition issues the reviewer's tool surface, so how the reviewer
-  // reports is chosen after it: full final-review instructions are reduced to
-  // their mode-neutral core first. Only a surface that carries final_review
-  // gets the report-and-wait lines; without an issued surface the reviewer
-  // reports in its terminal handoff.
-  const coreInstructions = [true, false].some((reportAndWait) => instructions === finalReviewInstructions({ reportAndWait }))
-    ? finalReviewCoreInstructions() : instructions;
-  const composed = await composePrompt(packet, coreInstructions, { providerName });
-  abortSignal?.throwIfAborted();
-  const canReportAndWait = Array.isArray(packet.remote_tool_surface)
-    && packet.remote_tool_surface.includes("tools.final_review");
-  const modeInstructions = finalReviewModeInstructions({ reportAndWait: canReportAndWait });
+  const prompt = await buildPromptForProvider(providerName);
   const wallSignal = AbortSignal.timeout(wallMs);
   const reviewerSignal = abortSignal ? AbortSignal.any([abortSignal, wallSignal]) : wallSignal;
   // A reviewer cut off by its wall has no verdict on the work, whatever its
@@ -96,7 +112,7 @@ async function runFinalReviewerInContext({
   const wallError = () => Object.assign(new Error("the reviewer reached its time limit before reporting"),
     { code: "FINAL_REVIEW_REVIEWER_WALL" });
   let reviewerCallId = null;
-  const result = await call([composed, modeInstructions, evidence].filter(Boolean).join("\n\n"), {
+  const result = await call(prompt, {
     role: "assessor",
     modelTier: tier,
     assessmentExecution: execution,
@@ -108,13 +124,15 @@ async function runFinalReviewerInContext({
     projectDbCapability: "none",
     projectDbWrite: false,
     needsImageGeneration: false,
-    skipRolePrompt: !!packet.remote_prompt_composed,
+    ...packetOptions(),
+    buildFallbackPrompt: ({ providerName }) => buildPromptForProvider(providerName, reviewerSignal),
+    buildFallbackOptions: ({ providerName }) => {
+      if (providerName !== composedProvider) throw new Error("Reviewer fallback options require its composed provider prompt");
+      return packetOptions();
+    },
     recyclingMode: "fresh",
-    stableContext: packet.stable_context || null,
-    sessionPacket: packet,
     atlasConfig,
     disableAtlas,
-    remoteSystemPrompt: packet.remote_system_prompt || null,
     abortSignal: reviewerSignal,
     cwd,
     _onAgentCallCreated: (id) => { reviewerCallId = id; onAgentCallCreated?.(id); },

@@ -1,6 +1,6 @@
 import { providerPauseClearTracker } from "../classes/ProviderPauseClearTracker.js";
 import { getAtlasIntegrationConfig } from "../../integrations/functions/atlas.js";
-import { NATIVE_API_PROVIDERS } from "../../../catalog/provider.js";
+import { NATIVE_API_PROVIDERS, PROVIDER_RUN_DEAD_ERROR_CODE, UNUSABLE_PROVIDER_FAILURE_CLASSES } from "../../../catalog/provider.js";
 import { readModelSetting as readDbSetting } from "./shared/setting-read.js";
 // lib/provider/provider.js — Provider router
 //
@@ -15,7 +15,7 @@ import { getConfiguredImageProviders } from "../../artifacts/functions/index.js"
 import { getAtlasProviderSupport } from "../../integrations/functions/atlas.js";
 import { setSetting } from "../../settings/functions/repository-settings.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
-import { classifyProviderError } from "./shared/api-resilience.js";
+import { classifyProviderError, isPosseRaisedError } from "./shared/api-resilience.js";
 import { PROVIDER_QUOTA_SCOPES } from "../../../catalog/provider.js";
 import { isProviderQuotaBackoff } from "./shared/quota-reset.js";
 import { providerPauseSettingKey, readProviderPauseRecord, writeProviderPause } from "./provider-pause-state.js";
@@ -463,6 +463,8 @@ export async function repairMissingProviderDependencies({
  */
 export function isProviderReady(providerName, capability = null) {
   const canonicalName = canonicalProviderName(providerName);
+  const dead = getProviderRunFailure(canonicalName);
+  if (dead) return { ready: false, reason: `dead for this run (${dead.reason})` };
   // A provider that generates images on this machine answers for itself: it
   // has no credentials, and needs neither a text model nor the text opt-in.
   if (capability === "images" && providerRegistry.has(canonicalName)) {
@@ -590,7 +592,7 @@ export function getProviderHealth() {
     const canonical = canonicalProviderName(providerName);
     const ready = isProviderReady(canonical, capability);
     const loaded = providerRegistry.has(canonical);
-    const status = ready.ready
+    const status = getProviderRunFailure(canonical) ? "dead" : ready.ready
       ? "available"
       : (!capability && (canonical === "openai" || canonical === "anthropic") && loaded ? "loaded (no credentials)" : "unavailable");
     return {
@@ -673,12 +675,44 @@ export function pauseProviderForQuota(providerName, err) {
   return result;
 }
 
+// Unlike a timed account pause, this latch cannot expire or be cleared by a
+// successful concurrent call. All workers share it until a new run starts.
+export function markProviderDeadForRun(providerName, err) {
+  if (!providerName || isPosseRaisedError(err)) return false;
+  const classification = String(err?.classification || "");
+  const backoff = classifyProviderError(err);
+  if (backoff.quota?.scope === PROVIDER_QUOTA_SCOPES.MODEL) return false;
+  const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
+  const unusable = UNUSABLE_PROVIDER_FAILURE_CLASSES.includes(classification)
+    || (!classification && [401, 403].includes(status));
+  const capped = isProviderQuotaBackoff(backoff) || classification === "rate_limit" || status === 429;
+  if (!unusable && !capped) return false;
+  return providerRuntimeState.markDeadForRun(canonicalProviderName(providerName), unusable ? classification || "authentication" : backoff.source);
+}
+
+export function getProviderRunFailure(providerName) {
+  return providerRuntimeState.getRunFailure(canonicalProviderName(providerName));
+}
+
+export function resetProviderRunFailures() {
+  providerRuntimeState.resetRunFailures();
+}
+
+export function assertProviderAvailableForRun(providerName) {
+  const dead = getProviderRunFailure(providerName);
+  if (dead) throw Object.assign(new Error(`${providerName} is dead for the rest of this run (${dead.reason})`), {
+    code: PROVIDER_RUN_DEAD_ERROR_CODE, classification: "provider_unavailable", provider: providerName,
+  });
+}
+
 /**
  * Check if a provider is currently rate-limited (global state).
  * @param {string} providerName
- * @returns {{ blocked: boolean, retryInSec: number, reason: string }}
+ * @returns {{ blocked: boolean, retryInSec: number, reason: string, dead?: boolean }}
  */
 export function getProviderRateLimitState(providerName) {
+  const dead = getProviderRunFailure(providerName);
+  if (dead) return { blocked: true, dead: true, retryInSec: 0, reason: dead.reason };
   const mod = resolveProviderModule(providerName);
   const persisted = readPersistedRateLimitState(providerName);
   // An operator cleared the pause, possibly from another process: release

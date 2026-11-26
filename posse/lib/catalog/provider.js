@@ -5,6 +5,11 @@
 
 export const PROVIDER_OPTIONS = Object.freeze(["claude", "anthropic", "openai", "codex", "grok", "copilot", "posse-local"]);
 
+export const PROVIDER_RUN_DEAD_ERROR_CODE = "PROVIDER_DEAD_FOR_RUN";
+export const UNUSABLE_PROVIDER_FAILURE_CLASSES = Object.freeze([
+  "authentication", "provider_unavailable", "incompatible_provider_version",
+]);
+
 // Local setup invariants cannot recover through a delayed model retry.
 // Escalate to operator recovery without consuming another identical attempt.
 export const PERMANENT_AGENT_SETUP_ERROR_CODES = Object.freeze([
