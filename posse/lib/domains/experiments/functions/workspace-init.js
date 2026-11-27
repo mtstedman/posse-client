@@ -1,5 +1,7 @@
 import { ExperimentCorpora } from '../classes/ExperimentCorpora.js';
 import { ExperimentSetupArtifacts } from '../classes/ExperimentSetupArtifacts.js';
+import { ExperimentSetupSource } from '../classes/ExperimentSetupSource.js';
+import { runtimeSourcesMatch } from './runtime-install.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -62,6 +64,11 @@ export async function initializeExperiment(request, { cwd = process.cwd(), git =
   const { repo, base, trunk } = await repository(cwd, request.trunk_branch, git);
   if (request.artifact) {
     const artifact = await new ExperimentSetupArtifacts(repo).get(request.artifact);
+    if (artifact.runtime) {
+      const source = await new ExperimentSetupSource(repo, { git }).open();
+      if (source.base !== base) throw new Error('Repository HEAD moved during runtime validation; initialize again against one frozen commit.');
+      if (!await runtimeSourcesMatch(artifact.runtime, source)) throw new Error('Runtime dependency files changed. Run setup-prepare to install the changed dependencies and validate only the affected runtime boundary.');
+    }
     if (Object.hasOwn(request, 'corpus') && experimentDigest(request.corpus) !== experimentDigest(artifact.template.corpus)) throw new Error('Setup artifact binds a different corpus revision. Prepare a compatible artifact.');
     if (Object.hasOwn(request, 'evaluation') || Object.hasOwn(request, 'runtime_path')) throw new Error('Artifact initialization uses its verified corpus and runtime.');
     const overrides = request.setup || {};

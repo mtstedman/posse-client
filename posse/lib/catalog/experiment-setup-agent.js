@@ -2,6 +2,7 @@ import { EXPERIMENT_READ_TOOL, EXPERIMENT_SEARCH_TOOL, EXPERIMENT_LOOKUP_BATCH_T
 import { EXPERIMENT_CORPUS_INSPECTION_TOOLS } from './experiment-inspection.js';
 import { AGENT_REASONING_EFFORTS } from './agent.js';
 import { CORPUS_PREP_CONTRACT_SCHEMA, CORPUS_PREP_CONTRACT_GUIDANCE } from './experiment-corpus-prep.js';
+import { EXPERIMENT_INSTALL_DEPS_TOOL } from './experiment-runtime.js';
 
 const text = maxLength => ({ type: 'string', minLength: 1, maxLength });
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', additionalProperties: false, properties, required });
@@ -20,6 +21,7 @@ export const SETUP_AGENT_REQUEST = object({ repo_path: text(1024), objective: te
 }, ['repo_path', 'objective', 'idempotency_key']);
 const tool = (name, description, properties, required = Object.keys(properties)) => ({ name, description, parameters: object(properties, required) });
 export const SETUP_AGENT_TOOLS = [
+  EXPERIMENT_INSTALL_DEPS_TOOL,
   tool('setup.files', 'List safe tracked source/config paths at the frozen commit. Filter by path substring; paginate before reading. Paths use work/ prefix.', { query: text(240), offset: { type: 'integer', minimum: 0 } }, []),
   ...[EXPERIMENT_READ_TOOL, EXPERIMENT_SEARCH_TOOL, EXPERIMENT_LOOKUP_BATCH_TOOL],
   tool('setup.corpora', 'List registered corpus summaries without answers. Choose a suitable corpus for the objective; do not ask for a manual choice merely because none was supplied.', { offset: { type: 'integer', minimum: 0 } }, []),

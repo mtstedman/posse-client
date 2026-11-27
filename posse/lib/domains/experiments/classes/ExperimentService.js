@@ -66,13 +66,13 @@ export class ExperimentService {
     return runID ? this.campaigns.store.get(K.CASE_RESULTS, runID) : null;
   }
   async run(args) {
-    if (this.setups.smokeActive) throw new Error('Setup adapter validation must finish before another sandbox run.');
+    if (this.setups.smokeActive || this.setups.installActive) throw new Error('Setup adapter validation or dependency installation must finish before another sandbox run.');
     if (this.stopping || !this.backend) throw new Error("Experiment execution backend is unavailable.");
     const before = this.campaigns.load(args.id);
     const evaluation = validateNumericEvaluation(before.plan, this.evaluations[before.plan.evaluation.ref]);
     await this.backend.preflight(before.plan);
     this.assertOwner();
-    if (this.setups.smokeActive) throw new Error('Setup adapter validation must finish before another sandbox run.');
+    if (this.setups.smokeActive || this.setups.installActive) throw new Error('Setup adapter validation or dependency installation must finish before another sandbox run.');
     if (this.stopping) throw new Error("Experiment owner is stopping.");
     // One sandbox per owner, including unresolved runs after a crash.
     if (this.campaigns.store.list(K.CAMPAIGNS).some(c => c.active_run && c.id !== args.id)) throw new Error("Another experiment run needs to finish or be reconciled.");
@@ -123,5 +123,5 @@ export class ExperimentService {
     for (const record of this.campaigns.store.list(K.RUNNERS)) this.runner.integrate(record);
   }
   async shutdown() { this.stopping = true; await Promise.all([this.setups.shutdown(), this.corpora.shutdown()]); await this.runner.shutdown(); await this.integration.shutdown(); for (const task of this.active.values()) task.controller.abort(); await Promise.all([...this.active.values()].map(task => task.promise)); }
-  activeCount() { return this.setups.active.size + this.corpora.active.size + new Set([...this.runner.active.keys(), ...[...this.integration.active.values()].map(t => t.campaignID), ...this.campaigns.store.list(K.CAMPAIGNS).filter(c => c.active_run).map(c => c.id)]).size; }
+  activeCount() { return this.setups.activeCount() + this.corpora.active.size + new Set([...this.runner.active.keys(), ...[...this.integration.active.values()].map(t => t.campaignID), ...this.campaigns.store.list(K.CAMPAIGNS).filter(c => c.active_run).map(c => c.id)]).size; }
 }

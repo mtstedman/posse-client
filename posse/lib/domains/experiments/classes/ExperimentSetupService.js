@@ -5,6 +5,8 @@ import { ExperimentSetupAgent } from './ExperimentSetupAgent.js';
 import { ExperimentSetupSource } from './ExperimentSetupSource.js';
 import { ExperimentSetupArtifacts } from './ExperimentSetupArtifacts.js';
 import { ExperimentSandbox } from './ExperimentSandbox.js';
+import { ExperimentRuntimeInstaller } from './ExperimentRuntimeInstaller.js';
+import { runtimeRecipe, runtimeSourcesMatch } from '../functions/runtime-install.js';
 import { smokeSetupTemplate, materializeSetupTemplate, setupTemplateFiles } from '../functions/setup-agent.js';
 import { experimentDigest } from '../functions/snapshots.js';
 import { validateToolArguments } from '../../../shared/tools/functions/schema-validation.js';
@@ -12,18 +14,23 @@ import { EXPERIMENT_OBJECTS } from '../../../catalog/experiments.js';
 
 export class ExperimentSetupService {
   constructor(service, { dispatch, source = repo => new ExperimentSetupSource(repo), artifacts = repo => new ExperimentSetupArtifacts(repo),
-    sandbox = images => new ExperimentSandbox({ images }), smoke = smokeSetupTemplate, now = Date.now } = {}) {
+    sandbox = images => new ExperimentSandbox({ images }), smoke = smokeSetupTemplate, runtimeInstaller = () => new ExperimentRuntimeInstaller(), now = Date.now } = {}) {
     this.service = service; this.store = service.campaigns.store; this.dispatch = dispatch; this.source = source; this.artifacts = artifacts;
-    this.sandbox = sandbox; this.validateSmoke = smoke; this.now = now; this.active = new Map(); this.smokeActive = null;
+    this.sandbox = sandbox; this.validateSmoke = smoke; this.runtimeInstaller = runtimeInstaller; this.now = now; this.active = new Map(); this.smokeActive = null; this.installActive = null;
   }
   guard(signal) { signal?.throwIfAborted(); this.service.assertOwner(); if (this.service.stopping) throw new Error('Experiment owner is stopping.'); }
   save(record) { this.service.assertOwner(); record.updated_at = this.now(); this.store.put(K, record.id, record); }
+  runtimeSummary(runtime) {
+    return runtime ? { image: runtime.image, profile: runtime.profile, recipe_digest: runtime.recipe_digest, paths: runtime.paths, reused: runtime.reused } : null;
+  }
+  activeCount() { return new Set([...this.active.keys(), this.installActive, this.smokeActive].filter(Boolean)).size; }
   status(id) {
     const r = this.store.get(K, id); if (!r) throw new Error('Unknown setup preparation.');
     return { id: r.id, state: r.state, repo_path: r.repo, objective: r.objective, base_commit: r.base_commit || null, artifact: r.artifact || null,
       baseline_required: r.state === S.READY,
       selection: r.selection || null, reuse: r.reuse || null, child: r.child || null, usage: r.usage, combined_usage: this.combinedUsage(r), budget: r.config,
       pending_call: r.pending_call, validation_attempts: r.validation_attempts, last_action: r.last_action || null, error: r.error || null,
+      runtime: this.runtimeSummary(r.runtime), install: r.install || null,
       usage_incomplete: r.pending_call || r.child?.usage_incomplete === true || r.child?.usage_unknown === true,
       ...(r.smoke ? { smoke: { id: r.smoke.id, cleanup_unconfirmed: r.smoke.cleanup_unconfirmed || false } } : {}) };
   }
@@ -99,46 +106,79 @@ export class ExperimentSetupService {
     for (const match of matching) {
       try {
         const files = await setupTemplateFiles(match.artifact.template, source);
-        compatible.push({ ...match, rank: Number(experimentDigest(files) === match.artifact.validation.source_digest) * 2
+        const runtimeMatches = !match.artifact.runtime || await runtimeSourcesMatch(match.artifact.runtime, source);
+        // An explicitly pinned image cannot silently acquire changed dependencies.
+        if (!runtimeMatches && request.image) continue;
+        compatible.push({ ...match, rank: Number(runtimeMatches) * 4 + Number(experimentDigest(files) === match.artifact.validation.source_digest) * 2
           + Number(match.artifact.template.corpus.revision === match.selected.revision) });
       } catch { /* Removed/renamed bindings require the setup agent to adapt. */ }
     }
     if (!compatible.length) return false;
     compatible.sort((a, b) => b.rank - a.rank);
     const chosen = compatible[0];
-    await this.reuse(record, chosen.artifact.artifact, chosen.selected, source, signal, 'Existing validated setup matches the objective, corpus interface and runtime.');
+    await this.reuse(record, chosen.artifact.artifact, chosen.selected, source, signal, 'Existing validated setup matches the objective, corpus interface and runtime.', request.image);
     return true;
   }
-  async reuse(record, artifactId, selected, source, signal, reason) {
+  async reuse(record, artifactId, selected, source, signal, reason, pinnedImage) {
     this.guard(signal);
     const artifacts = this.artifacts(record.repo), artifact = await artifacts.get(artifactId), corpus = await this.service.corpora.open(record.repo);
     const prior = await corpus.load(artifact.template.corpus), current = await corpus.load(selected);
     if (prior.id !== current.id || experimentDigest(prior.contract) !== experimentDigest(current.contract)) throw new Error('Artifact corpus interface changed; prepare a new compatible adapter.');
+    let runtime = artifact.runtime;
+    if (runtime) {
+      if (!await runtimeSourcesMatch(runtime, source) || !await this.runtimeInstaller().isAvailable(runtime)) {
+        if (pinnedImage) throw new Error('The explicitly pinned runtime is unavailable or has changed dependency bindings. Restore that exact image, or omit request.image in a new preparation to rebuild dependencies.');
+        runtime = await this.installDeps(record, runtime.recipe, source, signal);
+      } else record.runtime = { ...runtime, reused: true };
+    }
+    const runtimeChanged = Boolean(runtime && (runtime.image !== artifact.validation.image || runtime.recipe_digest !== artifact.runtime.recipe_digest));
     const files = await setupTemplateFiles(artifact.template, source), sourceChanged = experimentDigest(files) !== artifact.validation.source_digest;
     const corpusChanged = selected.revision !== artifact.template.corpus.revision;
     record.selection = { corpus: selected, reason };
-    record.reuse = { artifact: artifactId, reason, deterministic: true, source_changed: sourceChanged, corpus_changed: corpusChanged,
-      reused_components: ['adapter', 'runtime', 'checks', ...(sourceChanged ? [] : ['source_boundary']), ...(corpusChanged ? ['existing_verified_cases'] : ['corpus'])] };
-    if (!sourceChanged && !corpusChanged && record.objective === artifact.template.setup.plan.objective) {
+    record.reuse = { artifact: artifactId, reason, deterministic: true, source_changed: sourceChanged, corpus_changed: corpusChanged, runtime_changed: runtimeChanged,
+      reused_components: ['adapter', ...(runtimeChanged ? [] : ['runtime']), 'checks', ...(sourceChanged || runtimeChanged ? [] : ['source_boundary']), ...(corpusChanged ? ['existing_verified_cases'] : ['corpus'])] };
+    if (!sourceChanged && !corpusChanged && !runtimeChanged && record.objective === artifact.template.setup.plan.objective) {
       record.artifact = artifactId; record.state = S.READY; this.save(record);
       return { ready: true, artifact: artifactId, validation_reused: true, reuse: record.reuse };
     }
     const template = structuredClone(artifact.template); delete template.corpus;
+    if (runtime) template.image = runtime.image;
     const materialized = await materializeSetupTemplate(template, { source, corpus, selected, objective: record.objective });
     const oldCases = new Set(prior.entries.map(e => e.case_id));
     const newCases = materialized.evaluation.cases.filter(c => !oldCases.has(c.id));
-    if (!sourceChanged) materialized.smokeCases = newCases;
+    if (!sourceChanged && !runtimeChanged) materialized.smokeCases = newCases;
     let validation;
-    if (sourceChanged || newCases.length) {
+    if (sourceChanged || runtimeChanged || newCases.length) {
       record.validation_attempts++; this.save(record);
-      validation = await this.smoke(record, materialized, signal, artifact.validation.image);
+      validation = await this.smoke(record, materialized, signal, runtime?.image || artifact.validation.image);
     } else validation = { ...artifact.validation, kind: 'validated_receipt_reused', cases: 0, case_ids: [] };
     this.guard(signal);
-    const saved = await artifacts.save({ template: materialized.template, validation: { ...validation, requested_image: artifact.validation.requested_image, base_commit: source.base, source_digest: experimentDigest(files),
+    const saved = await artifacts.save({ template: materialized.template, ...(runtime ? { runtime } : {}), validation: { ...validation, requested_image: runtime?.image || artifact.validation.requested_image, base_commit: source.base, source_digest: experimentDigest(files),
       evaluation_digest: materialized.setup.plan.evaluation.digest, reused_from: artifactId, reused_components: record.reuse.reused_components,
-      validated_components: sourceChanged ? ['source_adapter_boundary'] : newCases.length ? ['new_corpus_inputs'] : ['corpus_binding'] }, selection: record.selection, reuse: record.reuse }, { guard: () => this.guard(signal) });
+      validated_components: runtimeChanged ? ['runtime_adapter_boundary'] : sourceChanged ? ['source_adapter_boundary'] : newCases.length ? ['new_corpus_inputs'] : ['corpus_binding'] }, selection: record.selection, reuse: record.reuse }, { guard: () => this.guard(signal) });
     record.artifact = saved.artifact; record.state = S.READY; this.save(record);
     return { ready: true, artifact: saved.artifact, validation: saved.validation, reuse: record.reuse };
+  }
+  async installDeps(record, recipe, source, signal) {
+    this.guard(signal);
+    if (this.installActive || this.smokeActive || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish first.');
+    const inputs = await runtimeRecipe(recipe, source), attempt = experimentDigest({ recipe: inputs.recipe, files: inputs.files });
+    this.guard(signal);
+    if (record.install_failures?.[attempt]) throw new Error(`This unchanged dependency recipe already failed; no installation was repeated. Correct the recipe or report the blocker. Previous error: ${record.install_failures[attempt]}`);
+    if (this.installActive || this.smokeActive || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish first.');
+    this.installActive = record.id;
+    try {
+      const runtime = await this.runtimeInstaller().install(recipe, { source, signal, guard: () => this.guard(signal),
+        reserve: reservation => { this.guard(signal); record.install = reservation; this.save(record); },
+        release: ({ cleanup_unconfirmed }) => {
+          if (cleanup_unconfirmed) { record.install.cleanup_unconfirmed = true; this.save(record); return; }
+          record.install = null; this.save(record);
+        } });
+      this.guard(signal); record.runtime = runtime; this.save(record); return runtime;
+    } catch (error) {
+      if (!signal?.aborted) { (record.install_failures ||= {})[attempt] = String(error.message).slice(0, 1000); this.save(record); }
+      throw error;
+    } finally { if (!record.install) this.installActive = null; }
   }
   async prepareCorpus(record, args, signal) {
     this.guard(signal);
@@ -171,7 +211,7 @@ export class ExperimentSetupService {
     return this.validateSmoke(materialized, { image, sandbox: this.sandbox, signal,
       reserve: (id, images) => {
         this.guard(signal);
-        if (this.smokeActive || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run must finish before adapter validation.');
+        if (this.installActive || this.smokeActive || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish before adapter validation.');
         this.smokeActive = record.id; record.smoke = { id, images }; this.save(record);
       },
       release: unconfirmed => {
@@ -181,12 +221,16 @@ export class ExperimentSetupService {
   }
   async recover() {
     for (const record of this.store.list(K)) {
+      if (record.install) {
+        try { await this.runtimeInstaller().cleanup(record.install.id); record.install = null; if (this.installActive === record.id) this.installActive = null; }
+        catch { record.install.cleanup_unconfirmed = true; this.installActive = record.id; }
+      }
       if (record.child?.id) {
         const child = this.service.corpora.status(record.child.id);
         record.child = { ...record.child, state: child.state, corpus: child.corpus, usage: child.usage, usage_incomplete: child.usage_incomplete, error: child.error };
       }
       if (record.smoke) {
-        try { await this.sandbox(record.smoke.images).cleanup(record.smoke.id); record.smoke = null; }
+        try { await this.sandbox(record.smoke.images).cleanup(record.smoke.id); record.smoke = null; if (this.smokeActive === record.id) this.smokeActive = null; }
         catch { record.smoke.cleanup_unconfirmed = true; this.smokeActive = record.id; }
       }
       if (record.state === S.RUNNING) { record.state = S.INTERRUPTED; record.error = record.pending_call ? 'Owner interrupted with model usage unknown; no automatic replay.' : 'Owner interrupted; no automatic setup replay.'; }

@@ -402,6 +402,39 @@ reused components, changed components and the actual smoke case IDs. Unchanged
 components are not sent back through corpus creation or model review. A ready
 setup still requires the actual experiment's fresh baseline.
 
+The builder can call `setup.install_deps` to install environment requirements
+without changing the project checkout. Supply a runtime `profile` (`node` or
+`python`), optional `base_image`, Debian `system_packages`, and dependency files
+from the frozen source snapshot. `npm` takes `manifest` and `lockfile`, `pip`
+takes `requirements`, and `composer` takes `manifest` and `lockfile`; paths use
+the same `work/` prefix as source reads. For example:
+
+```json
+{
+  "profile": "node",
+  "system_packages": ["php-cli", "php-sqlite3", "php-mbstring", "tesseract-ocr-eng"],
+  "npm": {"manifest": "work/web/package.json", "lockfile": "work/web/package-lock.json"}
+}
+```
+
+Installation runs in a bounded disposable container with network access and no
+host mounts or credentials. The tool returns an immutable image ID, dependency
+paths and a compact receipt; adapter validation automatically uses that image.
+Tests remain network-disabled. Leave `plan.runtime.dependencies` empty because
+dependencies are already installed in the image. A request that explicitly pins
+`image` cannot replace it through installation; omit that field to provision one.
+Package scripts/plugins and local-path dependency graphs are restricted by the
+installer's supported contract; errors identify requirements needing another
+recipe instead of silently falling back to host installs.
+
+Matching dependency files, install recipe and pinned base reuse the cached image.
+Changing implementation code does not reinstall dependencies. When dependency
+files change, `setup-prepare` reuses the recipe, installs the changed dependencies
+and validates the runtime/adapter boundary without another model decision.
+Artifact initialization rejects stale dependency bindings. Status includes the
+active install reservation and final runtime receipt; stopping setup cancels
+provisioning, and owner recovery reconciles any reserved container.
+
 When new setup work is necessary, the agent submits only new
 read-only JSONL adapters/support files plus an init template with source mappings,
 metrics and repository checks. The owner validates schemas and bindings and runs
