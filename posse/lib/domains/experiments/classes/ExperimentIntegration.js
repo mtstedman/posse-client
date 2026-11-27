@@ -83,7 +83,14 @@ export class ExperimentIntegration {
       }
       await workspace.initialize(signal);
       if (integrationStrategy(record.config) === M.DIRECT) {
-        for (const item of record.config.mapping) { signal.throwIfAborted(); this.service.assertOwner(); await workspace.write(item.target, accepted[item.source]); }
+        for (const item of record.config.mapping) {
+          signal.throwIfAborted(); this.service.assertOwner();
+          // Empty creation slots are optional until an accepted edit fills them.
+          // Materializing untouched slots can introduce empty test suites/modules.
+          const creation = record.config.files.find(file => file.path === item.target)?.mode === "create";
+          if (creation && starting[item.source] === "" && accepted[item.source] === "") continue;
+          await workspace.write(item.target, accepted[item.source]);
+        }
         await this.verify(record, workspace, signal);
         record.summary = "Applied accepted source bytes, verified repository checks, and finalized without model inference.";
         await this.commit(record, workspace, signal); return;

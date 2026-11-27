@@ -30,8 +30,10 @@ artifacts can be chained by hash within the current agent session. They are boun
 and expire with that session; originals remain immutable. Previews may be scaled
 for delivery; receipts retain full dimensions and a separate preview hash. Do not
 paste image bytes into notes; retain recipe parameters and the concrete finding.
-Pixel previews accompany the next decision only. Later decisions retain receipts
-and your notes, so record useful visual observations before requesting more source.
+Record useful visual observations before requesting more source. Improvement
+agents retain only the latest successful preview batch through subsequent source
+reads and submission; a new preview replaces it. The context identifies that
+retained preview. It is not shared with other roles or later candidates.
 
 These tools help investigate. Their artifacts are not substituted into benchmark
 inputs and visual preference is not a score. To measure an improvement, implement

@@ -122,7 +122,7 @@ export class ExperimentRunner {
     const resourceTools = evaluation?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? EXPERIMENT_CORPUS_INSPECTION_TOOLS : [];
     const skillTools = experimentSkillTools(record.setup.skills, role), skillSession = experimentSkillSession(record.setup.skills, evaluation, role);
     const skillContext = experimentSkillContext(record.setup.skills, role);
-    let images = [];
+    let images = [], preview = null;
     let batchReceipt = null;
     let lookups = 0;
     let notes = "";
@@ -130,7 +130,7 @@ export class ExperimentRunner {
       const remaining = EXPERIMENT_SOURCE_LIMITS.lookupTurns - lookups;
       const tools = remaining ? [...finalTools, readTool, searchTool, batchTool, ...resourceTools, ...skillTools] : finalTools;
       const call = await this.toolDecision(record, role, [{ role: "user", content: JSON.stringify({ ...context,
-        source_lookups_remaining: remaining, notes, ...(skillContext.length ? { skills: skillContext } : {}),
+        source_lookups_remaining: remaining, notes, ...(preview ? { retained_preview: preview } : {}), ...(skillContext.length ? { skills: skillContext } : {}),
         ...(remaining > 0 && remaining <= EXPERIMENT_SOURCE_LIMITS.lookupNudgeRemaining ? { source_nudge:
           `Only ${remaining} source lookup turn${remaining === 1 ? " remains" : "s remain"}. Identify the exact remaining uncertainty and batch final independent reads. ${role === "writer"
             ? "Converge on a supported patch, or decline with the concrete missing evidence; never invent source."
@@ -143,14 +143,21 @@ export class ExperimentRunner {
       if (call.arguments.notes !== undefined) notes = call.arguments.notes;
       lookups++;
       record.last_lookup = lookupDiagnostic(role, lookups, EXPERIMENT_SOURCE_LIMITS.lookupTurns, call); this.save(record);
-      // Pixels accompany only the next decision (including its protocol repair),
-      // rather than being copied into every subsequent prompt or source result.
-      images = [];
+      // Keep only the latest successful preview batch through source discovery.
+      // It expires with this role/candidate, never accumulates across previews.
       batchReceipt = null;
       let result;
+      const keepPreview = view => {
+        result = view.result;
+        if (view.images?.length) {
+          images = view.images;
+          preview = { tool: call.name, source: call.arguments.source || { case_index: call.arguments.case_index, alias: call.arguments.alias },
+            ...(call.arguments.variants ? { variants: call.arguments.variants.map(variant => variant.label) } : {}) };
+        }
+      };
       try {
         if (skillTools.some(tool => tool.name === call.name)) {
-          ({ result, images } = await skillSession.execute(call, signal));
+          keepPreview(await skillSession.execute(call, signal));
         } else if (call.name === batchTool.name) {
           const batch = await this.lookupBatch(record, call.arguments, accepted, candidate, signal, reads);
           this.check(record, signal);
@@ -163,7 +170,7 @@ export class ExperimentRunner {
         if (skillTools.some(tool => tool.name === call.name)) { /* Handled above. */ }
         else if ([readTool.name, searchTool.name].includes(call.name)) result = await this.lookup(record, call, accepted, candidate, signal, reads);
         else if (call.name === EXPERIMENT_CORPUS_CASES_TOOL.name) result = corpusInspectionCases(evaluation, call.arguments);
-        else ({ result, images } = await inspectCorpusResource(evaluation, call.arguments, { signal }));
+        else keepPreview(await inspectCorpusResource(evaluation, call.arguments, { signal }));
       } catch (error) {
         if (signal.aborted || ["experiment_budget", "model_usage_unknown", "owner_fenced"].includes(error.code)) throw error;
         result = { error: error.message };

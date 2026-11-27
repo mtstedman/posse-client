@@ -262,6 +262,12 @@ export function agentFindings(c, role = "coordinator") {
 }
 
 export function rememberSourceRead(history, entry) {
+  // Latest role notes already have their own context field. Repeating old notes
+  // inside each retained request displaces actual source and can retain stale facts.
+  if (entry.request && Object.hasOwn(entry.request, "notes")) {
+    const { notes: _notes, ...request } = entry.request;
+    entry = { ...entry, request };
+  }
   if (entry.source_reuse) history.reuse = { path: entry.path, version: entry.version, start_line: entry.start_line, ...entry.source_reuse };
   // A blocked duplicate adds no evidence and must not evict a dependency or
   // consume the fresh-result allowance merely by being requested again.

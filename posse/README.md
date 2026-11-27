@@ -339,7 +339,9 @@ to replay after a lost response. `status` saves `report.json`. Changed prepared
 setup/runtime data is rejected; initialize a new name to change the experiment.
 The prepared branch/worktree path is unique; the integration worktree is created
 when an accepted result is ready, then the direct strategy checks, commits, and
-merges it into trunk without model inference.
+merges it into trunk without model inference. Untouched empty creation slots stay
+absent; filled slots and initialized nonempty helpers are included. Commit scope
+contains only the exact verified changed files.
 
 Separate initialized experiments can run concurrently, including alongside
 ordinary work in other worktrees. Their owners and snapshots are isolated;
@@ -588,7 +590,8 @@ covered range is blocked before extraction, and partial overlap reads only its
 uncovered lines. `source_reuse` reports blocked reads and reused line counts.
 Overlapping reads start their delivered content at the first uncovered line,
 so a retained prefix cannot consume the continuation's byte allowance again.
-Blocked duplicates do not refresh or evict source. Small source fragments are
+Blocked duplicates do not refresh or evict source. Prior lookup notes are removed
+from retained request metadata; only the current role notes accompany source. Small source fragments are
 retained by the shared byte cap, without an additional eight-fragment cutoff.
 Coverage requires the same path, version and content digest; search hits,
 incomplete lines and evicted source never suppress a later read. Idea source now
@@ -2937,7 +2940,9 @@ that already support those image previews.
 
 Resources are selected only by pinned corpus case and alias, or by an artifact
 from the same agent session. Derived PNGs are bounded, immutable and temporary;
-previews travel as image blocks only on the following decision. Text receipts hold
+the latest successful preview batch stays available as image blocks through
+source reads and submission within that improvement role. A new preview replaces
+it; previews never accumulate across candidates or roles. Text receipts hold
 recipes, geometry and hashes, never base64 or hidden answers. Tool use consumes
 the agent's existing lookup/call budget. These caller-owned tools grant no shell,
 host filesystem access, corpus writes or native tool authority. A new suite must

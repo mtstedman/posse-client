@@ -113,8 +113,8 @@ export class IntegrationWorkspace {
     const snapshot = await this.snapshot(signal);
     if (!record.verification?.ok || snapshot.digest !== record.verification.digest || !Object.keys(snapshot.files).length) throw new Error("Run successful checks on the exact nonempty changes before committing.");
     const result = await this.commit(`${this.config.commit_message}\n\nPosse-Experiment: ${record.campaign_id}\nPosse-Integration: ${record.id}\nAccepted-Snapshot: ${record.snapshot_digest}`, this.config.worktree_path, {
-      modifyFiles: this.config.files.filter(f => f.mode === "modify").map(f => f.path),
-      createFiles: this.config.files.filter(f => f.mode === "create").map(f => f.path),
+      modifyFiles: this.config.files.filter(f => f.mode === "modify" && Object.hasOwn(snapshot.files, f.path)).map(f => f.path),
+      createFiles: this.config.files.filter(f => f.mode === "create" && Object.hasOwn(snapshot.files, f.path)).map(f => f.path),
     }, { projectDir: this.config.repo_path, expectedHead: this.config.base_commit });
     if (!result.createdCommit) throw new Error("Integration did not create a commit.");
     return this.confirmCommit(record, signal);
