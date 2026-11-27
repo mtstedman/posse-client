@@ -195,14 +195,15 @@ export class ExperimentCorpusPrep {
         } catch (error) { if (error.stats) this.charge(error.stats); throw error; }
         await this.save(); combined.throwIfAborted(); this.images = [];
         const calls = decision.message?.tool_calls || [], call = calls[0], tool = TOOLS.find(t => t.name === call?.name);
-        if (calls.length !== 1 || !tool || !validateToolArguments(tool, call.arguments).ok) throw new Error('Prep agent returned an invalid tool request.');
-        if (call.arguments.notes !== undefined) this.record.notes = call.arguments.notes;
-        try { previous = await this.execute(call, combined); }
+        if (calls.length !== 1 || !tool) throw new Error('Prep agent returned an invalid tool request.');
+        const validation = validateToolArguments(tool, call.arguments), callArgs = validation.ok ? call.arguments : {};
+        if (callArgs.notes !== undefined) this.record.notes = callArgs.notes;
+        try { previous = validation.ok ? await this.execute(call, combined) : { error: validation.message }; }
         catch (error) { previous = { error: error.message }; }
         const compact = JSON.stringify(previous);
-        this.record.operations.push({ tool: call.name, request: prepReadRequest(call.arguments), ...(call.arguments.path ? { path: call.arguments.path } : {}), ...(call.arguments.label ? { label: call.arguments.label } : {}),
+        this.record.operations.push({ tool: call.name, request: prepReadRequest(callArgs), ...(callArgs.path ? { path: callArgs.path } : {}), ...(callArgs.label ? { label: callArgs.label } : {}),
           result: compact.length <= 600 ? previous : { result_bytes: compact.length, ...(previous.sha256 ? { sha256: previous.sha256, label: previous.label, bytes: previous.bytes } : {}), ...(previous.revision ? { revision: previous.revision, total_cases: previous.total_cases } : {}) } });
-        // Full answer pairs live in immutable storage; resend only the latest bounded result.
+        // Full answer pairs live in immutable storage; retain only bounded working results.
         if (compact.length > 32000) previous = { ...this.record.operations.at(-1).result, note: 'Large result stored; use corpus or paginated inputs for detail.' };
         rememberPrepResult(this.record, call.name, previous);
         await this.save();

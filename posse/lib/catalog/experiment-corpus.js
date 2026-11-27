@@ -8,6 +8,7 @@ export const EXPERIMENT_ANSWER_SCHEMA = 'posse.experiment.answer.v1';
 export const EXPERIMENT_CORPUS_REGISTRY_SCHEMA = 'posse.experiment.corpora.v1';
 export const EXPERIMENT_CORPUS_FIELD_KINDS = ['exact', 'number', 'set', 'objects'];
 export const EXPERIMENT_CORPUS_KEY_STATUSES = ['draft', 'verified'];
+export const EXPERIMENT_CORPUS_PROFILE_PATTERN = '^[a-z0-9][a-z0-9._-]{0,127}$';
 export const EXPERIMENT_CORPUS_LIMITS = { items: 1000, batch: 100, resourceBytes: 64 * 1024 * 1024, importBytes: 256 * 1024 * 1024, jsonBytes: 4 * 1024 * 1024, fields: 32, objects: 128 };
 export const EXPERIMENT_CORPUS_ACTIONS = ['schema', 'choices', 'create', 'register', 'list', 'inspect', 'import', 'update', 'remove', 'score', 'prep'];
 export const EXPERIMENT_CORPUS_EXAMPLE = {

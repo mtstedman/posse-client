@@ -1,7 +1,17 @@
 import { CORPUS_INSPECTION_FORMATS } from './experiment-inspection.js';
+import { EXPERIMENT_CORPUS_PROFILE_PATTERN } from './experiment-corpus.js';
 const text = { type: 'string' };
 const jsonPath = { type: 'array', maxItems: 8, items: { anyOf: [{ type: 'string', minLength: 1, maxLength: 128 }, { type: 'integer', minimum: 0, maximum: 1000000 }] } };
 const descriptions = { type: 'object', maxProperties: 32, additionalProperties: { type: 'string', minLength: 1, maxLength: 512 } };
+const importedItem = { type: 'object', additionalProperties: false, required: ['profile', 'resources'], properties: {
+  profile: { type: 'string', pattern: EXPERIMENT_CORPUS_PROFILE_PATTERN, description: 'Lowercase adapter label, e.g. card-identification-v1. Not an object or prose.' },
+  label: { type: 'string', minLength: 1, maxLength: 240 }, tags: { type: 'array', maxItems: 32, items: { type: 'string', maxLength: 128 } }, input: {}, expected: { type: 'object' }, provenance: {},
+  resources: { type: 'object', minProperties: 1, maxProperties: 16, propertyNames: { pattern: '^[a-z][a-z0-9_]{0,63}$' }, additionalProperties: {
+    type: 'object', additionalProperties: false, properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' }, path: text, sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      name: { type: 'string', minLength: 1, maxLength: 240, description: 'Safe filename matching the media, e.g. image.jpg; otherwise defaults to alias.bin.' }, label: { type: 'string', minLength: 1, maxLength: 240 } },
+    anyOf: [{ required: ['id'] }, { required: ['path', 'sha256'] }],
+  } },
+} };
 const tool = (name, description, properties, required = []) => ({ name, description, parameters: { type: 'object', properties: { ...properties, notes: { type: 'string', maxLength: 4000, description: 'Replace working notes retained across decisions; keep inspected IDs, findings and next steps.' } }, required, additionalProperties: false } });
 export const CORPUS_PREP_DEFAULTS = { model: 'standard', reasoning_effort: 'medium', model_calls: 100, tokens: 1000000, spend_usd: 25, wall_seconds: 3600 };
 export const CORPUS_BATCH_DOWNLOAD = { items: 100, concurrency: 4, delayMs: 200 };
@@ -22,7 +32,7 @@ export const CORPUS_PREP_TOOLS = [
     items: { type: 'array', minItems: 1, maxItems: CORPUS_BATCH_DOWNLOAD.items, items: { type: 'object', additionalProperties: false, required: ['url', 'label'], properties: { url: { type: 'string', minLength: 1, maxLength: 4096 }, label: { type: 'string', minLength: 1, maxLength: 240 } } } },
     concurrency: { type: 'integer', minimum: 1, maximum: CORPUS_BATCH_DOWNLOAD.concurrency }, delay_ms: { type: 'integer', minimum: 0, maximum: 5000 },
   }, ['items']),
-  tool('import', 'Batch import up to 100 cases with human labels, tags, profile, input, resources and expected. Path resources are relative to inputs/ and require the SHA256 returned by inspect. Resource IDs can refer to downloads. Inferred answers stay draft. Existing keys cannot be overwritten here.', { items: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'object' } } }, ['items']),
+  tool('import', 'Batch import up to 100 cases. Profile is a lowercase slug; resources maps aliases to {id,name} or {path,sha256,name}. Paths are relative to inputs/. Prefer downloaded IDs and media-appropriate names. Inferred answers stay draft; existing keys cannot be overwritten.', { items: { type: 'array', minItems: 1, maxItems: 100, items: importedItem } }, ['items']),
   tool('import_manifest', 'Import an operator-supplied JSON file from inputs/ as verified answers, without modifying its contents. Format: {items:[...]} with expected, profile, input and resources. Resource paths are relative to that manifest and every resource needs sha256. Agent-authored/downloaded manifests cannot be trusted through this tool.', { path: text }, ['path']),
   tool('corpus', 'Inspect current labeled case membership and key verification status, paginated. Reduce limit for cases with many resources.', { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50 } }),
   tool('finish', 'Finish preparation and report remaining draft keys or missing inputs honestly.', { summary: text }, ['summary']),

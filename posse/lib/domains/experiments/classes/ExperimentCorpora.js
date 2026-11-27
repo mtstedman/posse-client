@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { gitExecAsync } from '../../git/functions/utils.js';
 import { withWorktreeLockAsync } from '../../git/functions/worktree-locks.js';
 import { ensurePosseGitInfoExcludeAsync } from '../../runtime/functions/ignore.js';
-import { EXPERIMENT_CORPUS_SCHEMA, EXPERIMENT_CORPUS_EVALUATION_SCHEMA, EXPERIMENT_CASE_SCHEMA, EXPERIMENT_ANSWER_SCHEMA, EXPERIMENT_CORPUS_REGISTRY_SCHEMA, EXPERIMENT_CORPUS_LIMITS as L } from '../../../catalog/experiment-corpus.js';
+import { EXPERIMENT_CORPUS_SCHEMA, EXPERIMENT_CORPUS_EVALUATION_SCHEMA, EXPERIMENT_CASE_SCHEMA, EXPERIMENT_ANSWER_SCHEMA, EXPERIMENT_CORPUS_REGISTRY_SCHEMA, EXPERIMENT_CORPUS_PROFILE_PATTERN, EXPERIMENT_CORPUS_LIMITS as L } from '../../../catalog/experiment-corpus.js';
 import { validCorpusFilename } from '../functions/corpus-inputs.js';
 import { packCorpusResource, unpackCorpusResource, corpusHash as hash } from '../functions/corpus-archive.js';
 import { experimentDigest } from '../functions/snapshots.js';
@@ -233,7 +233,7 @@ export class ExperimentCorpora {
     if (expected_revision && expected_revision !== observed.revision) throw new Error('Corpus revision changed.');
     const prepared = [], resourceCache = new Map(); let importedBytes = 0;
     for (const item of items) {
-      if (!item || typeof item.profile !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(item.profile) || !item.resources || Array.isArray(item.resources)
+      if (!item || typeof item.profile !== 'string' || !new RegExp(EXPERIMENT_CORPUS_PROFILE_PATTERN).test(item.profile) || !item.resources || Array.isArray(item.resources)
         || !Object.keys(item.resources).length || Object.keys(item.resources).length > 16) throw new Error('Each case needs a profile and 1–16 named resources.');
       const resources = {}, resourceLabels = {}, blobs = [];
       for (const [role, resource] of Object.entries(item.resources)) {

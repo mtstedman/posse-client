@@ -156,6 +156,8 @@ field paths from an archived JSON resource or input file into a bounded table;
 array indexes and pagination avoid sending large API responses through the model.
 For example, `{id, array_path:["data"], fields:{name:["name"],image:["image_uris","large"]}}`
 reads just the selected columns. Truncated cells are explicitly marked.
+The import schema describes profiles and resource bindings explicitly. Malformed
+arguments return a field-specific error so the agent can correct its next call.
 Prep keeps at most four recent results within 16 KiB of working context, plus
 compact notes and twelve recent operation summaries. Related metadata and
 resource IDs therefore survive the next tool call without replaying the full
