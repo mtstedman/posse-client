@@ -4,8 +4,8 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { EXPERIMENT_RUNTIME_INSTALL_LIMITS as L, EXPERIMENT_RUNTIME_BASE_IMAGES, EXPERIMENT_RUNTIME_RECEIPT_SCHEMA as SCHEMA, EXPERIMENT_RUNTIME_PATHS as P } from '../../../catalog/experiment-runtime.js';
-import { runtimeRecipe, runtimeSourcesMatch, validateRuntimeReceipt, runtimeImageReference } from '../functions/runtime-install.js';
+import { EXPERIMENT_RUNTIME_INSTALL_LIMITS as L, EXPERIMENT_RUNTIME_BASE_IMAGES, EXPERIMENT_RUNTIME_RECEIPT_SCHEMA as SCHEMA, EXPERIMENT_RUNTIME_PATHS as P, EXPERIMENT_RUNTIME_NODE_MODULES_LABEL } from '../../../catalog/experiment-runtime.js';
+import { runtimeRecipe, runtimeSourcesMatch, validateRuntimeReceipt, runtimeImageReference, runtimeProjects, runtimeProjectDirectory, runtimeProjectPaths } from '../functions/runtime-install.js';
 import { experimentDigest } from '../functions/snapshots.js';
 
 const exec = promisify(execFile), docker = '/usr/bin/docker';
@@ -56,7 +56,12 @@ export class ExperimentRuntimeInstaller {
     validateRuntimeReceipt(receipt);
     let image;
     try { image = await this.imageDetails(receipt.image, signal); } catch (error) { signal?.throwIfAborted(); if (error.code === 'ENOENT') throw error; return false; }
-    return image.Id === receipt.image && image.Config?.Labels?.['posse.experiment.runtime.recipe'] === receipt.recipe_digest;
+    if (image.Id !== receipt.image || image.Config?.Labels?.['posse.experiment.runtime.recipe'] !== receipt.recipe_digest) return false;
+    if (receipt.paths?.node_modules_by_root) {
+      try { return experimentDigest(JSON.parse(image.Config.Labels[EXPERIMENT_RUNTIME_NODE_MODULES_LABEL])) === experimentDigest(receipt.paths.node_modules_by_root); }
+      catch { return false; }
+    }
+    return true;
   }
   async validateReceipt(receipt, { source, signal } = {}) {
     validateRuntimeReceipt(receipt); signal?.throwIfAborted();
@@ -72,21 +77,25 @@ export class ExperimentRuntimeInstaller {
       if (String(await this.command(docker, ['ps', '--all', '--quiet', '--filter', `name=^/${name}$`], { timeout: 15000 })).trim()) throw new Error('Container still exists.');
     } catch { throw Object.assign(new Error('Runtime installation cleanup is unconfirmed.'), { cleanupUnconfirmed: true }); }
   }
-  script(recipe) {
+  script(recipe, { preserveDependencies = false } = {}) {
     const packages = new Set(recipe.system_packages);
     if (recipe.composer) for (const name of ['composer', 'php-cli', 'unzip', 'ca-certificates']) packages.add(name);
     if (recipe.pip && recipe.profile === 'node') for (const name of ['python3', 'python3-pip']) packages.add(name);
     if (recipe.npm && recipe.profile === 'python') for (const name of ['nodejs', 'npm']) packages.add(name);
     const commands = ['#!/bin/sh', 'set -eu', 'umask 022'];
     if (packages.size) commands.push('export DEBIAN_FRONTEND=noninteractive', 'apt-get update', `apt-get install -y --no-install-recommends -- ${[...packages].sort().map(quote).join(' ')}`, 'rm -rf /var/lib/apt/lists/*');
-    if (recipe.npm) commands.push(`cd ${P.root}/npm`, ': > /tmp/posse-npm-user.npmrc', ': > /tmp/posse-npm-global.npmrc',
-      'npm ci --include=dev --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org --userconfig=/tmp/posse-npm-user.npmrc --globalconfig=/tmp/posse-npm-global.npmrc',
-      `if [ -e ${P.npm} ] || [ -L ${P.npm} ]; then test "$(readlink ${P.npm})" = ${P.root}/npm/node_modules; else ln -s ${P.root}/npm/node_modules ${P.npm}; fi`);
-    if (recipe.pip) commands.push(`python3 -m pip --isolated install --no-cache-dir --disable-pip-version-check --only-binary=:all: --index-url https://pypi.org/simple --target ${P.python} --requirement ${P.root}/pip/requirements.txt`,
+    const npm = runtimeProjects(recipe.npm), pip = runtimeProjects(recipe.pip), composer = runtimeProjects(recipe.composer);
+    for (const spec of npm) commands.push(`cd ${runtimeProjectDirectory('npm', spec, npm.length)}`, ': > /tmp/posse-npm-user.npmrc', ': > /tmp/posse-npm-global.npmrc',
+      'npm ci --include=dev --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org --userconfig=/tmp/posse-npm-user.npmrc --globalconfig=/tmp/posse-npm-global.npmrc');
+    if (npm.length === 1) commands.push(`if [ -e ${P.npm} ] || [ -L ${P.npm} ]; then test "$(readlink ${P.npm})" = ${P.root}/npm/node_modules; else ln -s ${P.root}/npm/node_modules ${P.npm}; fi`);
+    if (pip.length) commands.push(`python3 -m pip --isolated install --no-cache-dir --disable-pip-version-check --only-binary=:all: --index-url https://pypi.org/simple --target ${P.python} ${pip.map(spec => `--requirement ${runtimeProjectDirectory('pip', spec, pip.length)}/requirements.txt`).join(' ')}`,
       `python3 -c ${quote(`import pathlib, site; d=pathlib.Path(site.getsitepackages()[0]); d.mkdir(parents=True, exist_ok=True); (d/'posse-runtime.pth').write_text('${P.python}\n')`)}`);
-    if (recipe.composer) commands.push('export COMPOSER_HOME=/tmp/composer-home COMPOSER_CACHE_DIR=/tmp/composer-cache COMPOSER_ALLOW_SUPERUSER=1',
-      `export COMPOSER_VENDOR_DIR=${P.root}/composer/vendor`, `composer install --working-dir=${P.root}/composer --no-dev --no-interaction --no-progress --no-scripts --no-plugins --prefer-dist`);
-    commands.push('chmod -R a+rX /posse-runtime', 'rm -f /posse-runtime/install.sh', 'echo POSSE_RUNTIME_INSTALL_COMPLETE');
+    if (composer.length) commands.push('export COMPOSER_HOME=/tmp/composer-home COMPOSER_CACHE_DIR=/tmp/composer-cache COMPOSER_ALLOW_SUPERUSER=1');
+    for (const spec of composer) {
+      const directory = runtimeProjectDirectory('composer', spec, composer.length);
+      commands.push(`export COMPOSER_VENDOR_DIR=${directory}/vendor`, `composer install --working-dir=${directory} --no-dev --no-interaction --no-progress --no-scripts --no-plugins --prefer-dist`);
+    }
+    commands.push(preserveDependencies ? 'chmod a+rX /posse-runtime' : 'chmod -R a+rX /posse-runtime', 'rm -f /posse-runtime/install.sh', 'echo POSSE_RUNTIME_INSTALL_COMPLETE');
     return commands.join('\n') + '\n';
   }
   async publish(receipt, guard) {
@@ -103,21 +112,39 @@ export class ExperimentRuntimeInstaller {
     await write(path.join(this.cacheRoot, 'receipts', `${receipt.receipt_digest}.json`), receipt, true);
     await write(path.join(this.cacheRoot, 'recipes', `${receipt.recipe_digest}.json`), { receipt_digest: receipt.receipt_digest }, false);
   }
-  async install(args, { source, signal, guard = () => {}, reserve = () => {}, release = () => {} }) {
+  async install(args, { source, signal, guard = () => {}, reserve = () => {}, release = () => {}, previous }) {
     const check = () => { signal?.throwIfAborted(); guard(); };
     check();
     const prepared = await runtimeRecipe(args, source); check();
     const requestedBase = args.base_image || EXPERIMENT_RUNTIME_BASE_IMAGES[args.profile];
     let base;
-    try { base = await this.imageDetails(requestedBase, signal); }
-    catch (error) {
-      check();
-      if (/^sha256:/.test(requestedBase)) throw failure('Pinned runtime base image is missing; restore it before provisioning.', 'runtime_image_missing');
-      await this.command(docker, ['pull', requestedBase], { signal, timeout: 180000 }); check(); base = await this.imageDetails(requestedBase, signal);
+    if (/^sha256:/.test(requestedBase)) base = { Id: requestedBase };
+    else {
+      try { base = await this.imageDetails(requestedBase, signal); }
+      catch {
+        check(); await this.command(docker, ['pull', requestedBase], { signal, timeout: 180000 }); check(); base = await this.imageDetails(requestedBase, signal);
+      }
     }
     const recipe = { ...prepared.recipe, base_image: base.Id }, recipeDigest = experimentDigest({ schema: SCHEMA, recipe, files: prepared.files });
     try { const cached = await this.readReceipt(recipeDigest); if (await this.isAvailable(cached, { signal })) { check(); return { ...cached, reused: true }; } }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
+    let addedPackages = null;
+    if (previous) {
+      validateRuntimeReceipt(previous);
+      const withoutPackages = ({ system_packages: _systemPackages, ...rest }) => rest;
+      const priorPackages = new Set(previous.recipe.system_packages || []);
+      if (experimentDigest(withoutPackages(previous.recipe)) === experimentDigest(withoutPackages(recipe)) && experimentDigest(previous.files) === experimentDigest(prepared.files)
+        && [...priorPackages].every(name => recipe.system_packages.includes(name))) {
+        const added = recipe.system_packages.filter(name => !priorPackages.has(name));
+        if (added.length && await this.isAvailable(previous, { signal })) addedPackages = added;
+      }
+    }
+    const buildBase = addedPackages ? previous.image : base.Id;
+    if (!addedPackages) {
+      try { await this.imageDetails(buildBase, signal); }
+      catch { check(); throw failure('Pinned runtime base image is missing; restore it before provisioning.', 'runtime_image_missing'); }
+    }
+    const installRecipe = addedPackages ? { profile: recipe.profile, system_packages: addedPackages } : recipe;
     check();
     const info = JSON.parse(await this.command(docker, ['info', '--format', '{{json .}}'], { signal }));
     if (info.OSType !== 'linux' || info.CgroupVersion !== '2' || !info.MemoryLimit || !info.SwapLimit || !info.PidsLimit || !info.CpuCfsQuota || !info.SecurityOptions?.some(item => item.startsWith('name=seccomp'))) throw new Error('Required runtime provisioning isolation is unavailable.');
@@ -125,26 +152,32 @@ export class ExperimentRuntimeInstaller {
     const id = `posse-runtime-${randomUUID()}`, staging = await fs.mkdtemp(path.join(os.tmpdir(), 'posse-runtime-inputs-'));
     let reserved = false, cleanupUnconfirmed = false, result, error;
     try {
-      for (const [kind, spec] of Object.entries({ npm: recipe.npm, pip: recipe.pip, composer: recipe.composer })) if (spec) {
-        const directory = path.join(staging, kind); await fs.mkdir(directory, { mode: 0o755 });
-        for (const name of Object.values(spec)) await fs.writeFile(path.join(directory, path.posix.basename(name)), prepared.contents[name], { flag: 'wx', mode: 0o644 });
+      for (const kind of ['npm', 'pip', 'composer']) {
+        const projects = runtimeProjects(installRecipe[kind]);
+        for (const spec of projects) {
+          const directory = path.join(staging, path.posix.relative(P.root, runtimeProjectDirectory(kind, spec, projects.length))); await fs.mkdir(directory, { recursive: true, mode: 0o755 });
+          for (const name of Object.values(spec)) await fs.writeFile(path.join(directory, path.posix.basename(name)), prepared.contents[name], { flag: 'wx', mode: 0o644 });
+        }
       }
-      await fs.chmod(staging, 0o755); await fs.writeFile(path.join(staging, 'install.sh'), this.script(recipe), { flag: 'wx', mode: 0o444 });
+      await fs.chmod(staging, 0o755); await fs.writeFile(path.join(staging, 'install.sh'), this.script(installRecipe, { preserveDependencies: !!addedPackages }), { flag: 'wx', mode: 0o444 });
       check(); await reserve({ id, recipe_digest: recipeDigest }); reserved = true; check();
       await this.command(docker, ['create', '--name', id, '--pull=never', '--network=bridge', '--user=0:0', '--cap-drop=ALL',
         ...['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID'].map(cap => `--cap-add=${cap}`), '--security-opt=no-new-privileges',
         `--pids-limit=${L.pids}`, `--memory=${L.memoryMB}m`, `--memory-swap=${L.memoryMB}m`, `--cpus=${L.cpus}`, '--ipc=private', '--cgroupns=private',
         '--tmpfs=/tmp:rw,nosuid,nodev,size=512m', '--log-driver=none', '--no-healthcheck', '--init', '--workdir=/posse-runtime', '--env=HOME=/tmp',
-        '--entrypoint=/bin/sh', base.Id, '/posse-runtime/install.sh'], { signal }); check();
+        '--entrypoint=/bin/sh', buildBase, '/posse-runtime/install.sh'], { signal }); check();
       await this.command(docker, ['cp', `${staging}/.`, `${id}:${P.root}`], { signal }); check();
       await this.command('/usr/bin/systemd-run', ['--user', '--quiet', '--pipe', '--wait', '--collect', `--unit=${id}`,
         `--property=RuntimeMaxSec=${L.wallSeconds}`, '--property=TimeoutStopSec=5', `--property=ExecStopPost=/usr/bin/docker stop --time 1 ${id}`, '--', docker, 'start', '--attach', id], { signal, timeout: (L.wallSeconds + 30) * 1000 }); check();
       if (String(await this.command(docker, ['inspect', '--format', '{{.State.ExitCode}}', id], { signal })).trim() !== '0') throw new Error('Runtime package installation did not complete successfully.');
       check();
-      const image = String(await this.command(docker, ['commit', '--change', `LABEL posse.experiment.runtime.recipe=${recipeDigest}`, '--change', 'USER 65534:65534', '--change', 'ENTRYPOINT []', '--change', `CMD ["${recipe.profile === 'node' ? 'node' : 'python3'}"]`, id], { signal, timeout: 120000 })).trim();
+      const paths = runtimeProjectPaths(recipe);
+      const image = String(await this.command(docker, ['commit', '--change', `LABEL posse.experiment.runtime.recipe=${recipeDigest}`,
+        '--change', `LABEL ${EXPERIMENT_RUNTIME_NODE_MODULES_LABEL}=${JSON.stringify(JSON.stringify(paths.node_modules_by_root || {}))}`,
+        '--change', 'USER 65534:65534', '--change', 'ENTRYPOINT []', '--change', `CMD ["${recipe.profile === 'node' ? 'node' : 'python3'}"]`, id], { signal, timeout: 120000 })).trim();
       check();
       const body = { schema: SCHEMA, recipe_digest: recipeDigest, recipe, profile: recipe.profile, base_image: base.Id, requested_base_image: requestedBase,
-        image, files: prepared.files, paths: { ...(recipe.npm ? { node_modules: P.npm } : {}), ...(recipe.pip ? { python: P.python } : {}), ...(recipe.composer ? { composer_autoload: P.composer } : {}) }, created_at: this.now() };
+        image, files: prepared.files, paths, ...(addedPackages ? { extended_from: previous.receipt_digest, build_base_image: buildBase, installed_system_packages: addedPackages } : {}), created_at: this.now() };
       result = { ...body, receipt_digest: experimentDigest(body) };
       if (!await this.isAvailable(result, { signal })) throw new Error('Committed runtime image identity could not be verified.');
     } catch (caught) { error = caught; }

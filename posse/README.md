@@ -402,20 +402,49 @@ reused components, changed components and the actual smoke case IDs. Unchanged
 components are not sent back through corpus creation or model review. A ready
 setup still requires the actual experiment's fresh baseline.
 
-The builder can call `setup.install_deps` to install environment requirements
-without changing the project checkout. Supply a runtime `profile` (`node` or
-`python`), optional `base_image`, Debian `system_packages`, and dependency files
-from the frozen source snapshot. `npm` takes `manifest` and `lockfile`, `pip`
-takes `requirements`, and `composer` takes `manifest` and `lockfile`; paths use
-the same `work/` prefix as source reads. For example:
+Before the builder's first model call, `setup-prepare` deterministically discovers
+and installs repository dependencies from the frozen Git snapshot. It batches
+locked npm projects, pinned `requirements.txt` files and locked Composer projects;
+PHP extension packages are inferred from declared production requirements.
+Each npm/Composer project keeps its own dependency versions and paths. Python
+requirements resolve together. Large lockfiles have a separate bounded reader
+and never enter model context as part of installation.
+
+The builder receives a compact environment status, immutable image ID and
+per-project dependency paths. Existing source imports resolve through scoped
+`node_modules` links in the sandbox. No model calls are used for discovery,
+installation or cache lookup. Unsupported package managers, npm workspaces,
+and missing locks appear in `environment.issues`; they are not guessed.
+A supported installation failure stops preparation before a paid call.
+
+Optional request configuration narrows discovery or supplies known additions:
 
 ```json
 {
-  "profile": "node",
-  "system_packages": ["php-cli", "php-sqlite3", "php-mbstring", "tesseract-ocr-eng"],
-  "npm": {"manifest": "work/web/package.json", "lockfile": "work/web/package-lock.json"}
+  "environment": {
+    "roots": ["work/web", "work/api"],
+    "system_packages": ["tesseract-ocr-eng", "php-sqlite3"]
+  }
 }
 ```
+
+Omit `environment` to discover all supported projects (excluding dependency,
+private state and fixture directories). Use `environment.auto: false` to opt out,
+or supply `image` to use an already prepared immutable environment.
+
+The builder can call `setup.install_deps` for additional requirements. Additions
+preserve the prepared recipe; `profile` is needed only if no runtime exists yet.
+Each `npm`, `pip` or `composer` field accepts one project object or an array.
+Paths use the same `work/` prefix as source reads. For example, after automatic
+repository installation the agent can add these packages in one call:
+
+```json
+{"system_packages": ["php-sqlite3", "tesseract-ocr-eng"]}
+```
+
+System-package-only additions layer on the prepared image without rerunning
+unchanged package managers. Changed dependency files trigger a complete recipe
+build; content-addressed receipts reuse matching immutable images.
 
 Installation runs in a bounded disposable container with network access and no
 host mounts or credentials. The tool returns an immutable image ID, dependency

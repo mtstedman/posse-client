@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { EXPERIMENT_RUNTIME_INSTALL_SCHEMA, EXPERIMENT_RUNTIME_INSTALL_LIMITS as L, EXPERIMENT_RUNTIME_RECEIPT_SCHEMA } from '../../../catalog/experiment-runtime.js';
+import { EXPERIMENT_RUNTIME_INSTALL_SCHEMA, EXPERIMENT_RUNTIME_INSTALL_LIMITS as L, EXPERIMENT_RUNTIME_RECEIPT_SCHEMA, EXPERIMENT_RUNTIME_PATHS as P } from '../../../catalog/experiment-runtime.js';
 import { validateToolArguments } from '../../../shared/tools/functions/schema-validation.js';
 import { experimentDigest, fileDigest } from './snapshots.js';
 import { safeSetupSource } from '../classes/ExperimentSetupSource.js';
@@ -13,6 +13,18 @@ const publicUrl = (value, hosts) => {
 };
 const jsonObject = text => { const value = JSON.parse(text); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Dependency manifest must be a JSON object.'); return value; };
 const registryVersion = value => typeof value === 'string' && value.length <= 240 && /^[A-Za-z0-9~^<>=*| .+_-]+$/.test(value);
+export const runtimeProjects = value => value === undefined ? [] : Array.isArray(value) ? value : [value];
+export function runtimeProjectDirectory(kind, spec, count) {
+  return `${P.root}/${kind}${count > 1 ? `/${fileDigest(spec.manifest || spec.requirements)}` : ''}`;
+}
+export function runtimeProjectPaths(recipe) {
+  const npm = runtimeProjects(recipe.npm), composer = runtimeProjects(recipe.composer);
+  return { ...(npm.length ? { ...(npm.length === 1 ? { node_modules: P.npm } : {}), node_modules_by_root: Object.fromEntries(npm.map(spec => [path.posix.dirname(spec.manifest), `${runtimeProjectDirectory('npm', spec, npm.length)}/node_modules`])) } : {}),
+    ...(recipe.pip ? { python: P.python } : {}),
+    ...(composer.length ? { ...(composer.length === 1 ? { composer_autoload: P.composer } : {}), composer_autoload_by_root: Object.fromEntries(composer.map(spec => [path.posix.dirname(spec.manifest), `${runtimeProjectDirectory('composer', spec, composer.length)}/vendor/autoload.php`])) } : {}) };
+}
+const dependencyInventory = source => source.dependencyInventory || source.inventory;
+const loadDependency = (source, name) => source.loadDependency ? source.loadDependency(name) : source.load(name);
 function npmFiles(manifest, lock) {
   if (manifest.workspaces || manifest.bundleDependencies || manifest.bundledDependencies) throw new Error('npm workspaces and bundled/local dependencies are unsupported; use a standalone registry lockfile.');
   for (const key of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
@@ -56,27 +68,35 @@ export async function runtimeRecipe(args, source) {
   const packages = [...new Set(args.system_packages || [])].sort();
   if (packages.some(value => !/^[a-z0-9][a-z0-9+.-]{0,79}(?::[a-z0-9]+)?(?:=[A-Za-z0-9.+:~_-]+)?$/.test(value))) throw new Error('System packages must be Debian package names or pinned package=version values, never command options.');
   if (!packages.length && !args.npm && !args.pip && !args.composer) throw new Error('Declare at least one dependency to install.');
-  const files = [], contents = {}, load = async (name, expected) => {
-    if (!name.startsWith('work/') || !safeSetupSource(name.slice(5)) || path.posix.basename(name) !== expected || !source.inventory.some(file => file.path === name)) throw new Error(`Use a safe frozen ${expected} from the source inventory.`);
-    const text = await source.load(name);
+  const files = [], contents = {}; let bytes = 0;
+  const load = async (name, expected) => {
+    if (!name.startsWith('work/') || !safeSetupSource(name.slice(5)) || path.posix.basename(name) !== expected || !dependencyInventory(source).some(file => file.path === name)) throw new Error(`Use a safe frozen ${expected} from the source inventory.`);
+    const text = await loadDependency(source, name);
     if (typeof text !== 'string' || Buffer.byteLength(text) > L.fileBytes || text.includes('\0')) throw new Error('Dependency input exceeds its bounded text limit.');
+    bytes += Buffer.byteLength(text);
+    if (bytes > L.filesBytes) throw new Error('Dependency inputs exceed the installation byte limit.');
+    if (Object.hasOwn(contents, name)) throw new Error('Dependency projects must name distinct manifest and lockfile paths.');
     files.push({ path: name, sha256: fileDigest(text) }); contents[name] = text; return text;
   };
-  if (args.npm) {
-    if (path.posix.dirname(args.npm.manifest) !== path.posix.dirname(args.npm.lockfile)) throw new Error('npm manifest and lockfile must be adjacent.');
-    npmFiles(jsonObject(await load(args.npm.manifest, 'package.json')), jsonObject(await load(args.npm.lockfile, 'package-lock.json')));
+  for (const spec of runtimeProjects(args.npm)) {
+    if (path.posix.dirname(spec.manifest) !== path.posix.dirname(spec.lockfile)) throw new Error('npm manifest and lockfile must be adjacent.');
+    npmFiles(jsonObject(await load(spec.manifest, 'package.json')), jsonObject(await load(spec.lockfile, 'package-lock.json')));
   }
-  if (args.pip) {
-    const requirements = await load(args.pip.requirements, 'requirements.txt');
+  for (const spec of runtimeProjects(args.pip)) {
+    const requirements = await load(spec.requirements, 'requirements.txt');
     const lines = requirements.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#'));
     if (!lines.length || lines.some(line => !/^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9_,.-]+\])?==[A-Za-z0-9][A-Za-z0-9.!+_-]*$/.test(line))) throw new Error('pip supports pinned package[extras]==version lines only; no includes, options, local paths, URLs or editable projects.');
   }
-  if (args.composer) {
-    if (path.posix.dirname(args.composer.manifest) !== path.posix.dirname(args.composer.lockfile)) throw new Error('Composer manifest and lockfile must be adjacent.');
-    composerFiles(jsonObject(await load(args.composer.manifest, 'composer.json')), jsonObject(await load(args.composer.lockfile, 'composer.lock')));
+  for (const spec of runtimeProjects(args.composer)) {
+    if (path.posix.dirname(spec.manifest) !== path.posix.dirname(spec.lockfile)) throw new Error('Composer manifest and lockfile must be adjacent.');
+    composerFiles(jsonObject(await load(spec.manifest, 'composer.json')), jsonObject(await load(spec.lockfile, 'composer.lock')));
   }
-  if (Object.values(contents).reduce((total, value) => total + Buffer.byteLength(value), 0) > L.filesBytes) throw new Error('Dependency inputs exceed the installation byte limit.');
-  return { recipe: { ...structuredClone(args), system_packages: packages }, files: files.sort((a, b) => a.path.localeCompare(b.path)), contents };
+  const recipe = { ...structuredClone(args), system_packages: packages };
+  for (const kind of ['npm', 'pip', 'composer']) if (recipe[kind]) {
+    const entries = runtimeProjects(recipe[kind]).sort((a, b) => (a.manifest || a.requirements).localeCompare(b.manifest || b.requirements));
+    recipe[kind] = entries.length === 1 ? entries[0] : entries;
+  }
+  return { recipe, files: files.sort((a, b) => a.path.localeCompare(b.path)), contents };
 }
 
 export function validateRuntimeReceipt(receipt) {
@@ -85,15 +105,15 @@ export function validateRuntimeReceipt(receipt) {
   const checked = validateToolArguments({ name: 'runtime receipt recipe', parameters: EXPERIMENT_RUNTIME_INSTALL_SCHEMA }, body.recipe);
   if (body.schema !== EXPERIMENT_RUNTIME_RECEIPT_SCHEMA || !/^[a-f0-9]{64}$/.test(body.recipe_digest || '') || !/^sha256:[a-f0-9]{64}$/.test(body.image || '')
     || !/^sha256:[a-f0-9]{64}$/.test(body.recipe?.base_image || '') || body.base_image !== body.recipe.base_image || !Array.isArray(body.files)
-    || !checked.ok || body.files.length > 5 || body.files.some(file => typeof file.path !== 'string' || !file.path.startsWith('work/') || !safeSetupSource(file.path.slice(5)) || !/^[a-f0-9]{64}$/.test(file.sha256))
+    || !checked.ok || body.files.length > L.files || body.files.some(file => typeof file.path !== 'string' || !file.path.startsWith('work/') || !safeSetupSource(file.path.slice(5)) || !/^[a-f0-9]{64}$/.test(file.sha256))
     || receipt_digest !== experimentDigest(body) || body.recipe_digest !== experimentDigest({ schema: EXPERIMENT_RUNTIME_RECEIPT_SCHEMA, recipe: body.recipe, files: body.files })) throw new Error('Runtime receipt identity changed.');
   return receipt;
 }
 export async function runtimeSourcesMatch(receipt, source) {
   validateRuntimeReceipt(receipt);
   for (const file of receipt.files) {
-    if (!file || typeof file.path !== 'string' || !/^[a-f0-9]{64}$/.test(file.sha256) || !source.inventory.some(item => item.path === file.path)) return false;
-    try { if (fileDigest(await source.load(file.path)) !== file.sha256) return false; } catch { return false; }
+    if (!file || typeof file.path !== 'string' || !/^[a-f0-9]{64}$/.test(file.sha256) || !dependencyInventory(source).some(item => item.path === file.path)) return false;
+    try { if (fileDigest(await loadDependency(source, file.path)) !== file.sha256) return false; } catch { return false; }
   }
   return true;
 }

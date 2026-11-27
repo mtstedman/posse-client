@@ -7,6 +7,7 @@ import { ExperimentSetupArtifacts } from './ExperimentSetupArtifacts.js';
 import { ExperimentSandbox } from './ExperimentSandbox.js';
 import { ExperimentRuntimeInstaller } from './ExperimentRuntimeInstaller.js';
 import { runtimeRecipe, runtimeSourcesMatch } from '../functions/runtime-install.js';
+import { discoverEnvironment, mergeEnvironmentRecipe } from '../functions/environment-build.js';
 import { smokeSetupTemplate, materializeSetupTemplate, setupTemplateFiles } from '../functions/setup-agent.js';
 import { experimentDigest } from '../functions/snapshots.js';
 import { validateToolArguments } from '../../../shared/tools/functions/schema-validation.js';
@@ -30,7 +31,7 @@ export class ExperimentSetupService {
       baseline_required: r.state === S.READY,
       selection: r.selection || null, reuse: r.reuse || null, child: r.child || null, usage: r.usage, combined_usage: this.combinedUsage(r), budget: r.config,
       pending_call: r.pending_call, validation_attempts: r.validation_attempts, last_action: r.last_action || null, error: r.error || null,
-      runtime: this.runtimeSummary(r.runtime), install: r.install || null,
+      runtime: this.runtimeSummary(r.runtime), environment: r.environment || null, install: r.install || null,
       usage_incomplete: r.pending_call || r.child?.usage_incomplete === true || r.child?.usage_unknown === true,
       ...(r.smoke ? { smoke: { id: r.smoke.id, cleanup_unconfirmed: r.smoke.cleanup_unconfirmed || false } } : {}) };
   }
@@ -62,7 +63,16 @@ export class ExperimentSetupService {
     const controller = new AbortController(), task = { controller, promise: null }; this.active.set(record.id, task);
     const timer = setTimeout(() => controller.abort(Object.assign(new Error('Setup wall budget exhausted.'), { code: 'setup_budget' })), record.config.wall_seconds * 1000);
     task.promise = Promise.resolve().then(async () => {
-      try { if (!await this.tryReuse(record, args, controller.signal)) await new ExperimentSetupAgent(this, { dispatch: this.dispatch }).run(record, args, controller.signal); }
+      try {
+        const source = await this.source(record.repo).open(); record.base_commit = source.base;
+        const environment = args.image ? { state: 'provided', recipe: null, projects: [], issues: [], digest: experimentDigest({ image: args.image }) } : await discoverEnvironment(source, args.environment);
+        record.environment = { state: environment.state, digest: environment.digest, projects: environment.projects.map(({ manager, root }) => ({ manager, root })), issues: environment.issues };
+        this.guard(controller.signal); this.save(record);
+        if (!await this.tryReuse(record, args, controller.signal, source, environment)) {
+          if (environment.recipe) await this.installDeps(record, environment.recipe, source, controller.signal);
+          await new ExperimentSetupAgent(this, { dispatch: this.dispatch }).run(record, args, controller.signal, source);
+        }
+      }
       catch (error) {
         record.state = controller.signal.aborted ? (controller.signal.reason?.code === 'setup_budget' ? S.BUDGET : S.CANCELLED) : S.BLOCKED;
         record.error = String(error.message).slice(0, 2000);
@@ -79,7 +89,7 @@ export class ExperimentSetupService {
     record.usage.tokens += stats.inputTokens + stats.outputTokens; record.usage.spend_usd += stats.costUsd; record.pending_call = false;
   }
   combinedUsage(record) { return Object.fromEntries(['model_calls', 'tokens', 'spend_usd'].map(k => [k, record.usage[k] + (record.child?.usage?.[k] || 0)])); }
-  async tryReuse(record, request, signal) {
+  async tryReuse(record, request, signal, source, environment) {
     const artifacts = this.artifacts(record.repo), corpus = await this.service.corpora.open(record.repo), candidates = [];
     let page = await artifacts.list();
     for (let pages = 0; pages < 10; pages++) {
@@ -91,6 +101,7 @@ export class ExperimentSetupService {
     for (const candidate of candidates) {
       const artifact = await artifacts.get(candidate.artifact);
       if (artifact.template.setup.plan.objective !== request.objective || (request.image && ![artifact.validation.image, artifact.validation.requested_image].includes(request.image))) continue;
+      if (environment?.recipe && environment.recipe.profile !== artifact.template.setup.plan.runtime.profile) continue;
       const bound = artifact.template.corpus;
       if (request.corpus && (bound.experiment !== request.corpus.experiment || bound.corpus !== request.corpus.corpus)) continue;
       const current = await corpus.load(request.corpus || { experiment: bound.experiment, corpus: bound.corpus });
@@ -101,37 +112,44 @@ export class ExperimentSetupService {
     if (!matching.length || new Set(matching.map(m => `${m.selected.experiment}/${m.selected.corpus}`)).size > 1) return false;
     // Reuse one frozen source cache while comparing receipts: an older artifact
     // must not force another smoke when a newer exact receipt already exists.
-    const source = await this.source(record.repo).open(); record.base_commit = source.base;
+    source ||= await this.source(record.repo).open(); record.base_commit = source.base;
     const compatible = [];
     for (const match of matching) {
       try {
         const files = await setupTemplateFiles(match.artifact.template, source);
         const runtimeMatches = !match.artifact.runtime || await runtimeSourcesMatch(match.artifact.runtime, source);
+        const environmentMatches = !environment?.recipe || (match.artifact.runtime
+          && experimentDigest(mergeEnvironmentRecipe(match.artifact.runtime.recipe, environment.recipe)) === experimentDigest(match.artifact.runtime.recipe));
         // An explicitly pinned image cannot silently acquire changed dependencies.
         if (!runtimeMatches && request.image) continue;
-        compatible.push({ ...match, rank: Number(runtimeMatches) * 4 + Number(experimentDigest(files) === match.artifact.validation.source_digest) * 2
+        compatible.push({ ...match, rank: Number(runtimeMatches && environmentMatches) * 4 + Number(experimentDigest(files) === match.artifact.validation.source_digest) * 2
           + Number(match.artifact.template.corpus.revision === match.selected.revision) });
       } catch { /* Removed/renamed bindings require the setup agent to adapt. */ }
     }
     if (!compatible.length) return false;
     compatible.sort((a, b) => b.rank - a.rank);
     const chosen = compatible[0];
-    await this.reuse(record, chosen.artifact.artifact, chosen.selected, source, signal, 'Existing validated setup matches the objective, corpus interface and runtime.', request.image);
+    await this.reuse(record, chosen.artifact.artifact, chosen.selected, source, signal, 'Existing validated setup matches the objective, corpus interface and runtime.', request.image, environment?.recipe);
     return true;
   }
-  async reuse(record, artifactId, selected, source, signal, reason, pinnedImage) {
+  async reuse(record, artifactId, selected, source, signal, reason, pinnedImage, environmentRecipe) {
     this.guard(signal);
     const artifacts = this.artifacts(record.repo), artifact = await artifacts.get(artifactId), corpus = await this.service.corpora.open(record.repo);
     const prior = await corpus.load(artifact.template.corpus), current = await corpus.load(selected);
     if (prior.id !== current.id || experimentDigest(prior.contract) !== experimentDigest(current.contract)) throw new Error('Artifact corpus interface changed; prepare a new compatible adapter.');
     let runtime = artifact.runtime;
-    if (runtime) {
-      if (!await runtimeSourcesMatch(runtime, source) || !await this.runtimeInstaller().isAvailable(runtime)) {
+    const targetRecipe = mergeEnvironmentRecipe(runtime?.recipe, environmentRecipe || {});
+    if (runtime || environmentRecipe) {
+      if (!runtime || experimentDigest(targetRecipe) !== experimentDigest(runtime.recipe) || !await runtimeSourcesMatch(runtime, source) || !await this.runtimeInstaller().isAvailable(runtime)) {
         if (pinnedImage) throw new Error('The explicitly pinned runtime is unavailable or has changed dependency bindings. Restore that exact image, or omit request.image in a new preparation to rebuild dependencies.');
-        runtime = await this.installDeps(record, runtime.recipe, source, signal);
-      } else record.runtime = { ...runtime, reused: true };
+        record.runtime = runtime;
+        runtime = await this.installDeps(record, targetRecipe, source, signal);
+      } else {
+        record.runtime = { ...runtime, reused: true };
+        if (record.environment) record.environment.state = 'reused';
+      }
     }
-    const runtimeChanged = Boolean(runtime && (runtime.image !== artifact.validation.image || runtime.recipe_digest !== artifact.runtime.recipe_digest));
+    const runtimeChanged = Boolean(runtime && (runtime.image !== artifact.validation.image || runtime.recipe_digest !== artifact.runtime?.recipe_digest));
     const files = await setupTemplateFiles(artifact.template, source), sourceChanged = experimentDigest(files) !== artifact.validation.source_digest;
     const corpusChanged = selected.revision !== artifact.template.corpus.revision;
     record.selection = { corpus: selected, reason };
@@ -153,7 +171,7 @@ export class ExperimentSetupService {
       validation = await this.smoke(record, materialized, signal, runtime?.image || artifact.validation.image);
     } else validation = { ...artifact.validation, kind: 'validated_receipt_reused', cases: 0, case_ids: [] };
     this.guard(signal);
-    const saved = await artifacts.save({ template: materialized.template, ...(runtime ? { runtime } : {}), validation: { ...validation, requested_image: runtime?.image || artifact.validation.requested_image, base_commit: source.base, source_digest: experimentDigest(files),
+    const saved = await artifacts.save({ template: materialized.template, ...(runtime ? { runtime } : {}), ...(record.environment ? { environment: record.environment } : {}), validation: { ...validation, requested_image: runtime?.image || artifact.validation.requested_image, base_commit: source.base, source_digest: experimentDigest(files),
       evaluation_digest: materialized.setup.plan.evaluation.digest, reused_from: artifactId, reused_components: record.reuse.reused_components,
       validated_components: runtimeChanged ? ['runtime_adapter_boundary'] : sourceChanged ? ['source_adapter_boundary'] : newCases.length ? ['new_corpus_inputs'] : ['corpus_binding'] }, selection: record.selection, reuse: record.reuse }, { guard: () => this.guard(signal) });
     record.artifact = saved.artifact; record.state = S.READY; this.save(record);
@@ -161,21 +179,26 @@ export class ExperimentSetupService {
   }
   async installDeps(record, recipe, source, signal) {
     this.guard(signal);
+    recipe = mergeEnvironmentRecipe(record.runtime?.recipe, recipe);
     if (this.installActive || this.smokeActive || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish first.');
     const inputs = await runtimeRecipe(recipe, source), attempt = experimentDigest({ recipe: inputs.recipe, files: inputs.files });
     this.guard(signal);
     if (record.install_failures?.[attempt]) throw new Error(`This unchanged dependency recipe already failed; no installation was repeated. Correct the recipe or report the blocker. Previous error: ${record.install_failures[attempt]}`);
     if (this.installActive || this.smokeActive || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish first.');
     this.installActive = record.id;
+    if (record.environment) { record.environment.state = 'building'; this.save(record); }
     try {
-      const runtime = await this.runtimeInstaller().install(recipe, { source, signal, guard: () => this.guard(signal),
+      const runtime = await this.runtimeInstaller().install(recipe, { source, signal, previous: record.runtime, guard: () => this.guard(signal),
         reserve: reservation => { this.guard(signal); record.install = reservation; this.save(record); },
         release: ({ cleanup_unconfirmed }) => {
           if (cleanup_unconfirmed) { record.install.cleanup_unconfirmed = true; this.save(record); return; }
           record.install = null; this.save(record);
         } });
-      this.guard(signal); record.runtime = runtime; this.save(record); return runtime;
+      this.guard(signal); record.runtime = runtime;
+      if (record.environment) record.environment.state = runtime.reused ? 'reused' : 'ready';
+      this.save(record); return runtime;
     } catch (error) {
+      if (record.environment) record.environment.state = 'failed';
       if (!signal?.aborted) { (record.install_failures ||= {})[attempt] = String(error.message).slice(0, 1000); this.save(record); }
       throw error;
     } finally { if (!record.install) this.installActive = null; }

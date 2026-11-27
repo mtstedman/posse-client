@@ -1,5 +1,6 @@
 import { EXPERIMENT_CORPUS_EVALUATION_SCHEMA } from '../../../catalog/experiment-corpus.js';
 import { stageCorpusInputs } from '../functions/corpus-inputs.js';
+import { runtimeModuleRoots, stageRuntimeModules } from '../functions/runtime-modules.js';
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
@@ -18,7 +19,7 @@ const environment = () => ({ PATH: "/usr/bin:/bin", HOME: os.homedir(), XDG_RUNT
 // the scoring code, labels, receipts, Docker socket and owner state stay outside.
 // A transient systemd service owns the deadline even if the Node owner dies.
 export class ExperimentSandbox {
-  constructor({ images = {} } = {}) { this.images = structuredClone(images); }
+  constructor({ images = {} } = {}) { this.images = structuredClone(images); this.moduleRoots = new Map(); }
   fingerprint(plan, evaluation) { return experimentDigest({ profile: plan.runtime.profile, image: this.images[plan.runtime.profile], evaluation: plan.evaluation.digest, protocol: hasLatencyMeasurement(evaluation) ? EXPERIMENT_TIMED_CORPUS_PROTOCOL : evaluation?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? "jsonl.corpus.v1" : "jsonl.numeric.v1" }); }
   async command(file, args, { timeout = 15000 } = {}) { return (await exec(file, args, { env: environment(), timeout, maxBuffer: 1048576 })).stdout.trim(); }
   identity(runId) {
@@ -34,6 +35,7 @@ export class ExperimentSandbox {
       || !info.SecurityOptions.some(option => option.startsWith("name=seccomp"))) throw new Error("Required sandbox isolation is unavailable.");
     const details = JSON.parse(await this.command(docker, ["image", "inspect", image]))[0];
     if (details.Id !== image || Object.keys(details.Config.Volumes || {}).length) throw new Error("Runtime image is not a supported immutable image.");
+    this.moduleRoots.set(image, runtimeModuleRoots(details.Config.Labels));
     await this.command("/usr/bin/systemctl", ["--user", "show-environment"]);
   }
   async cleanup(runId) {
@@ -59,6 +61,7 @@ export class ExperimentSandbox {
         await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o755 });
         await fs.writeFile(destination, content, { flag: "wx", mode: 0o444 });
       }
+      await stageRuntimeModules(directory, this.moduleRoots.get(this.images[plan.runtime.profile]) || {});
       const corpus = evaluation.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? await stageCorpusInputs(evaluation, directory) : null;
       if (signal.aborted) throw new Error("Cancelled.");
       const executable = plan.runtime.profile === "node" ? "/usr/local/bin/node" : "/usr/local/bin/python3";

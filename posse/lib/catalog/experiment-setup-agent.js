@@ -3,6 +3,7 @@ import { EXPERIMENT_CORPUS_INSPECTION_TOOLS } from './experiment-inspection.js';
 import { AGENT_REASONING_EFFORTS } from './agent.js';
 import { CORPUS_PREP_CONTRACT_SCHEMA, CORPUS_PREP_CONTRACT_GUIDANCE } from './experiment-corpus-prep.js';
 import { EXPERIMENT_INSTALL_DEPS_TOOL } from './experiment-runtime.js';
+import { EXPERIMENT_ENVIRONMENT_SCHEMA } from './experiment-environment.js';
 
 const text = maxLength => ({ type: 'string', minLength: 1, maxLength });
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', additionalProperties: false, properties, required });
@@ -15,6 +16,7 @@ export const SETUP_ARTIFACT_SCHEMA = 'posse.experiment.setup-artifact.v1';
 export const SETUP_AGENT_OPERATIONS = { PREPARE: 'experiment.setup_prepare', STATUS: 'experiment.setup_status', STOP: 'experiment.setup_stop', LIST: 'experiment.setup_list', GET: 'experiment.setup_get' };
 export const SETUP_AGENT_STATES = { RUNNING: 'running', READY: 'ready', BLOCKED: 'blocked', INPUTS: 'needs_inputs', CANCELLED: 'cancelled', INTERRUPTED: 'interrupted', BUDGET: 'budget_exhausted', ERROR: 'error' };
 export const SETUP_AGENT_REQUEST = object({ repo_path: text(1024), objective: text(2000), corpus: SETUP_AGENT_CORPUS, contract: CORPUS_PREP_CONTRACT_SCHEMA,
+  environment: EXPERIMENT_ENVIRONMENT_SCHEMA,
   model: text(128), reasoning_effort: { enum: AGENT_REASONING_EFFORTS }, image: text(240), idempotency_key: { type: 'string', pattern: '^[a-zA-Z0-9_.:-]{1,128}$' },
   budget: object({ model_calls: { type: 'integer', minimum: 1, maximum: 200 }, tokens: { type: 'integer', minimum: 1, maximum: 2000000 },
     spend_usd: { type: 'number', exclusiveMinimum: 0, maximum: 100 }, wall_seconds: { type: 'integer', minimum: 1, maximum: 7200 } }, []),

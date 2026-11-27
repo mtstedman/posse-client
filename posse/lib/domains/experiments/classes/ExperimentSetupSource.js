@@ -1,6 +1,7 @@
 import { gitExecAsync } from '../../git/functions/utils.js';
 import { integrationRelativePath } from '../functions/integration-config.js';
 import { SETUP_AGENT_LIMITS as L } from '../../../catalog/experiment-setup-agent.js';
+import { EXPERIMENT_RUNTIME_INSTALL_LIMITS as R } from '../../../catalog/experiment-runtime.js';
 import { ExperimentSourceIndex } from './ExperimentSourceIndex.js';
 import { fileExcerpt, prefetchSource } from '../functions/agent-context.js';
 
@@ -11,16 +12,29 @@ export const safeSetupSource = name => name.length <= 235 && integrationRelative
   && !/\.(?:pem|key|p12|pfx|keystore)$/i.test(name);
 
 export class ExperimentSetupSource {
-  constructor(repo, { git = gitExecAsync, index = new ExperimentSourceIndex() } = {}) { this.repo = repo; this.git = git; this.index = index; this.files = {}; this.bytes = 0; }
+  constructor(repo, { git = gitExecAsync, index = new ExperimentSourceIndex() } = {}) { this.repo = repo; this.git = git; this.index = index; this.files = {}; this.bytes = 0; this.dependencyFiles = {}; this.dependencyBytes = 0; }
   async open() {
     this.base = String(await this.git(['rev-parse', 'HEAD'], this.repo)).trim();
     const tree = String(await this.git(['ls-tree', '-rz', '--long', this.base], this.repo, { trim: false }));
-    this.inventory = tree.split('\0').flatMap(row => {
+    const entries = tree.split('\0').flatMap(row => {
       const match = /^(100644|100755) blob [a-f0-9]+\s+(\d+)\t(.+)$/.exec(row);
-      return match && safeSetupSource(match[3]) && Number(match[2]) <= L.fileBytes ? [{ path: `work/${match[3]}`, bytes: Number(match[2]) }] : [];
+      return match && safeSetupSource(match[3]) ? [{ path: `work/${match[3]}`, bytes: Number(match[2]) }] : [];
     });
-    if (this.inventory.length > L.sourceFiles) throw new Error('Repository source inventory exceeds the setup limit.');
+    this.inventory = entries.filter(file => file.bytes <= L.fileBytes);
+    this.dependencyInventory = entries;
+    if (entries.length > L.sourceFiles) throw new Error('Repository source inventory exceeds the setup limit.');
     return this;
+  }
+  async loadDependency(name) {
+    const file = this.dependencyInventory.find(file => file.path === name);
+    if (!file || file.bytes > R.fileBytes) throw new Error('Dependency input is outside the frozen inventory or exceeds its file limit.');
+    if (!Object.hasOwn(this.dependencyFiles, name)) {
+      const source = String(await this.git(['show', `${this.base}:${name.slice(5)}`], this.repo, { trim: false }));
+      const bytes = Buffer.byteLength(source);
+      if (source.includes('\0') || /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/.test(source) || bytes > R.fileBytes || this.dependencyBytes + bytes > R.filesBytes) throw new Error('Dependency input exceeds its bounded text scope.');
+      this.dependencyFiles[name] = source; this.dependencyBytes += bytes;
+    }
+    return this.dependencyFiles[name];
   }
   inventoryPage({ query = '', offset = 0 } = {}) {
     const rows = this.inventory.filter(f => f.path.toLowerCase().includes(query.toLowerCase()));
