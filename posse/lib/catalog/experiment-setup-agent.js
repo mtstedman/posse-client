@@ -10,7 +10,7 @@ const text = maxLength => ({ type: 'string', minLength: 1, maxLength });
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', additionalProperties: false, properties, required });
 const digest = { type: 'string', pattern: '^[a-f0-9]{64}$' };
 export const SETUP_AGENT_CORPUS = object({ experiment: text(64), corpus: text(64), revision: digest });
-export const SETUP_AGENT_DEFAULTS = { model: 'standard', reasoning_effort: 'medium', model_calls: 40, tokens: 500000, spend_usd: 10, wall_seconds: 1800 };
+export const SETUP_AGENT_DEFAULTS = { model: 'strong', reasoning_effort: 'medium', model_calls: 40, tokens: 500000, spend_usd: 10, wall_seconds: 1800 };
 export const SETUP_AGENT_LIMITS = { sourceFiles: 10000, fileBytes: 262144, snapshotBytes: 4194304, page: 50, artifactBytes: 524288, repairs: 3, smokeCases: 3 };
 export const SETUP_AGENT_OBJECT = 'experiment_setup_jobs';
 export const SETUP_ARTIFACT_SCHEMA = 'posse.experiment.setup-artifact.v1';

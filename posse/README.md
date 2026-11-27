@@ -391,7 +391,7 @@ return correctable feedback without consuming the child allowance. Omit the
 contract to let the builder define it. Corpus preparation reuses vetted entries
 and focuses on new/draft items, unless the operator explicitly requests a change.
 
-Defaults are `standard`/`medium`, 40 model calls, 500,000 tokens, $10 and 1,800
+Setup defaults are `strong`/`medium`, 40 model calls, 500,000 tokens, $10 and 1,800
 seconds. Override `model`, `reasoning_effort`, or `budget` explicitly. A child
 corpus preparation receives the **remaining shared allowance** and stays subject
 to the parent deadline and cancellation. Status reports parent `usage`, child
