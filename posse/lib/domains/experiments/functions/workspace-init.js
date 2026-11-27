@@ -1,4 +1,5 @@
 import { ExperimentCorpora } from '../classes/ExperimentCorpora.js';
+import { ExperimentSetupArtifacts } from '../classes/ExperimentSetupArtifacts.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -59,6 +60,15 @@ export async function initializeExperiment(request, { cwd = process.cwd(), git =
   if (process.platform !== 'linux') throw new Error('Experiment execution currently requires Linux Docker and user systemd.');
   if (!request || Object.keys(request).some(key => !EXPERIMENT_INIT_FIELDS.includes(key)) || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(request.name || '')) throw new Error('Use a unique lowercase experiment name and the fields in init-schema.');
   const { repo, base, trunk } = await repository(cwd, request.trunk_branch, git);
+  if (request.artifact) {
+    const artifact = await new ExperimentSetupArtifacts(repo).get(request.artifact);
+    if (Object.hasOwn(request, 'corpus') && experimentDigest(request.corpus) !== experimentDigest(artifact.template.corpus)) throw new Error('Setup artifact binds a different corpus revision. Prepare a compatible artifact.');
+    if (Object.hasOwn(request, 'evaluation') || Object.hasOwn(request, 'runtime_path')) throw new Error('Artifact initialization uses its verified corpus and runtime.');
+    const overrides = request.setup || {};
+    if (Object.keys(overrides).some(k => !['budget', 'models', 'prompt', 'guidelines', 'plan'].includes(k)) || Object.keys(overrides.plan || {}).some(k => !['max_iterations', 'acceptance'].includes(k))) throw new Error('Artifact setup overrides are limited to run budget/models/instructions and iteration/acceptance policy.');
+    if (['mapping', 'checks', 'prepare'].some(k => Object.hasOwn(request, k)) || (Object.hasOwn(request, 'image') && request.image !== artifact.template.image)) throw new Error('Prepare a new artifact to change adapter bindings, checks or runtime.');
+    request = { ...artifact.template, ...request, setup: { ...artifact.template.setup, ...overrides, plan: { ...artifact.template.setup.plan, ...overrides.plan } } };
+  }
   const directory = path.join(repo, '.posse', 'experiments', request.name);
   try { await fs.lstat(directory); throw new Error('Experiment directory already exists; use its launch/status commands or choose a new name.'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }

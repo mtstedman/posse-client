@@ -1,8 +1,18 @@
 import { CORPUS_INSPECTION_FORMATS } from './experiment-inspection.js';
-import { EXPERIMENT_CORPUS_PROFILE_PATTERN } from './experiment-corpus.js';
+import { EXPERIMENT_CORPUS_PROFILE_PATTERN, EXPERIMENT_CORPUS_FIELD_KINDS } from './experiment-corpus.js';
 const text = { type: 'string' };
 const jsonPath = { type: 'array', maxItems: 8, items: { anyOf: [{ type: 'string', minLength: 1, maxLength: 128 }, { type: 'integer', minimum: 0, maximum: 1000000 }] } };
 const descriptions = { type: 'object', maxProperties: 32, additionalProperties: { type: 'string', minLength: 1, maxLength: 512 } };
+export const CORPUS_PREP_CONTRACT_SCHEMA = { type: 'object', additionalProperties: false, required: ['fields'], properties: {
+  fields: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'object', additionalProperties: false, required: ['id', 'path', 'kind', 'weight'], properties: {
+    id: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,63}$' }, path: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$' } },
+    kind: { enum: EXPERIMENT_CORPUS_FIELD_KINDS }, weight: { type: 'number', exclusiveMinimum: 0, maximum: 1000000 },
+    depends_on: { type: 'array', maxItems: 32, items: { type: 'string' } }, tolerance: { type: 'number', minimum: 0 }, partial_range: { type: 'number', exclusiveMinimum: 0 },
+    iou_threshold: { type: 'number', exclusiveMinimum: 0, maximum: 1 }, attributes: { type: 'array', maxItems: 32, items: { type: 'object' } },
+  } } },
+  interface: { type: 'object', additionalProperties: false, properties: { resources: descriptions, input: descriptions, prediction: descriptions, requirements: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: 512 } } } },
+} };
+export const CORPUS_PREP_CONTRACT_GUIDANCE = 'Contract shape: {fields:[{id:"count",path:["count"],kind:"number",weight:1,tolerance:0}],interface:{resources:{text:"UTF-8 input"},prediction:{count:"Predicted count"}}}. Field kinds are exact|number|set|objects; paths are arrays and interface descriptions are strings. For exact numeric scoring use kind:number and tolerance:0. Omit contract if the corpus builder must define it before import.';
 const importedItem = { type: 'object', additionalProperties: false, required: ['profile', 'resources'], properties: {
   profile: { type: 'string', pattern: EXPERIMENT_CORPUS_PROFILE_PATTERN, description: 'Lowercase adapter label, e.g. card-identification-v1. Not an object or prose.' },
   label: { type: 'string', minLength: 1, maxLength: 240 }, tags: { type: 'array', maxItems: 32, items: { type: 'string', maxLength: 128 } }, input: {}, expected: { type: 'object' }, provenance: {},
@@ -17,10 +27,7 @@ export const CORPUS_PREP_DEFAULTS = { model: 'standard', reasoning_effort: 'medi
 export const CORPUS_BATCH_DOWNLOAD = { items: 100, concurrency: 4, delayMs: 200 };
 export const CORPUS_PREP_DATA_LIMITS = { bytes: 16000, cell: 512, page: 20, reports: 100, recentResults: 4, operationHistory: 12, summaryGroups: 64 };
 export const CORPUS_PREP_TOOLS = [
-  tool('define_contract', 'Create the missing scoring contract. Fields: id, path (array), kind exact|number|set|objects, positive weight, optional depends_on naming earlier fields. Number supports tolerance and partial_range; exact answers can supply accepted alternatives; objects require iou_threshold and optional attribute fields. Interface maps resource/input/prediction names to short STRING descriptions; requirements is an array of strings. Existing contracts cannot change. Unknown answers stay unscored.', { contract: { type: 'object', additionalProperties: false, required: ['fields'], properties: {
-    fields: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'object' } },
-    interface: { type: 'object', additionalProperties: false, properties: { resources: descriptions, input: descriptions, prediction: descriptions, requirements: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: 512 } } } },
-  } } }, ['contract']),
+  tool('define_contract', 'Create the missing scoring contract. Fields: id, path (array), kind exact|number|set|objects, positive weight, optional depends_on naming earlier fields. Number supports tolerance and partial_range; exact answers can supply accepted alternatives; objects require iou_threshold and optional attribute fields. Interface maps resource/input/prediction names to short STRING descriptions; requirements is an array of strings. Existing contracts cannot change. Unknown answers stay unscored.', { contract: CORPUS_PREP_CONTRACT_SCHEMA }, ['contract']),
   tool('inputs', 'List all supplied inputs, paginated. Paths are relative to inputs/. No files are modified.', { offset: { type: 'integer', minimum: 0 } }),
   tool('inspect', 'Inspect an input path or archived resource ID. Returns SHA256 and text, hex, or actual image pixels. Use offsets for large text/binary resources.', { path: text, id: text, format: { enum: CORPUS_INSPECTION_FORMATS }, offset: { type: 'integer', minimum: 0 } }, ['format']),
   tool('inspect_json', 'Read selected fields from JSON without dumping the whole file. Choose input path OR archived id. array_path selects an array (or one object); fields maps output column names to paths relative to each row. Paths support numeric array indexes, e.g. ["card_faces",0,"image_uris","large"]. Pagination is bounded; follow next_offset. No code execution.', {

@@ -352,6 +352,86 @@ bossy experiment-report < report.json
 posse experiment stop < campaign.json
 ```
 
+### Reusable experiment setup
+
+`posse experiment setup-prepare` prepares a reusable adapter before initialization.
+It is a separate owner-managed agent, with no optimization, source edits,
+integration, or implicit campaign launch. For example:
+
+```json
+{
+  "repo_path": "/absolute/path/project",
+  "objective": "Improve recognition quality while preserving the public interface",
+  "idempotency_key": "recognition-setup-v1"
+}
+```
+
+An optional `corpus` is `{ "experiment": "recognition", "corpus": "reference",
+"revision": "<immutable revision digest>" }`; an optional `contract` must match
+that revision. Without a supplied corpus, the agent inspects registered summaries
+and contracts, selects an appropriate corpus with a recorded reason, or dispatches
+the existing corpus-preparation agent. It waits for that child and requires
+nonempty verified cases. Missing inputs or draft answer keys produce
+`needs_inputs`, never a runnable artifact. This automatic selection applies to
+the setup agent; raw `init` retains its explicit corpus-choice behavior.
+Corpus-creation tools share the builder's field schema and example. Supplied
+contracts are validated before a child job is reserved, so malformed handoffs
+return correctable feedback without consuming the child allowance. Omit the
+contract to let the builder define it. Corpus preparation reuses vetted entries
+and focuses on new/draft items, unless the operator explicitly requests a change.
+
+Defaults are `standard`/`medium`, 40 model calls, 500,000 tokens, $10 and 1,800
+seconds. Override `model`, `reasoning_effort`, or `budget` explicitly. A child
+corpus preparation receives the **remaining shared allowance** and stays subject
+to the parent deadline and cancellation. Status reports parent `usage`, child
+receipt/usage and `combined_usage`; `usage_incomplete` identifies unknown usage.
+Setup gives concise prefetch, bounded Atlas snapshot searches/reads, eight-operation
+batches, retained notes and near-budget nudges. It reads safe tracked Git blobs,
+excluding private paths and untracked files. Public resource inspection supports
+images; private answer keys and corpus-builder answer-bearing history never enter
+setup context. Source uses the existing 16 KiB window and 8 KiB prefetch limit.
+
+Before calling a model, setup checks matching vetted artifacts against the
+objective, selected corpus interface, pinned runtime and declared source hashes.
+An exact match reuses its receipt with **zero model calls and zero sandbox runs**;
+an unrelated Git commit does not invalidate it. Changed implementation bytes use
+only a deterministic adapter-boundary smoke, with no paid setup decision.
+Same-contract corpus expansion preserves existing verified case/key bindings and
+smokes only new inputs, up to the protocol-smoke case limit. Receipts identify
+reused components, changed components and the actual smoke case IDs. Unchanged
+components are not sent back through corpus creation or model review. A ready
+setup still requires the actual experiment's fresh baseline.
+
+When new setup work is necessary, the agent submits only new
+read-only JSONL adapters/support files plus an init template with source mappings,
+metrics and repository checks. The owner validates schemas and bindings and runs
+up to three corpus cases in the existing isolated sandbox, withholding scores
+from the setup agent. This validates the adapter protocol/runtime; repository
+check commands are validated configuration, **not executed checks**. Runtime tags
+are pulled when missing and pinned to an image digest; missing pinned images or
+unsupported dependencies produce a concrete blocker. Setup cannot substitute an
+approximate algorithm for an unavailable production runtime.
+The template must declare at least one existing implementation file with
+`mode: "modify"` for the future optimizer. Declaring that scope does not edit
+production during setup; generated adapters remain `mode: "read"`. Mapping may
+be omitted for default `work/` paths, or supplied as nonempty source/target pairs.
+
+Use `setup-status` or `setup-stop` with `{ "id": "<job id>" }`. Use `setup-list`
+with `{ "repo_path": "/absolute/path/project", "offset": 0 }` for bounded
+artifact pages, or `setup-get` with `repo_path` and `artifact` for one immutable
+artifact. These commands accept JSON on stdin. Retrying the same preparation
+idempotency key returns its receipt without another paid job. Interrupted jobs
+are reconciled without automatic paid replay.
+
+A ready receipt supplies an artifact digest. In that repository, run
+`posse experiment init` with `{ "name": "recognition-v1", "artifact": "<digest>" }`.
+Initialization loads the frozen adapter/checks and pins **fresh Git source** for
+every mapped implementation file; it does not reuse old implementation contents.
+Optional `setup` overrides cover run budgets/models/instructions and
+`plan.max_iterations`/`plan.acceptance`. Changing the corpus, adapter bindings,
+checks or runtime requires a compatible new artifact. Launch remains a separate
+explicit command.
+
 ### Compact agent context
 
 The harness deterministically schedules baseline measurement, an idea brief,

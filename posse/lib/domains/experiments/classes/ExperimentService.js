@@ -1,4 +1,6 @@
 import { ExperimentCorpusService } from './ExperimentCorpusService.js';
+import { ExperimentSetupService } from './ExperimentSetupService.js';
+import { SETUP_AGENT_OPERATIONS } from '../../../catalog/experiment-setup-agent.js';
 import { EXPERIMENT_CORPUS_OPERATIONS } from '../../../catalog/experiment-corpus.js';
 import { CORPUS_RESULT_SELECTORS } from '../../../catalog/experiment-corpus-prep.js';
 import { EXPERIMENT_CORPUS_EVALUATION_SCHEMA } from '../../../catalog/experiment-corpus.js';
@@ -15,13 +17,15 @@ import { experimentDigest } from "../functions/snapshots.js";
 import { ExperimentIntegration } from "./ExperimentIntegration.js";
 
 export class ExperimentService {
-  constructor(store, { backend = null, evaluations = {}, assertOwner = () => {}, dispatch, now, integrationWorkspace, corpus } = {}) {
+  constructor(store, { backend = null, evaluations = {}, assertOwner = () => {}, dispatch, now, integrationWorkspace, corpus, setupAgent } = {}) {
     this.campaigns = new ExperimentCampaigns(store); this.backend = backend; this.evaluations = structuredClone(evaluations); this.active = new Map(); this.stopping = false; this.assertOwner = assertOwner;
     this.corpora = new ExperimentCorpusService(this, corpus);
+    this.setups = new ExperimentSetupService(this, { dispatch, now, ...setupAgent });
     this.runner = new ExperimentRunner(this, { dispatch, now });
     this.integration = new ExperimentIntegration(this, { dispatch, now, workspace: integrationWorkspace });
   }
   async request(operation, args = {}) {
+    if (Object.values(SETUP_AGENT_OPERATIONS).includes(operation)) return this.setups.request(operation, args);
     if (Object.values(EXPERIMENT_CORPUS_OPERATIONS).includes(operation)) return this.corpora.request(operation, args);
     const keys = {
       [O.SETUP_SCHEMA]: [], [O.SETUP_VALIDATE]: ["setup"], [O.LAUNCH]: ["setup", "setup_digest", "idempotency_key"], [O.STOP]: ["id"], [O.INTEGRATE]: ["id", "snapshot_digest", "integration", "idempotency_key"], [O.INTEGRATION_LOG]: ["id", "stage", "check"], [O.CASE_RESULTS]: ["id", "which"],
@@ -62,11 +66,13 @@ export class ExperimentService {
     return runID ? this.campaigns.store.get(K.CASE_RESULTS, runID) : null;
   }
   async run(args) {
+    if (this.setups.smokeActive) throw new Error('Setup adapter validation must finish before another sandbox run.');
     if (this.stopping || !this.backend) throw new Error("Experiment execution backend is unavailable.");
     const before = this.campaigns.load(args.id);
     const evaluation = validateNumericEvaluation(before.plan, this.evaluations[before.plan.evaluation.ref]);
     await this.backend.preflight(before.plan);
     this.assertOwner();
+    if (this.setups.smokeActive) throw new Error('Setup adapter validation must finish before another sandbox run.');
     if (this.stopping) throw new Error("Experiment owner is stopping.");
     // One sandbox per owner, including unresolved runs after a crash.
     if (this.campaigns.store.list(K.CAMPAIGNS).some(c => c.active_run && c.id !== args.id)) throw new Error("Another experiment run needs to finish or be reconciled.");
@@ -103,6 +109,7 @@ export class ExperimentService {
   }
   async recover() {
     this.corpora.recover();
+    await this.setups.recover();
     this.runner.recover();
     await this.integration.recover();
     for (const c of this.campaigns.store.list(K.CAMPAIGNS)) {
@@ -115,6 +122,6 @@ export class ExperimentService {
     // Close a crash window between terminal runner persistence and handoff.
     for (const record of this.campaigns.store.list(K.RUNNERS)) this.runner.integrate(record);
   }
-  async shutdown() { this.stopping = true; await this.corpora.shutdown(); await this.runner.shutdown(); await this.integration.shutdown(); for (const task of this.active.values()) task.controller.abort(); await Promise.all([...this.active.values()].map(task => task.promise)); }
-  activeCount() { return this.corpora.active.size + new Set([...this.runner.active.keys(), ...[...this.integration.active.values()].map(t => t.campaignID), ...this.campaigns.store.list(K.CAMPAIGNS).filter(c => c.active_run).map(c => c.id)]).size; }
+  async shutdown() { this.stopping = true; await Promise.all([this.setups.shutdown(), this.corpora.shutdown()]); await this.runner.shutdown(); await this.integration.shutdown(); for (const task of this.active.values()) task.controller.abort(); await Promise.all([...this.active.values()].map(task => task.promise)); }
+  activeCount() { return this.setups.active.size + this.corpora.active.size + new Set([...this.runner.active.keys(), ...[...this.integration.active.values()].map(t => t.campaignID), ...this.campaigns.store.list(K.CAMPAIGNS).filter(c => c.active_run).map(c => c.id)]).size; }
 }

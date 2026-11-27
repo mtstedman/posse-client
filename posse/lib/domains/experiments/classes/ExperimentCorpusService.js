@@ -5,11 +5,12 @@ import { ExperimentCorpusPrep } from './ExperimentCorpusPrep.js';
 import { EXPERIMENT_CORPUS_CHOICES, EXPERIMENT_CORPUS_OPERATIONS as O, EXPERIMENT_CORPUS_JOB_OBJECT as K, EXPERIMENT_CORPUS_JOB_STATES as S, EXPERIMENT_CORPUS_EVALUATIONS_OBJECT as E } from '../../../catalog/experiment-corpus.js';
 import { experimentDigest } from '../functions/snapshots.js';
 import { validateExperimentSetup } from '../functions/setup.js';
+import { validateCorpusContract } from '../functions/corpus-scoring.js';
 
 // Separate operator-owned preparation jobs. Testing only binds a verified,
 // immutable revision; it never starts corpus construction as a side effect.
 export class ExperimentCorpusService {
-  constructor(service, { open = repo => ExperimentCorpora.open(repo), prep = store => new ExperimentCorpusPrep(store) } = {}) {
+  constructor(service, { open = repo => ExperimentCorpora.open(repo), prep = store => new ExperimentCorpusPrep(store, { assertOwner: () => service.assertOwner() }) } = {}) {
     this.service = service; this.store = service.campaigns.store; this.open = open; this.prep = prep; this.active = new Map();
     for (const record of this.store.list(E)) this.service.evaluations[record.id] = record.evaluation;
   }
@@ -29,7 +30,7 @@ export class ExperimentCorpusService {
   }
   status(id) {
     const record = this.store.get(K, id); if (!record) throw new Error('Unknown corpus preparation.');
-    return { id, state: record.state, mode: record.mode, corpus: record.corpus, usage: record.usage || null,
+    return { id, state: record.state, mode: record.mode, corpus: record.corpus, usage: record.usage || null, usage_incomplete: record.usage_incomplete === true,
       error: record.error || null, report_path: record.report_path || null };
   }
   async bind(corpus, args) {
@@ -49,6 +50,9 @@ export class ExperimentCorpusService {
     if (previous) { if (previous.digest !== digest) throw new Error('Idempotency conflict.'); return this.status(previous.id); }
     const input = args.preparation;
     if (!input || Array.isArray(input) || Object.keys(input).some(key => !['experiment', 'corpus', 'prompt', 'expected_revision', 'contract', 'model', 'reasoning_effort', 'budget'].includes(key)) || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 16000) throw new Error('Corpus preparation needs a bounded prompt.');
+    // Reject malformed handoffs before reserving the child job. The calling
+    // setup agent can correct its contract without losing its child allowance.
+    if (Object.hasOwn(input, 'contract')) validateCorpusContract(input.contract);
     corpus.paths(input.experiment, input.corpus);
     let current; try { current = await corpus.load({ experiment: input.experiment, corpus: input.corpus }); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (args.mode === 'create' && current) throw new Error('Corpus already exists; choose use or expand.');
@@ -69,7 +73,7 @@ export class ExperimentCorpusService {
       try {
         const result = await this.prep(corpus).run({ ...input, require_new: args.mode === 'create' }, { signal: controller.signal });
         record.state = result.state === S.COMPLETE ? S.COMPLETE : S.FAILED;
-        record.usage = result.usage; record.error = result.error; record.report_path = result.report_path;
+        record.usage = result.usage; record.usage_incomplete = result.pending_call === true; record.error = result.error; record.report_path = result.report_path;
         record.corpus = { id: result.corpus?.id || record.corpus.id, revision: result.corpus?.revision || null, ready: result.corpus?.ready === true,
           cases: result.corpus?.entries?.length || 0, drafts: result.corpus?.entries?.filter(entry => entry.status === 'draft').length || 0 };
       } catch (error) { record.state = S.FAILED; record.error = error.message; }
@@ -82,7 +86,7 @@ export class ExperimentCorpusService {
   }
   recover() {
     for (const record of this.store.list(K)) if (record.state === S.RUNNING) {
-      record.state = S.INTERRUPTED; record.error = 'Owner interrupted; no automatic replay of paid preparation.'; this.store.put(K, record.id, record);
+      record.state = S.INTERRUPTED; record.usage_incomplete = true; record.error = 'Owner interrupted; no automatic replay of paid preparation.'; this.store.put(K, record.id, record);
     }
   }
   async shutdown() { for (const task of this.active.values()) task.controller.abort(); await Promise.all([...this.active.values()].map(task => task.promise)); }
