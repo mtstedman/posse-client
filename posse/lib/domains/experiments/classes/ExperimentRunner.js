@@ -13,7 +13,7 @@ import { campaignProgress } from "../functions/campaign-report.js";
 
 import { EXPERIMENT_CANDIDATE_TOOL as candidateTool, EXPERIMENT_PATCH_TOOL as patchTool, EXPERIMENT_READ_TOOL as readTool, EXPERIMENT_REVIEW_TOOL as reviewTool, EXPERIMENT_RUNNER_TOOLS as managerTools } from "../../../catalog/experiment-runner.js";
 
-import { agentPlan, actionSummary, decisionTables, fileInventory, editableFiles, changeSummary, fileExcerpt, recordContextUsage, recordContextTokens } from "../functions/agent-context.js";
+import { agentPlan, actionSummary, coordinatorActions, decisionTables, fileInventory, editableFiles, changeSummary, fileExcerpt, recordContextUsage, recordContextTokens } from "../functions/agent-context.js";
 
 const terminal = c => [S.GOAL, S.EXHAUSTED, S.BLOCKED, S.CANCELLED].includes(c.state);
 
@@ -27,7 +27,7 @@ export class ExperimentRunner {
   save(record) { record.updated_at = this.now(); this.store.put(K.RUNNERS, record.id, record); }
   status(id) {
     const r = this.load(id); if (!r) return null;
-    return { state: r.state, phase: r.phase, setup_digest: r.setup_digest, usage: r.usage, context_usage: r.context_usage || {}, budget: r.setup.budget, models: r.setup.models, started_at: r.started_at, updated_at: r.updated_at, error: r.error || null, integration_error: r.integration_error || null };
+    return { state: r.state, phase: r.phase, setup_digest: r.setup_digest, usage: r.usage, context_usage: r.context_usage || {}, last_action: r.last_action || null, budget: r.setup.budget, models: r.setup.models, started_at: r.started_at, updated_at: r.updated_at, error: r.error || null, integration_error: r.integration_error || null };
   }
   async launch({ setup, setup_digest, idempotency_key }) {
     const validation = validateExperimentSetup(setup);
@@ -85,7 +85,9 @@ export class ExperimentRunner {
     const calls = message?.tool_calls || [];
     if (calls.length !== 1) throw new Error("Expected one runner tool request.");
     const call = calls[0]; const tool = tools.find(item => item.name === call.name);
-    if (!tool || !validateToolArguments(tool, call.arguments).ok) throw new Error("Invalid runner tool request.");
+    if (!tool) throw new Error("Invalid runner tool request: choose an available tool.");
+    const validation = validateToolArguments(tool, call.arguments);
+    if (!validation.ok) throw new Error(`Invalid runner tool request: ${validation.message}`);
     return call;
   }
   async toolDecision(record, role, messages, tools, signal, images = []) {
@@ -94,8 +96,8 @@ export class ExperimentRunner {
     // coordinator rediscover the files and reissue the whole preparation action.
     let message = await this.decision(record, role, messages, tools, signal, images);
     try { return this.checkedCall(message, tools); }
-    catch {
-      const correction = `Your response did not request a valid tool. These are caller-executed JSON tools, even when no native tools are exposed. Return exactly one request using one of: ${tools.map(tool => tool.name).join(", ")}. Match its declared argument schema. Do not claim execution or give a final answer.`;
+    catch (error) {
+      const correction = `Your response did not request a valid tool: ${String(error.message).slice(0, 1000)} These are caller-executed JSON tools, even when no native tools are exposed. Return exactly one request using one of: ${tools.map(tool => tool.name).join(", ")}. Match its declared argument schema. Do not claim execution or give a final answer.`;
       message = await this.decision(record, role, [...messages,
         { role: "assistant", content: String(message?.content || "").slice(0, 4000) },
         { role: "user", content: correction }], tools, signal, images);
@@ -191,6 +193,13 @@ export class ExperimentRunner {
   }
   async drive(record, signal) {
     let previous = null;
+    const reads = [];
+    const remember = value => {
+      previous = value;
+      const { action, request, error } = actionSummary(value);
+      record.last_action = { action: action || null, ok: !error, ...(request ? { request } : {}), ...(error ? { error } : {}) };
+      this.save(record);
+    };
     try {
       while (true) {
         const c = this.service.campaigns.load(record.id);
@@ -200,21 +209,26 @@ export class ExperimentRunner {
         this.check(record, signal);
         // Baseline/candidate execution is determined by state, not a paid decision.
         if ([S.BASELINE, S.STAGED].includes(c.state)) {
-          previous = { action: 'test.run', result: await this.execute(record, { name: 'test.run', arguments: {} }, signal) };
+          remember({ action: 'test.run', result: await this.execute(record, { name: 'test.run', arguments: {} }, signal) });
           continue;
         }
         // Do not offer actions that cannot execute in the current campaign state.
         const tools = managerTools.filter(tool => tool.name === "test.run" ? [S.BASELINE, S.STAGED].includes(c.state)
           : tool.name === "test.prepare" ? c.state === S.READY : true);
-        const message = await this.decision(record, "coordinator", [{ role: "user", content: JSON.stringify({ objective: c.plan.objective, corpus: this.service.evaluations[c.plan.evaluation.ref]?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? { id: this.service.evaluations[c.plan.evaluation.ref].corpus_id, revision: this.service.evaluations[c.plan.evaluation.ref].corpus_revision } : undefined, findings: campaignProgress(c), decision_tables: decisionTables(c), last_action: actionSummary(previous),
+        const inventory = actionSummary({ action: "test.files", result: fileInventory(c.plan, this.service.campaigns.files(c.id).files) }, 4096).result;
+        const message = await this.decision(record, "coordinator", [{ role: "user", content: JSON.stringify({ objective: c.plan.objective, acceptance: c.plan.acceptance || { mode: "human" }, corpus: this.service.evaluations[c.plan.evaluation.ref]?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? { id: this.service.evaluations[c.plan.evaluation.ref].corpus_id, revision: this.service.evaluations[c.plan.evaluation.ref].corpus_revision } : undefined, findings: campaignProgress(c), decision_tables: decisionTables(c), ...coordinatorActions(previous, reads, inventory),
           next: c.state === S.BASELINE ? "Run the starting baseline." : c.state === S.STAGED ? "Run the reviewed candidate." : "Prepare the next general improvement. Continue until goals or budget stop the campaign." }) }], tools, signal);
         let call;
         try { call = this.checkedCall(message, tools); }
-        catch { previous = { error: "No valid tool was requested. The campaign still needs work; choose an available action." }; continue; }
-        try { previous = { action: call.name, result: await this.execute(record, call, signal) }; }
+        catch (error) { remember({ action: String(message?.tool_calls?.[0]?.name || "").slice(0, 100), error: `${String(error.message).slice(0, 1000)} Correct the request and choose an available action.` }); continue; }
+        try {
+          remember({ action: call.name, arguments: call.arguments, result: await this.execute(record, call, signal) });
+          if (["test.files", readTool.name].includes(call.name)) { reads.push(previous); if (reads.length > 3) reads.shift(); }
+          else if (call.name === "test.prepare" && previous.result.staged) reads.length = 0;
+        }
         catch (error) {
           if (signal.aborted || ["experiment_budget", "model_usage_unknown", "owner_fenced"].includes(error.code) || record.error === "model_usage_unknown") throw error;
-          previous = { action: call.name, error: "Action did not complete. Inspect the current state and correct the request within the approved scope." };
+          remember({ action: call.name, arguments: call.arguments, error: String(error.message || "Action did not complete.").slice(0, 1000) });
         }
       }
     } catch (error) {

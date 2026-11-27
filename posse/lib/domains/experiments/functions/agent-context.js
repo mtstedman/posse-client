@@ -77,10 +77,41 @@ export function agentPlan(plan) {
     files: plan.files.map(({ path, mode, instructions }) => ({ path, mode, instructions })),
     metrics: plan.metrics, acceptance: plan.acceptance };
 }
-export function actionSummary(previous) {
+export function actionSummary(previous, maxBytes = 12000) {
   if (!previous) return null;
   const result = previous.result;
-  return { action: previous.action, ...(previous.error ? { error: previous.error } : {}),
+  const summary = { action: previous.action, ...(previous.error ? { error: brief(previous.error, 1000) } : {}),
+    ...(previous.arguments && previous.action === "test.read" ? { request: previous.arguments } : {}),
     ...(result && Object.hasOwn(result, 'staged') ? { staged: result.staged, reason: brief(result.reason || result.review, 600) } : {}),
     ...(result?.advice ? { advice: brief(result.advice, 2000) } : {}) };
+  if (previous.action === "test.files" && result?.rows) {
+    summary.result = { columns: result.columns, rows: [...result.rows], omitted: 0, truncated: false };
+    while (Buffer.byteLength(JSON.stringify(summary)) > maxBytes && summary.result.rows.length) {
+      summary.result.rows.pop(); summary.result.omitted++; summary.result.truncated = true;
+    }
+  } else if (previous.action === "test.read" && result) {
+    summary.result = { ...result };
+    if (Buffer.byteLength(JSON.stringify(summary)) > maxBytes) {
+      summary.result.truncated = true;
+      summary.result.content_bytes = Buffer.byteLength(result.content || "");
+      let low = 0, high = (result.content || "").length;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        summary.result.content = result.content.slice(0, middle);
+        if (Buffer.byteLength(JSON.stringify(summary)) <= maxBytes) low = middle; else high = middle - 1;
+      }
+      summary.result.content = result.content.slice(0, low);
+    }
+  }
+  return summary;
+}
+
+// Retain useful reads, not a transcript. The latest action and the small working
+// window share one serialized byte allowance, including JSON escaping/UTF-8.
+export function coordinatorActions(previous, reads, inventory) {
+  const context = { ...(inventory ? { inventory } : {}), last_action: actionSummary(previous), recent_reads: reads.filter(item => item !== previous).slice(-3).map(item => actionSummary(item)), omitted_reads: 0 };
+  while (Buffer.byteLength(JSON.stringify(context)) > 16384 && context.recent_reads.length) {
+    context.recent_reads.shift(); context.omitted_reads++;
+  }
+  return context;
 }
