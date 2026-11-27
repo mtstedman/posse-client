@@ -11,17 +11,17 @@ export function rememberPrepResult(record, tool, result) {
 }
 
 export function prepReadRequest(args) {
-  return Object.fromEntries(['id', 'path', 'format', 'offset', 'limit', 'search', 'array_path', 'fields']
+  return Object.fromEntries(['id', 'path', 'format', 'view', 'offset', 'limit', 'search', 'array_path', 'fields']
     .filter(key => args[key] !== undefined).map(key => [key, args[key]]));
 }
 
-function page(rows, { offset = 0, limit = L.page }, project = row => row) {
+function page(rows, { offset = 0, limit = L.page }, project = row => row, budget = L.bytes) {
   if (!Number.isInteger(offset) || offset < 0 || offset > rows.length || !Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid data page.');
   const selected = []; let bytes = 0;
   for (const source of rows.slice(offset, offset + limit)) {
     const row = project(source);
     const size = Buffer.byteLength(JSON.stringify(row));
-    if (bytes + size > L.bytes) break;
+    if (bytes + size > budget) break;
     selected.push(row); bytes += size;
   }
   if (!selected.length && offset < rows.length) throw new Error('Selected row exceeds preview limit; request fewer/smaller fields.');
@@ -35,6 +35,32 @@ const cell = value => {
   const text = JSON.stringify(value);
   return text.length <= L.cell ? value : { preview: text.slice(0, L.cell), truncated: true };
 };
+
+export function corpusPreparationInventory(corpus, args = {}) {
+  const base = { id: corpus.id, revision: corpus.revision, ready: corpus.ready, total: corpus.entries.length };
+  if (args.view === 'cases') return { ...base, columns: ['case_id', 'label', 'tags', 'profile', 'status', 'resources'],
+    ...page(corpus.entries, args, entry => [entry.case_id, entry.label, entry.tags, entry.profile, entry.status,
+      Object.fromEntries(Object.entries(entry.resources).map(([alias, binding]) => [alias, { id: binding.resource_id, name: binding.name }]))], L.bytes - 1024) };
+  if (args.view !== undefined && args.view !== 'summary') throw new Error('Unknown corpus inventory view.');
+  const profiles = new Map(), tags = new Map(); let verified = 0;
+  const add = (map, key) => map.set(key, (map.get(key) || 0) + 1);
+  for (const entry of corpus.entries) {
+    if (entry.status === 'verified') verified++;
+    add(profiles, entry.profile);
+    for (const tag of new Set(entry.tags)) add(tags, tag);
+  }
+  const counts = map => {
+    const all = [...map].sort(([a], [b]) => a.localeCompare(b)), rows = []; let bytes = 0;
+    for (const row of all) {
+      const size = Buffer.byteLength(JSON.stringify(row));
+      if (rows.length === L.summaryGroups || bytes + size > L.bytes / 3) break;
+      rows.push(row); bytes += size;
+    }
+    return { columns: ['label', 'cases'], rows, total: all.length, omitted: all.length - rows.length };
+  };
+  return { ...base, verified, draft: corpus.entries.length - verified, profiles: counts(profiles), tags: counts(tags),
+    instruction: 'Counts cover the entire corpus. Use view:cases with offset/limit for compact membership and image resource IDs; follow next_offset.' };
+}
 
 export function inspectCorpusJson(bytes, args) {
   if (bytes.length > EXPERIMENT_CORPUS_LIMITS.jsonBytes || !validPath(args.array_path) || !args.fields || typeof args.fields !== 'object' || Array.isArray(args.fields)

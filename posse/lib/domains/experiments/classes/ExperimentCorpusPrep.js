@@ -5,13 +5,13 @@ import { randomUUID } from 'node:crypto';
 import { AGENT_DISPATCH_PROTOCOL } from '../../../catalog/agent.js';
 import { CORPUS_PREP_DEFAULTS as D, CORPUS_PREP_TOOLS as TOOLS, CORPUS_PREP_DATA_LIMITS } from '../../../catalog/experiment-corpus-prep.js';
 import { EXPERIMENT_CORPUS_LIMITS as L } from '../../../catalog/experiment-corpus.js';
-import { dispatchAgentTurn } from '../../agents/functions/dispatch-cli.js';
+import { dispatchAgentTurn, dispatchFailureMessage } from '../../agents/functions/dispatch-cli.js';
 import { validateToolArguments } from '../../../shared/tools/functions/schema-validation.js';
 import { viewImageWithinScope } from '../../../shared/tools/functions/toolkit/view-image.js';
 import { asMcpContentResult } from '../../../shared/tools/functions/mcp-content-result.js';
 import { downloadCorpusInput } from '../functions/corpus-download.js';
 import { downloadCorpusBatch } from '../functions/corpus-batch-download.js';
-import { inspectCorpusJson, corpusDownloadHistory, rememberPrepResult, prepReadRequest } from '../functions/corpus-prep-data.js';
+import { inspectCorpusJson, corpusDownloadHistory, corpusPreparationInventory, rememberPrepResult, prepReadRequest } from '../functions/corpus-prep-data.js';
 import { corpusHash } from '../functions/corpus-archive.js';
 
 // Prep owns its small tool loop. The model never gets a shell, host file tools,
@@ -81,8 +81,7 @@ export class ExperimentCorpusPrep {
       return { label: args.path || resource.label, sha256: corpusHash(resource.bytes), ...inspectCorpusJson(resource.bytes, args) };
     }
     if (call.name === 'corpus') {
-      const corpus = await this.store.inspect(this.identity), offset = args.offset || 0;
-      return { id: corpus.id, revision: corpus.revision, ready: corpus.ready, total: corpus.entries.length, entries: corpus.entries.slice(offset, offset + (args.limit || 10)) };
+      return corpusPreparationInventory(await this.store.inspect(this.identity), args);
     }
     if (call.name === 'download') {
       const receipt = await this.download(args.url, this.staging, { signal, budget: this.downloadBudget });
@@ -192,7 +191,14 @@ export class ExperimentCorpusPrep {
             messages: [{ role: 'user', content: JSON.stringify({ task: args.prompt, contract: this.contract, usage, budget: config,
               notes: this.record.notes || '', recent_operations: this.record.operations.slice(-CORPUS_PREP_DATA_LIMITS.operationHistory), recent_results: (this.record.recent_results || []).slice(0, -1), last_result: previous }) }], tools: TOOLS, images: this.images }, { cwd: this.staging, signal: combined });
           this.charge(decision.stats);
-        } catch (error) { if (error.stats) this.charge(error.stats); throw error; }
+        } catch (error) {
+          const reason = dispatchFailureMessage(error);
+          if (error.stats) {
+            try { this.charge(error.stats); }
+            catch (accounting) { throw new Error(`${reason}; ${accounting.message}`); }
+          }
+          throw new Error(reason);
+        }
         await this.save(); combined.throwIfAborted(); this.images = [];
         const calls = decision.message?.tool_calls || [], call = calls[0], tool = TOOLS.find(t => t.name === call?.name);
         if (calls.length !== 1 || !tool) throw new Error('Prep agent returned an invalid tool request.');

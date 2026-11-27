@@ -158,6 +158,9 @@ For example, `{id, array_path:["data"], fields:{name:["name"],image:["image_uris
 reads just the selected columns. Truncated cells are explicitly marked.
 The import schema describes profiles and resource bindings explicitly. Malformed
 arguments return a field-specific error so the agent can correct its next call.
+`corpus` defaults to whole-corpus status and tag/profile counts, so coverage checks
+do not require recounting pages. `view:cases` returns bounded membership tables
+with image/resource IDs and `next_offset`; answer provenance is not repeated.
 Prep keeps at most four recent results within 16 KiB of working context, plus
 compact notes and twelve recent operation summaries. Related metadata and
 resource IDs therefore survive the next tool call without replaying the full

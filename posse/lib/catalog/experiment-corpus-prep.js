@@ -15,7 +15,7 @@ const importedItem = { type: 'object', additionalProperties: false, required: ['
 const tool = (name, description, properties, required = []) => ({ name, description, parameters: { type: 'object', properties: { ...properties, notes: { type: 'string', maxLength: 4000, description: 'Replace working notes retained across decisions; keep inspected IDs, findings and next steps.' } }, required, additionalProperties: false } });
 export const CORPUS_PREP_DEFAULTS = { model: 'standard', reasoning_effort: 'medium', model_calls: 100, tokens: 1000000, spend_usd: 25, wall_seconds: 3600 };
 export const CORPUS_BATCH_DOWNLOAD = { items: 100, concurrency: 4, delayMs: 200 };
-export const CORPUS_PREP_DATA_LIMITS = { bytes: 16000, cell: 512, page: 20, reports: 100, recentResults: 4, operationHistory: 12 };
+export const CORPUS_PREP_DATA_LIMITS = { bytes: 16000, cell: 512, page: 20, reports: 100, recentResults: 4, operationHistory: 12, summaryGroups: 64 };
 export const CORPUS_PREP_TOOLS = [
   tool('define_contract', 'Create the missing scoring contract. Fields: id, path (array), kind exact|number|set|objects, positive weight, optional depends_on naming earlier fields. Number supports tolerance and partial_range; exact answers can supply accepted alternatives; objects require iou_threshold and optional attribute fields. Interface maps resource/input/prediction names to short STRING descriptions; requirements is an array of strings. Existing contracts cannot change. Unknown answers stay unscored.', { contract: { type: 'object', additionalProperties: false, required: ['fields'], properties: {
     fields: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'object' } },
@@ -34,7 +34,7 @@ export const CORPUS_PREP_TOOLS = [
   }, ['items']),
   tool('import', 'Batch import up to 100 cases. Profile is a lowercase slug; resources maps aliases to {id,name} or {path,sha256,name}. Paths are relative to inputs/. Prefer downloaded IDs and media-appropriate names. Inferred answers stay draft; existing keys cannot be overwritten.', { items: { type: 'array', minItems: 1, maxItems: 100, items: importedItem } }, ['items']),
   tool('import_manifest', 'Import an operator-supplied JSON file from inputs/ as verified answers, without modifying its contents. Format: {items:[...]} with expected, profile, input and resources. Resource paths are relative to that manifest and every resource needs sha256. Agent-authored/downloaded manifests cannot be trusted through this tool.', { path: text }, ['path']),
-  tool('corpus', 'Inspect current labeled case membership and key verification status, paginated. Reduce limit for cases with many resources.', { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50 } }),
+  tool('corpus', 'Default summary gives total/verified/draft counts and bounded tag/profile counts for the ENTIRE corpus, without recounting pages. view:cases returns a compact membership table with resource IDs; follow next_offset. Provenance and answers are omitted.', { view: { type: 'string', enum: ['summary', 'cases'] }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50 } }),
   tool('finish', 'Finish preparation and report remaining draft keys or missing inputs honestly.', { summary: text }, ['summary']),
 ];
 export const CORPUS_RESULT_SELECTORS = ['latest', 'accepted', 'baseline'];
