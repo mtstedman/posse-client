@@ -1,3 +1,4 @@
+import { EXPERIMENT_BUDGET_SCHEMA } from './experiment-budget.js';
 import { EXPERIMENT_INIT_DEFAULTS } from './experiment-workspace.js';
 import { EXPERIMENT_SETUP_SCHEMA, EXPERIMENT_PLAN_JSON_SCHEMA, EXPERIMENT_RUNNER_ROLES, experimentPlanExample } from "./experiments.js";
 import { AGENT_REASONING_EFFORTS } from "./agent.js";
@@ -9,14 +10,14 @@ const text = maxLength => ({ type: "string", minLength: 1, maxLength });
 const count = maximum => ({ type: "integer", minimum: 1, maximum });
 export const EXPERIMENT_SOURCE_LIMITS = Object.freeze({ searchBytes: 8192, contextBytes: 16384, batchItems: 8, lookupTurns: 12, lookupNudgeRemaining: 3, results: 20, targets: 8, cachedFiles: 128, history: 8 });
 export const EXPERIMENT_SOURCE_FALLBACKS = Object.freeze({ UNSUPPORTED: "unsupported_language", UNAVAILABLE: "parser_unavailable", FAILED: "parser_failed", NO_SYMBOL: "no_symbol_match" });
-export const EXPERIMENT_IDEA_LIMITS = Object.freeze({ lookups: 4, failedPreparations: 3 });
+export const EXPERIMENT_IDEA_LIMITS = Object.freeze({ lookups: 4, failedPreparations: 3, proposals: 5 });
 export const EXPERIMENT_IDEA_EXHAUSTED = "idea_attempts_exhausted";
 export const experimentSetupSchema = object({
   schema: { const: EXPERIMENT_SETUP_SCHEMA }, prompt: text(16000), guidelines: text(8000),
   plan: EXPERIMENT_PLAN_JSON_SCHEMA,
   files: { type: "object", maxProperties: 128, additionalProperties: { type: "string", maxLength: 262144 } },
   models: object(Object.fromEntries(EXPERIMENT_RUNNER_ROLES.map(role => [role, object({ model: text(128), reasoning_effort: { enum: AGENT_REASONING_EFFORTS } })]))),
-  budget: object({ model_calls: count(1000), wall_seconds: count(3600), tokens: count(1000000), spend_usd: { type: "number", exclusiveMinimum: 0, maximum: 100 } }),
+  budget: EXPERIMENT_BUDGET_SCHEMA,
 });
 
 experimentSetupSchema.properties.integration = EXPERIMENT_INTEGRATION_SCHEMA;
@@ -58,10 +59,17 @@ export const EXPERIMENT_SEARCH_TOOL = { name: "test.search", description: "Find 
 export const EXPERIMENT_LOOKUP_BATCH_TOOL = { name: "test.lookup_batch", description: "After checking prefetch, fetch up to eight independent missing source ranges or symbol searches in one turn. Snapshot-only test.read/test.search operations; no arbitrary tools or repository access. Results preserve request order and per-item errors under one byte cap. Use individual reads for truncated ranges requiring more detail.", parameters: object({
   requests: { type: "array", minItems: 1, maxItems: EXPERIMENT_SOURCE_LIMITS.batchItems, items: { oneOf: [EXPERIMENT_READ_TOOL, EXPERIMENT_SEARCH_TOOL].map(tool => object({ name: { const: tool.name }, arguments: tool.parameters })) } },
 }) };
+// Each role retains only its own concise facts, never an editor/reviewer transcript.
+for (const tool of [EXPERIMENT_READ_TOOL, EXPERIMENT_SEARCH_TOOL, EXPERIMENT_LOOKUP_BATCH_TOOL]) {
+  tool.parameters.properties.notes = { type: "string", maxLength: 1200, description: "Replace concise working notes: verified interface facts and remaining uncertainty. Notes survive source eviction within this role only." };
+}
 const prepareParameters = object({ instructions: toolText, targets: { type: "array", minItems: 1, maxItems: EXPERIMENT_SOURCE_LIMITS.targets, items: object({
   path: text(240), sha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, start_line: count(1000000), line_count: count(200), change: text(400),
 }) } });
 prepareParameters.required = ["instructions"];
+export const EXPERIMENT_PROPOSALS_TOOL = { name: "test.propose_batch", description: "Queue up to five ranked, independent improvement briefs against the current accepted snapshot. Supply intent and digest-checked anchors, never code or a proposed diff. Rejection advances the queue; acceptance invalidates it. Use fewer ideas when evidence or remaining iterations do not justify five.", parameters: object({
+  proposals: { type: "array", minItems: 1, maxItems: EXPERIMENT_IDEA_LIMITS.proposals, items: prepareParameters },
+}) };
 export const EXPERIMENT_RUNNER_TOOLS = [
   { name: "test.prepare", description: "Dispatch the writer and independent assessor, then stage the reviewed candidate. Prefer a concise edit brief with optional targets from test.search/read: current file digest, line range, and intended change. Targets guide the edit without changing the approved file scope. Consumes one iteration only after review passes.", parameters: prepareParameters },
   { name: "test.run", description: "Execute the baseline or staged candidate and wait for the owner-scored result. The harness publishes live progress without model calls.", parameters: object({}) },

@@ -1,3 +1,4 @@
+import { EXPERIMENT_BUDGET_SETTINGS } from '../../../catalog/experiment-budget.js';
 import { APPROVAL_POLICY_GROUP_VALUE, APPROVAL_POLICY_SETTINGS, FLOW_GROUP_SETTINGS } from "../../../catalog/approval-policies.js";
 import { ADMIN_SETTING_LABEL_OVERRIDES, ADMIN_SETTING_DESCRIPTION_OVERRIDES, ADMIN_UNSET_VALUE_LABELS, ADMIN_SETTING_UNIT_OVERRIDES, ADMIN_LABEL_WORDS, ADMIN_ROLE_PURPOSES, ADMIN_AGENT_SETTING_SECTIONS, ADMIN_PROVIDER_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_IMAGE_SETTING_SECTIONS, ADMIN_LOCAL_MODEL_SECTIONS, TURN_BASE_KEY_MAP, TURN_BASE_KEY_REVERSE_MAP } from "../../../catalog/admin-settings.js";
 export { PROVIDER_SETTING_KEYS, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY, SKILL_SETTING_PREFIX, PROJECT_DB_TYPE_OPTIONS, PROJECT_DB_PERMISSION_OPTIONS, PROJECT_DB_SETTING_DEFS, PROJECT_DB_SETTING_KEYS, ADMIN_AGENT_SETTING_SECTIONS, ADMIN_PROVIDER_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_IMAGE_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, TURN_BASE_KEY_MAP, TURN_BASE_KEY_REVERSE_MAP, SETTINGS_PANES, ADMIN_DEFAULT_SETTINGS_PANE } from "../../../catalog/admin-settings.js";
@@ -329,6 +330,7 @@ const GROUPED_GATE_POLICY_KEYS = APPROVAL_POLICY_SETTINGS.filter((entry) => entr
 const UNGROUPED_GATE_POLICY_KEYS = APPROVAL_POLICY_SETTINGS.filter((entry) => entry.default !== APPROVAL_POLICY_GROUP_VALUE).map(({ key }) => key);
 
 export const SETTINGS_GROUPS = Object.freeze([
+  group("experiments", "general", "Experiment budgets", EXPERIMENT_BUDGET_SETTINGS.map(({ key }) => key)),
   group("flow-decisions", "approvals", "When to stop and ask", ["plan_approval_mode", ...FLOW_GROUP_SETTINGS.map(({ key }) => key)], "One choice per kind of interruption: Approve keeps the run going, Reject stops the gated work, Ask waits for you."),
   group("scope-approvals", "approvals", "Scope details", ["scope_auto_approval", "fix_scope_handoff_guard", "file_request_low_risk_extensions", "posse_max_file_request_depth"], "Jobs that must write tests can write in test directories. Routine extra files are approved without a gate unless Scope extensions is set to Reject."),
   group("merge-publish", "approvals", "Merging and publishing", ["auto_merge_completed", ...UNGROUPED_GATE_POLICY_KEYS], "These always ask unless you save a policy here. Push and merge policies are never implied by an unattended flag."),

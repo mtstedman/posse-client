@@ -65,11 +65,11 @@ export class ExperimentSourceIndex {
       signal?.throwIfAborted();
       const parents = new Map(parsed.symbols.map(symbol => [symbol.local_id, symbol]));
       const top = parsed.symbols.filter(symbol => !["module", "namespace"].includes(symbol.kind)
-        && (symbol.parent_local_id == null || ["module", "namespace"].includes(parents.get(symbol.parent_local_id)?.kind))
+        && (symbol.parent_local_id == null || ["module", "namespace", "class", "interface", "trait", "struct"].includes(parents.get(symbol.parent_local_id)?.kind))
         && Number.isInteger(symbol.range_start_line) && symbol.range_start_line > 0 && symbol.range_start_line <= lines.length
         && Number.isInteger(symbol.range_end_line) && symbol.range_end_line >= symbol.range_start_line && symbol.range_end_line <= lines.length);
       const priority = symbol => (/^\s*export\b/.test(lines[symbol.range_start_line - 1]) || symbol.visibility === "public" ? 0 : 2)
-        + (["function", "class"].includes(symbol.kind) ? 0 : 1);
+        + (["function", "method"].includes(symbol.kind) && !/^(?:__construct|__init__|constructor)$/i.test(symbol.name) ? 0 : 4);
       top.sort((a, b) => priority(a) - priority(b) || a.range_start_line - b.range_start_line);
       const anchors = top.slice(0, 40).map(symbol => [String(symbol.qualified_name || symbol.name).slice(0, 120), String(symbol.kind).slice(0, 32), symbol.range_start_line, Math.min(200, symbol.range_end_line - symbol.range_start_line + 1), symbol.range_end_line]);
       if (!anchors.length) {

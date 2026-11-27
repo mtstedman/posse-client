@@ -306,10 +306,21 @@ The input is `{name, setup, evaluation, checks}` with optional `mapping`,
 `objective`, `entrypoint`, `files`, and `metrics`; ordinary plan/settings fields
 can be overridden. Defaults are ten iterations, automatic acceptance against
 the first goal metric, **standard / medium for all roles**, and a shared budget
-of 100 model calls, 1,000,000 tokens, $25, and one hour. These are ceilings, not
+of 125 model calls, 1,500,000 tokens, $25, and one hour. These are ceilings, not
 spending targets. Checks remain explicit argv commands; initialization never
 guesses evaluation answers or treats an arbitrary package script as the
 experiment's success criterion.
+
+Admin → General → Experiment budgets controls the account defaults for new
+runs: `experiment_default_model_calls`, `experiment_default_tokens`,
+`experiment_default_wall_seconds`, and `experiment_default_spend_usd`.
+For example, `posse admin settings set experiment_default_tokens 2000000`.
+Override individual fields per experiment with `setup.budget`, for example
+`{"name":"round-2","artifact":"<digest>","setup":{"budget":{"tokens":2000000,"model_calls":150}}}`.
+`init-schema` and `setup-schema` show effective account defaults. Initialization
+freezes the resolved budget; subsequent admin changes never alter a prepared or
+running experiment. Agents get a concise nudge at 80% usage. The final in-flight
+call can exceed a token/spend ceiling; further calls are stopped.
 
 Preparation provisions a separate private owner under
 `~/.local/state/posse/experiment-owners/`, pins a locally available Docker image,
@@ -500,9 +511,14 @@ The harness deterministically schedules baseline measurement, an idea brief,
 editing, assessment, and candidate measurement. There is no paid dispatcher.
 For compatibility, the idea phase uses the existing `models.coordinator`
 configuration; runtime phase and context telemetry call it `idea`. Its final
-`test.prepare` result is a hypothesis/edit brief, not a request to choose the
-next harness operation. It can make at most four source-lookup turns, then must
-return its brief and delegate deeper source discovery to the editor. A malformed
+`test.propose_batch` result queues up to five ranked independent briefs (normally
+3–5, bounded by remaining iterations); `test.prepare` remains a single-idea
+compatibility option. Each brief carries intent and optional digest-checked
+anchors, never a generated diff. Rejection advances the queue without another
+idea call. Accepted source changes invalidate the remaining queue and trigger
+fresh ideas against the new snapshot. The queue is persisted, bounded by the
+ordinary run budget, and visible as counts in runner status. It can make at most
+four source-lookup turns per batch, then must delegate deeper discovery to the editor. A malformed
 response gets one local correction; three consecutive failed brief/preparation
 attempts end with `idea_attempts_exhausted`. Any already accepted improvement can
 still proceed through the configured integration path. Baseline-only work does
@@ -518,7 +534,23 @@ rows per table and reports how many older rows were omitted. The campaign
 report retains the full tables and its existing iteration history for charts.
 
 The idea phase also receives a concise overview of snapshot-specific source
-anchors. `test.search` discovers symbols using Atlas supplied-buffer parsing,
+anchors, including methods inside classes. Prefetch expands small edit targets
+to their enclosing method when that complete range is available. Reviewer
+anchors are rebuilt from candidate bytes, so inserted lines cannot leave stale
+positions. Each role can retain up to 1,200 characters of verified facts and
+remaining uncertainty in lookup `notes`; editor notes never substitute for
+independent reviewer evidence.
+
+Fresh requested source takes priority over older reads within the same 16 KiB
+window. Old reads use spare room or are explicitly counted as omitted, rather
+than repeatedly shortening the new span. Setup uses the same source packing.
+All source clipping uses serialized UTF-8 bytes and complete lines when possible;
+results report actual `end_line`, `returned_bytes`, `next_line`, and
+`partial_line` for oversized individual lines. Batch results still share a byte
+cap: follow continuations with fewer targeted reads instead of repeating a
+large truncated batch.
+
+ `test.search` discovers symbols using Atlas supplied-buffer parsing,
 with an explicit bounded literal-search fallback when native parsing is
 unavailable, the language is unsupported, or no declaration matches. It searches
 only declared snapshot bytes, never the host repository or corpus answers.

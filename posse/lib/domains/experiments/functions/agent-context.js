@@ -47,11 +47,11 @@ export function changeSummary(before, changes, maxCharacters = 16000) {
   });
 }
 
-export function fileExcerpt(files, { path, start_line = 1, line_count = 120 }, maxBytes) {
+export function fileExcerpt(files, { path, start_line = 1, line_count = 120 }, maxBytes = L.contextBytes) {
   if (!Object.hasOwn(files, path)) throw new Error("File is outside the declared payload.");
   const lines = files[path].split("\n"); const content = lines.slice(start_line - 1, start_line - 1 + line_count).join("\n");
   const result = { path, sha256: fileDigest(files[path]), start_line, total_lines: lines.length, content, content_bytes: Buffer.byteLength(content), truncated: false };
-  return maxBytes ? actionSummary({ action: "test.read", result: sourceContent(result, content) }, maxBytes).result : sourceContent(result, content.slice(0, 12000));
+  return actionSummary({ action: "test.read", result: sourceContent(result, content) }, maxBytes).result;
 }
 
 // Prefer complete lines when fitting a read. A huge first line may only fit
@@ -68,7 +68,7 @@ function sourceContent(result, prefix) {
       if (newline >= 0) prefix = prefix.slice(0, newline);
     }
   }
-  const value = { ...result, content: prefix, truncated: !!result.truncated || cut };
+  const value = { ...result, content: prefix, returned_bytes: Buffer.byteLength(prefix), truncated: !!result.truncated || cut };
   if (ranged) {
     const count = prefix.length || (!value.truncated && result.start_line <= result.total_lines) ? prefix.split("\n").length : 0;
     value.end_line = count ? result.start_line + count - 1 : null;
@@ -180,10 +180,20 @@ export function boundedLookupBatch(items, maxBytes = L.contextBytes) {
 // Retain useful reads, not a transcript. The latest action and the small working
 // window share one serialized byte allowance, including JSON escaping/UTF-8.
 export function coordinatorActions(previous, reads, inventory, overview) {
-  const context = { ...(inventory ? { inventory } : {}), ...(overview ? { source_overview: overview } : {}), last_action: actionSummary(previous, overview ? 8000 : 12000), recent_reads: reads.filter(item => item !== previous).slice(-3).map(item => actionSummary(item)), omitted_reads: 0 };
-  while (Buffer.byteLength(JSON.stringify(context)) > 16384 && context.recent_reads.length) {
-    context.recent_reads.shift(); context.omitted_reads++;
+  const recent = reads.filter(item => item !== previous).slice(-3);
+  const context = { ...(inventory ? { inventory } : {}), ...(overview ? { source_overview: overview } : {}), last_action: null, recent_reads: [], omitted_reads: 0 };
+  const bytes = () => Buffer.byteLength(JSON.stringify(context));
+  // Spend the available window on the latest lookup before older prefetch.
+  // There is no second fixed 8 KiB cap on a freshly returned batch.
+  context.last_action = actionSummary(previous, L.contextBytes - bytes() - 32);
+  for (const item of recent.reverse()) {
+    const spare = L.contextBytes - bytes() - 32;
+    if (spare < 512) { context.omitted_reads++; continue; }
+    const summary = actionSummary(item, spare);
+    if (Buffer.byteLength(JSON.stringify(summary)) <= spare) context.recent_reads.unshift(summary);
+    else context.omitted_reads++;
   }
+  if (bytes() > L.contextBytes) throw new Error("Coordinator source packet exceeds its byte budget.");
   return context;
 }
 
@@ -232,6 +242,7 @@ export function rememberSourceRead(history, entry) {
     return key(value) !== key(entry);
   });
   history.entries.push(retained);
+  history.fresh = Math.min(history.entries.length, (history.fresh || 0) + 1);
   if (history.entries.length > L.history) { history.entries.shift(); history.omitted++; }
 }
 
@@ -255,7 +266,21 @@ export function sourcePacket(history, extra = {}, maxBytes = L.contextBytes) {
     return { tool: entry.tool, request: { version: entry.request?.version }, request_omitted: true, batch_index: entry.batch_index,
       truncated: true, error: "Result metadata exceeds the shared allowance; request this item individually." };
   };
-  const packet = fitPacket(history.entries, maxBytes, entries => ({ ...extra, requested_source: entries, omitted_source_reads: history.omitted }), bounded);
+  const wrap = entries => ({ ...extra, requested_source: entries, omitted_source_reads: history.omitted });
+  let packet;
+  const freshCount = Math.min(history.fresh || 0, history.entries.length);
+  if (freshCount && freshCount < history.entries.length && Buffer.byteLength(JSON.stringify(wrap(history.entries))) > maxBytes) {
+    const fresh = history.entries.slice(-freshCount), older = history.entries.slice(0, -freshCount);
+    const freshPacket = fitPacket(fresh, maxBytes - 32, wrap, bounded);
+    // Older source may use spare room, but cannot shorten a newly requested span.
+    const spare = maxBytes - Buffer.byteLength(JSON.stringify(freshPacket));
+    while (older.length && spare < older.length * 512) { older.shift(); history.omitted++; }
+    if (older.length) {
+      packet = fitPacket(older, maxBytes, entries => wrap([...entries, ...freshPacket.requested_source]), bounded);
+    } else packet = wrap(freshPacket.requested_source);
+  } else packet = fitPacket(history.entries, maxBytes, wrap, bounded);
+  if (Buffer.byteLength(JSON.stringify(packet)) > maxBytes) throw new Error("Source packet exceeds its byte budget.");
+  history.fresh = 0;
   // Future containment decisions must use the spans actually delivered under
   // this aggregate budget, including receipt/wrapper overhead.
   history.entries = packet.requested_source;
@@ -268,7 +293,12 @@ export function prefetchSource(plan, files, targets, overview, version = "accept
   const history = { entries: [], omitted: 0 };
   for (const target of selected.slice(0, L.targets)) {
     const tiny = Buffer.byteLength(files[target.path]) <= 1000;
-    const request = { path: target.path, version, start_line: tiny ? 1 : target.start_line, line_count: tiny ? 200 : Math.min(200, target.line_count) };
+    const enclosing = (overview.files.find(file => file.path === target.path)?.anchors || [])
+      .filter(row => ["function", "method", "constructor"].includes(row[1]) && row[2] <= target.start_line
+        && row[4] >= target.start_line + target.line_count - 1 && row[4] - row[2] < 200)
+      .sort((a, b) => (a[4] - a[2]) - (b[4] - b[2]))[0];
+    const request = { path: target.path, version, start_line: tiny ? 1 : enclosing?.[2] ?? target.start_line,
+      line_count: tiny ? 200 : enclosing ? enclosing[4] - enclosing[2] + 1 : Math.min(200, target.line_count) };
     const result = fileExcerpt(files, request, L.contextBytes);
     history.entries.push({ tool: "test.read", request, version, ...result, prefetched: true });
   }

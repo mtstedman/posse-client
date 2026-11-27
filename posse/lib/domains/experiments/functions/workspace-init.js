@@ -1,3 +1,4 @@
+import { experimentBudget } from './budget.js';
 import { ExperimentCorpora } from '../classes/ExperimentCorpora.js';
 import { ExperimentSetupArtifacts } from '../classes/ExperimentSetupArtifacts.js';
 import { ExperimentSetupSource } from '../classes/ExperimentSetupSource.js';
@@ -57,7 +58,7 @@ async function runtimeSource(request, repo) {
 }
 
 export async function initializeExperiment(request, { cwd = process.cwd(), git = gitExecAsync,
-  sandbox = images => new ExperimentSandbox({ images }), ignore = ensurePosseGitInfoExcludeAsync,
+  budgetDefaults = experimentBudget, sandbox = images => new ExperimentSandbox({ images }), ignore = ensurePosseGitInfoExcludeAsync,
   stateRoot = path.join(os.homedir(), '.local', 'state', 'posse', 'experiment-owners') } = {}) {
   if (process.platform !== 'linux') throw new Error('Experiment execution currently requires Linux Docker and user systemd.');
   if (!request || Object.keys(request).some(key => !EXPERIMENT_INIT_FIELDS.includes(key)) || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(request.name || '')) throw new Error('Use a unique lowercase experiment name and the fields in init-schema.');
@@ -130,7 +131,7 @@ export async function initializeExperiment(request, { cwd = process.cwd(), git =
   const worktree = path.join(path.dirname(repo), 'posse-workbranch', path.basename(repo), `experiment-${request.name}-${identity.slice(0, 8)}`);
   const setup = { ...supplied, schema: EXPERIMENT_SETUP_SCHEMA, prompt: supplied.prompt || plan.objective,
     guidelines: supplied.guidelines || 'Preserve the public interface. Use general improvements; do not infer or special-case hidden evaluation answers.',
-    plan, files, models: { ...structuredClone(D.models), ...supplied.models }, budget: { ...D.budget, ...supplied.budget },
+    plan, files, models: { ...structuredClone(D.models), ...supplied.models }, budget: budgetDefaults(supplied.budget),
     integration: { strategy: 'direct', repo_path: repo, worktree_path: worktree, branch: `experiment/${request.name}-${identity.slice(0, 8)}`,
       trunk_branch: trunk, base_commit: base, commit_message: `Apply accepted experiment ${request.name}`, mapping, files: scope,
       checks: request.checks, prepare: request.prepare || [], budget: { ...D.integration_budget } } };

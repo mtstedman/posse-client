@@ -1,3 +1,4 @@
+import { EXPERIMENT_BUDGET_SETTINGS } from './experiment-budget.js';
 import { APPROVAL_POLICY_SETTINGS, FLOW_GROUP_SETTINGS } from "./approval-policies.js";
 import { NODE_PACKAGE_MANAGER_OPTIONS } from "./node-package-managers.js";
 // @ts-check
@@ -43,6 +44,7 @@ export function buildModelSelectionSettings() {
 export const MODEL_SELECTION_SETTINGS = Object.freeze(buildModelSelectionSettings());
 
 export const SETTING_DEFINITIONS = [
+  ...EXPERIMENT_BUDGET_SETTINGS,
   { key: "node_package_manager", default: "npm", options: NODE_PACKAGE_MANAGER_OPTIONS, label: "Node package manager", description: "Required package manager for new Node projects: npm, pnpm, yarn, or bun. Installer requests cannot override it. Existing packageManager declarations and lockfiles take precedence. Also used for planning and verification commands." },
   ...FLOW_GROUP_SETTINGS,
   ...APPROVAL_POLICY_SETTINGS,

@@ -1,3 +1,4 @@
+import { EXPERIMENT_BUDGET_DEFAULTS } from './experiment-budget.js';
 import { EXPERIMENT_RUNNER_ROLES, EXPERIMENT_NUMERIC_SCHEMA } from './experiments.js';
 
 export const EXPERIMENT_WORKSPACE_SCHEMA = 'posse.experiment.workspace.v1';
@@ -6,7 +7,7 @@ export const EXPERIMENT_WORKSPACE_ACTIONS = ['launch', 'status', 'progress', 'st
 export const EXPERIMENT_INIT_DEFAULTS = {
   images: { node: 'node:22-bookworm-slim', python: 'python:3.12-slim' },
   models: Object.fromEntries(EXPERIMENT_RUNNER_ROLES.map(role => [role, { model: 'standard', reasoning_effort: 'medium' }])),
-  budget: { model_calls: 100, wall_seconds: 3600, tokens: 1000000, spend_usd: 25 },
+  budget: EXPERIMENT_BUDGET_DEFAULTS,
   integration_budget: { model_calls: 0, tokens: 0, spend_usd: 0, wall_seconds: 600 },
 };
 export function experimentInitContract() {

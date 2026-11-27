@@ -1,5 +1,11 @@
 import { experimentSetupSchema } from "../../../catalog/experiment-runner.js";
-export { experimentSetupContract } from "../../../catalog/experiment-runner.js";
+import { experimentSetupContract as catalogSetupContract } from "../../../catalog/experiment-runner.js";
+import { experimentBudget } from './budget.js';
+export function experimentSetupContract() {
+  const contract = catalogSetupContract();
+  contract.example.budget = experimentBudget();
+  return contract;
+}
 import { validateExperimentPlan } from "./plan.js";
 import { experimentDigest, snapshotFiles } from "./snapshots.js";
 import { validateToolArguments } from "../../../shared/tools/functions/schema-validation.js";

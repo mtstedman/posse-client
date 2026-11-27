@@ -1,3 +1,4 @@
+import { experimentBudget } from './budget.js';
 import { runCorpusCli } from "./corpus-cli.js";
 import { experimentInitContract, EXPERIMENT_WORKSPACE_ACTIONS } from "../../../catalog/experiment-workspace.js";
 import { initializeExperiment } from "./workspace-init.js";
@@ -16,7 +17,7 @@ export async function runExperimentCli(argv = [], { input = process.stdin, print
   }
   if (["help", "--help", "-h"].includes(action)) { print(EXPERIMENT_USAGE); return 0; }
   let result;
-  if (action === "init-schema") result = experimentInitContract();
+  if (action === "init-schema") { result = structuredClone(experimentInitContract()); result.defaults.budget = experimentBudget(); }
   else if (action === "schema") result = experimentPlanningRequest(EXPERIMENT_OPERATIONS.SCHEMA);
   else if (action === "setup-schema") result = experimentSetupContract();
   else if (action === "list") result = await request(EXPERIMENT_OPERATIONS.LIST, {});
