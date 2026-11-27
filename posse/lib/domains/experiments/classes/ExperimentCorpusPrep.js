@@ -11,6 +11,7 @@ import { viewImageWithinScope } from '../../../shared/tools/functions/toolkit/vi
 import { asMcpContentResult } from '../../../shared/tools/functions/mcp-content-result.js';
 import { downloadCorpusInput } from '../functions/corpus-download.js';
 import { downloadCorpusBatch } from '../functions/corpus-batch-download.js';
+import { inspectCorpusJson, corpusDownloadHistory } from '../functions/corpus-prep-data.js';
 import { corpusHash } from '../functions/corpus-archive.js';
 
 // Prep owns its small tool loop. The model never gets a shell, host file tools,
@@ -73,6 +74,12 @@ export class ExperimentCorpusPrep {
       return { id: snapshot.id, revision: snapshot.revision, contract: snapshot.contract };
     }
     if (call.name === 'inputs') { const files = await this.inventory(); return { total: files.length, files: files.slice(args.offset || 0, (args.offset || 0) + 100) }; }
+    if (call.name === 'downloads') return corpusDownloadHistory(path.dirname(this.runDirectory), this.record.corpus_id, args);
+    if (call.name === 'inspect_json') {
+      if (!!args.path === !!args.id) throw new Error('Inspection requires either path or resource ID.');
+      const resource = args.path ? await this.inputFile(args.path) : await this.store.resource(args.id);
+      return { label: args.path || resource.label, sha256: corpusHash(resource.bytes), ...inspectCorpusJson(resource.bytes, args) };
+    }
     if (call.name === 'corpus') {
       const corpus = await this.store.inspect(this.identity), offset = args.offset || 0;
       return { id: corpus.id, revision: corpus.revision, ready: corpus.ready, total: corpus.entries.length, entries: corpus.entries.slice(offset, offset + (args.limit || 10)) };

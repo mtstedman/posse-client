@@ -150,6 +150,12 @@ failed items need retrying. Each success retains full provenance; hash archives
 are shared and staging is purged, including on cancellation. Single and batch
 downloads share the same byte budget and public-HTTPS checks. Downloaded metadata
 remains evidence; inferred answer keys still require verification.
+`downloads` retrieves paginated receipts from current and prior prep runs for the
+same corpus, with optional label/URL search. `inspect_json` projects requested
+field paths from an archived JSON resource or input file into a bounded table;
+array indexes and pagination avoid sending large API responses through the model.
+For example, `{id, array_path:["data"], fields:{name:["name"],image:["image_uris","large"]}}`
+reads just the selected columns. Truncated cells are explicitly marked.
 Defaults are standard/medium, 100 calls,
 1,000,000 tokens, $25 and one hour. It uses bounded context with working notes and
 an operation ledger; usage and download provenance are saved in its report.
