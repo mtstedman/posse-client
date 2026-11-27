@@ -1,13 +1,19 @@
+import { EXPERIMENT_LATENCY_METRIC as LATENCY, EXPERIMENT_LATENCY_DEFINITION } from '../../../catalog/experiment-measurement.js';
+import { hasLatencyMeasurement } from './evaluation.js';
+
 export function corpusCaseReport(evaluation, observations, { campaignID, runID }) {
   const fields = evaluation.contract.fields.map(field => field.id);
+  const timed = hasLatencyMeasurement(evaluation);
   const byID = new Map(observations.map(item => [item.case_id, item]));
   return { campaign_id: campaignID, run_id: runID, corpus_id: evaluation.corpus_id, corpus_revision: evaluation.corpus_revision,
-    columns: ['label', 'tags', 'score', ...fields, 'resources', 'case_id'],
+    ...(timed ? { measurement: EXPERIMENT_LATENCY_DEFINITION } : {}),
+    columns: ['label', 'tags', 'score', ...fields, ...(timed ? [LATENCY] : []), 'resources', 'case_id'],
     rows: evaluation.cases.map(item => {
       const observation = byID.get(item.id);
       if (!observation?.detail) throw new Error('Missing verified case details.');
+      if (timed && (!Number.isFinite(observation.values?.[LATENCY]) || observation.values[LATENCY] < 0)) throw new Error('Missing verified case latency.');
       return [String(item.label || 'Unlabeled case').slice(0, 240), (item.tags || []).slice(0, 16).map(tag => tag.slice(0, 64)),
-        observation.detail.score, ...fields.map(field => observation.detail.values[field] ?? null), item.resource_labels || {}, item.id];
+        observation.detail.score, ...fields.map(field => observation.detail.values[field] ?? null), ...(timed ? [observation.values[LATENCY]] : []), item.resource_labels || {}, item.id];
     }) };
 }
 export function corpusCaseSummary(report) {

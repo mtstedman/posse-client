@@ -9,6 +9,8 @@ import { validCorpusFilename } from '../functions/corpus-inputs.js';
 import { packCorpusResource, unpackCorpusResource, corpusHash as hash } from '../functions/corpus-archive.js';
 import { experimentDigest } from '../functions/snapshots.js';
 import { validateCorpusContract, scoreCorpusAnswer } from '../functions/corpus-scoring.js';
+import { validateCorpusMeasurements } from '../functions/evaluation.js';
+import { EXPERIMENT_LATENCY_METRIC as LATENCY } from '../../../catalog/experiment-measurement.js';
 
 const name = value => typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(value);
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -294,13 +296,14 @@ export class ExperimentCorpora {
     const snapshot = await this.load(args), p = this.paths(args.experiment, args.corpus);
     if (!snapshot.entries.length) throw new Error('Corpus has no test cases.');
     const cases = [], resources = {}, scorers = Object.fromEntries(metrics.map(metric => [metric.id, metric.id]));
-    const known = new Set(['score', ...snapshot.contract.fields.map(field => field.id)]);
-    if (metrics.some(metric => !known.has(metric.id))) throw new Error('Corpus metric IDs must be score or a declared scoring field.');
+    validateCorpusMeasurements(snapshot.contract, metrics);
+    const known = new Set(['score', LATENCY, ...snapshot.contract.fields.map(field => field.id)]);
+    if (metrics.some(metric => !known.has(metric.id))) throw new Error('Corpus metric IDs must be score, latency_ms or a declared scoring field.');
     for (const entry of snapshot.entries) {
       const { item, key } = await this.records(p, entry);
       if (key.status !== 'verified') throw new Error('Corpus contains draft answer keys; verify or remove those cases before running.');
       const scored = scoreCorpusAnswer(snapshot.contract, key.expected, {});
-      if (metrics.some(metric => metric.id !== 'score' && !Object.hasOwn(scored.values, metric.id))) throw new Error('Every selected field metric needs answer coverage in every case; use a narrower corpus or the composite score.');
+      if (metrics.some(metric => metric.id !== 'score' && metric.id !== LATENCY && !Object.hasOwn(scored.values, metric.id))) throw new Error('Every selected field metric needs answer coverage in every case; use a narrower corpus or the composite score.');
       for (const binding of Object.values(item.resources)) {
         if (resources[binding.resource_id]) continue;
         const resource = await this.resource(binding.resource_id);

@@ -5,6 +5,7 @@ export function campaignReport(c) {
   return {
     schema: EXPERIMENT_CAMPAIGN_REPORT_SCHEMA, campaign_id: c.id, max_iterations: c.plan.max_iterations, provisional: !!c.active_run || !c.starting_baseline.metrics,
     state: c.state, revision: c.revision, acceptance_mode: c.plan.acceptance?.mode || "human",
+    ...(c.starting_baseline.failure_reason ? { baseline_failure_reason: c.starting_baseline.failure_reason } : {}),
     objective: c.plan.objective,
     active_run: c.active_run ? { id: c.active_run.id, baseline: c.active_run.baseline,
       percent_complete: c.active_run.progress?.percent_complete ?? null, measurements_stale: c.active_run.progress?.measurements_stale ?? false,
@@ -17,6 +18,7 @@ export function campaignReport(c) {
       const live = c.active_run && !c.active_run.baseline && row.status === "running" ? c.active_run.progress : null;
       return { number: row.number, status: row.status, snapshot_digest: row.snapshot_digest,
         decision: row.decision?.value ?? (row.status === "completed" ? "pending" : "none"), iteration_passed: row.assessment?.iteration_passed ?? null, goal_reached: row.assessment?.goal_reached ?? null,
+        ...(row.assessment?.tradeoff ? { acceptance_reason: row.assessment.reason, tradeoff: row.assessment.tradeoff } : {}),
         percent_complete: live?.percent_complete ?? (row.status === "completed" ? 100 : null),
         values: Object.fromEntries(c.plan.metrics.map(metric => [metric.id, row.metrics?.[metric.id] ?? live?.metrics.find(item => item.id === metric.id)?.current ?? null])) };
     }),

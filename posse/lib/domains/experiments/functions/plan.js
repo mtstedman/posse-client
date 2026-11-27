@@ -52,6 +52,18 @@ export function validateExperimentPlan(plan) {
     if (!plan.metrics.some(metric => metric.role === "goal")) add("/metrics", I.MISSING_GOAL, "At least one required goal is needed.");
     if (plan.acceptance?.mode === "automatic" && (!plan.metrics.some(metric => metric.id === plan.acceptance.primary_metric && metric.role === "goal") || !Number.isFinite(plan.acceptance.min_improvement))) add("/acceptance", I.METRIC_TARGET, "Automatic acceptance requires a primary goal metric and finite minimum improvement.");
     if (plan.acceptance?.mode === "human" && Object.keys(plan.acceptance).length !== 1) add("/acceptance", I.SCHEMA, "Human acceptance only declares its mode.");
+    if (plan.acceptance?.tradeoff) {
+      const tradeoff = plan.acceptance.tradeoff;
+      const goals = new Set(plan.metrics.filter(metric => metric.role === "goal").map(metric => metric.id));
+      const included = new Set();
+      for (const [index, metric] of tradeoff.metrics.entries()) {
+        if (!goals.has(metric.id) || included.has(metric.id)) add(`/acceptance/tradeoff/metrics/${index}/id`, I.METRIC_TARGET, "Tradeoffs must reference unique goal metrics, never guardrails or tracking metrics.");
+        included.add(metric.id);
+        if (![metric.weight, metric.max_regression].every(Number.isFinite)) add(`/acceptance/tradeoff/metrics/${index}`, I.METRIC_TARGET, "Tradeoff weights and regression limits must be finite.");
+      }
+      if ([...goals].some(id => !included.has(id))) add("/acceptance/tradeoff/metrics", I.METRIC_TARGET, "Every goal metric must be included in the tradeoff.");
+      if (!Number.isFinite(tradeoff.min_gain)) add("/acceptance/tradeoff/min_gain", I.METRIC_TARGET, "Minimum tradeoff gain must be finite.");
+    }
     if ((plan.baseline.mode === "import") !== !!plan.baseline.reference) add("/baseline", I.BASELINE_REFERENCE, "Imported baselines require a reference; capture mode must not supply one.");
     if (plan.progress.stale_after_seconds < plan.progress.interval_seconds * 2) add("/progress", I.STALE_INTERVAL, "Stale threshold must be at least two progress intervals.");
     const dependencies = new Set();

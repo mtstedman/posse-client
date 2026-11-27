@@ -37,14 +37,26 @@ not consume the active wall budget.
 
 **Passing an iteration is different from meeting the goal.** A completed,
 independently scored improvement can pass and be accepted below the goal.
-Automatic acceptance requires the configured primary metric's minimum gain,
-no goal-metric regressions, and all guardrails. Human acceptance pauses the
+Automatic acceptance normally requires the configured primary metric's minimum
+gain, no goal-metric regressions, and all guardrails. Human acceptance pauses the
 runner until a decision; guardrail violations cannot be promoted. Acceptance
 atomically advances the experiment's file snapshot and current baseline.
 Rejection preserves the prior accepted files. The starting baseline never
 changes. Acceptance alone does not change the source repository. An optional
 integration configuration can verify the accepted source, commit it, and merge
 it into the main worktree, as described below.
+
+For an explicit quality/speed tradeoff, automatic acceptance can include
+`tradeoff:{metrics:[{id,weight,normalization,max_regression}],min_gain}`. Include
+every goal exactly once. `normalization` is `absolute` (metric units) or
+`relative` (fraction of the positive starting value). Weighted gain must be
+positive and reach `min_gain`; this replaces the primary minimum. Regression
+caps and relative scales stay anchored to the starting baseline, so successive
+small sacrifices cannot accumulate beyond the approved limit. Guardrails and
+goal targets still apply. Reports retain each metric's contribution and cap check.
+For example, quality with weight 1 and an absolute 0.01 loss cap, plus latency
+with weight 0.05 and a relative 0.10 loss cap, requires more than 20% faster
+execution to compensate for one percentage point of quality loss.
 
 The owner captures a baseline once and reserves each iteration durably before
 execution. A staged or failed candidate consumes its iteration. Accepted goals
@@ -225,6 +237,16 @@ manifests remain outside the sandbox. Temporary expanded files are removed after
 success, failure, cancellation or owner recovery; archives remain reusable.
 Custom programs such as an emulator still require their experiment-specific
 adapter and a suitable pinned runtime image.
+
+Corpus experiments can also declare the reserved `latency_ms` metric with unit
+`ms`, direction `lower`, and aggregation `mean` or `p95`. The owner measures from
+admitting one input to receiving its matching prediction, then admits the next
+input. Payloads must respond and flush per line; they must not wait for stdin
+to close. Timing includes transport, scheduling and input processing, plus
+startup on the first case. It is runtime-specific elapsed time, not a claim
+about physical-device latency. Candidate-supplied timing is not accepted, and
+the corpus cannot define an answer field named `latency_ms`. Timing is retained
+in case results and included in execution evidence.
 
 `posse experiment case-results <prepared-directory>` saves a labeled component
 score table to `case-results.json`. `status` includes the weakest cases and tag

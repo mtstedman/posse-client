@@ -11,6 +11,8 @@ export const EXPERIMENT_OPERATIONS = Object.freeze({ SCHEMA: "experiment.schema"
 export const EXPERIMENT_OBJECTS = Object.freeze({ CAMPAIGNS: "experiment_campaigns", SNAPSHOTS: "experiment_snapshots", REQUESTS: "experiment_requests", RUNNERS: "experiment_runners", INTEGRATIONS: "experiment_integrations", CASE_RESULTS: "experiment_case_results" });
 export const EXPERIMENT_STATES = Object.freeze({ BASELINE: "baseline_required", READY: "ready", STAGED: "staged", RUNNING: "running", REVIEW: "awaiting_decision", GOAL: "goal_met", EXHAUSTED: "iterations_exhausted", BLOCKED: "blocked", CANCELLED: "cancelled" });
 export const EXPERIMENT_ACCEPTANCE_MODES = Object.freeze(["human", "automatic"]);
+export const EXPERIMENT_TRADEOFF_NORMALIZATIONS = Object.freeze(["absolute", "relative"]);
+export const EXPERIMENT_TRADEOFF_LIMIT = 1e12;
 export const EXPERIMENT_DECISIONS = Object.freeze(["accept", "reject"]);
 export const EXPERIMENT_CAMPAIGN_REPORT_SCHEMA = "posse.experiment.report.v2";
 export const EXPERIMENT_NUMERIC_SCHEMA = "posse.experiment.numeric.v1";
@@ -77,7 +79,16 @@ export const EXPERIMENT_PLAN_JSON_SCHEMA = object({
   }, ["id", "unit", "role", "direction", "aggregation"]) },
   resources: object({ wall_seconds: count(86400), memory_mb: count(65536), cpu_count: count(32), max_output_bytes: count(10485760) }),
   progress: object({ interval_seconds: count(60), stale_after_seconds: count(300) }),
-  acceptance: object({ mode: { enum: EXPERIMENT_ACCEPTANCE_MODES }, primary_metric: text(64), min_improvement: { type: "number", minimum: 0 } }, ["mode"]),
+  acceptance: object({ mode: { enum: EXPERIMENT_ACCEPTANCE_MODES }, primary_metric: text(64), min_improvement: { type: "number", minimum: 0 },
+    tradeoff: { ...object({
+      metrics: { type: "array", minItems: 1, maxItems: EXPERIMENT_LIMITS.metrics, items: object({
+        id: text(64), weight: { type: "number", exclusiveMinimum: 0, maximum: EXPERIMENT_TRADEOFF_LIMIT },
+        normalization: { enum: EXPERIMENT_TRADEOFF_NORMALIZATIONS },
+        max_regression: { type: "number", minimum: 0, maximum: EXPERIMENT_TRADEOFF_LIMIT },
+      }) },
+      min_gain: { type: "number", minimum: 0, maximum: EXPERIMENT_TRADEOFF_LIMIT },
+    }), description: "Automatic acceptance only. Replaces the primary minimum with strictly positive weighted gain versus the accepted baseline. Include every goal exactly once. Relative changes and regression caps use the positive starting baseline; absolute changes use metric units. Caps limit total loss from the starting baseline. Guardrails and goal targets still apply." },
+  }, ["mode"]),
 }, ["schema", "objective", "hypothesis", "max_iterations", "evaluation", "baseline", "runtime", "files", "entrypoint", "metrics", "resources", "progress"]);
 
 export function experimentPlanExample() {

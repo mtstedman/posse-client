@@ -1,4 +1,5 @@
 import { validateCorpusInterface } from './corpus-contract.js';
+import { EXPERIMENT_LATENCY_METRIC } from '../../../catalog/experiment-measurement.js';
 import { EXPERIMENT_CORPUS_FIELD_KINDS as K, EXPERIMENT_CORPUS_LIMITS as L } from '../../../catalog/experiment-corpus.js';
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -13,7 +14,7 @@ export function validateCorpusContract(contract) {
   if (Buffer.byteLength(JSON.stringify(contract)) > 16000) throw new Error('Corpus contract exceeds 16 KiB.');
   const seen = new Set();
   for (const field of contract.fields) {
-    if (!object(field) || !identifier(field.id) || field.id === 'score' || seen.has(field.id) || !K.includes(field.kind) || !finite(field.weight) || field.weight <= 0 || field.weight > 1000000
+    if (!object(field) || !identifier(field.id) || field.id === 'score' || field.id === EXPERIMENT_LATENCY_METRIC || seen.has(field.id) || !K.includes(field.kind) || !finite(field.weight) || field.weight <= 0 || field.weight > 1000000
       || !Array.isArray(field.path) || !field.path.length || field.path.length > 8 || field.path.some(p => typeof p !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(p))) throw new Error('Invalid scoring field.');
     const allowed = ['id', 'path', 'kind', 'weight', 'depends_on', 'tolerance', 'partial_range', 'iou_threshold', 'attributes'];
     if (Object.keys(field).some(k => !allowed.includes(k))) throw new Error('Unknown scoring option.');

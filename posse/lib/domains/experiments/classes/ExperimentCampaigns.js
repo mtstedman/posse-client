@@ -90,11 +90,15 @@ export class ExperimentCampaigns {
       if (run.baseline) {
         c.starting_baseline = { ...c.starting_baseline, metrics, evidence_digest, run_id: runID };
         c.current_baseline = structuredClone(c.starting_baseline);
-        c.state = assessExperimentImprovement(c.plan, metrics, metrics).goal_reached ? S.GOAL : S.READY;
+        const assessment = assessExperimentImprovement(c.plan, metrics, metrics);
+        if (assessment.tradeoff?.valid === false) {
+          c.starting_baseline.failure_reason = assessment.reason;
+          c.state = S.BLOCKED;
+        } else c.state = assessment.goal_reached ? S.GOAL : S.READY;
       } else {
         const row = c.iterations.at(-1);
         row.status = "completed"; row.metrics = metrics; row.evidence_digest = evidence_digest; row.run_id = runID;
-        row.assessment = assessExperimentImprovement(c.plan, c.current_baseline.metrics, metrics);
+        row.assessment = assessExperimentImprovement(c.plan, c.current_baseline.metrics, metrics, c.starting_baseline.metrics);
         c.state = S.REVIEW;
         if (c.plan.acceptance?.mode === "automatic") this.applyDecision(c, row.assessment.iteration_passed ? "accept" : "reject", "automatic", row.assessment.reason);
       }

@@ -2,6 +2,7 @@ import path from 'node:path';
 import { EXPERIMENT_CORPUS_EVALUATION_SCHEMA } from '../../../catalog/experiment-corpus.js';
 import { validateCorpusContract, scoreCorpusAnswer } from './corpus-scoring.js';
 import { validResourceBinding } from './corpus-inputs.js';
+import { EXPERIMENT_LATENCY_METRIC as LATENCY } from '../../../catalog/experiment-measurement.js';
 import { experimentDigest } from "./snapshots.js";
 import { EXPERIMENT_NUMERIC_SCHEMA, EXPERIMENT_NUMERIC_SCORERS, EXPERIMENT_SANDBOX_LIMITS as L } from "../../../catalog/experiments.js";
 
@@ -22,13 +23,14 @@ export function validateNumericEvaluation(plan, evaluation) {
   return evaluation;
 }
 
-export function scorePrediction(evaluation, message) {
+export function scorePrediction(evaluation, message, measurements = {}) {
   if (evaluation?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA) {
     if (!message || Object.keys(message).length !== 2 || !message.prediction || typeof message.prediction !== "object" || Array.isArray(message.prediction)) throw new Error("Invalid structured prediction.");
     const item = evaluation.cases.find(row => row.id === message.case_id);
     if (!item) throw new Error("Unknown evaluation case.");
     const result = scoreCorpusAnswer(evaluation.contract, item.expected, message.prediction);
-    return { case_id: item.id, detail: result, values: Object.fromEntries(Object.entries(evaluation.scorers).map(([id, field]) => [id, field === "score" ? result.score : result.values[field]])) };
+    if (hasLatencyMeasurement(evaluation) && (!Number.isFinite(measurements[LATENCY]) || measurements[LATENCY] < 0)) throw new Error('Missing finite owner latency measurement.');
+    return { case_id: item.id, detail: result, values: Object.fromEntries(Object.entries(evaluation.scorers).map(([id, field]) => [id, field === LATENCY ? measurements[LATENCY] : field === "score" ? result.score : result.values[field]])) };
   }
   if (!message || Object.keys(message).length !== 2 || !Object.hasOwn(message, "case_id") || !Object.hasOwn(message, "prediction") || !Number.isFinite(message.prediction)) throw new Error("Invalid prediction message.");
   const item = evaluation.cases.find(row => row.id === message.case_id);
@@ -40,18 +42,29 @@ export function scorePrediction(evaluation, message) {
   return { case_id: item.id, values };
 }
 
+export function hasLatencyMeasurement(evaluation) {
+  return evaluation?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA && Object.values(evaluation.scorers || {}).includes(LATENCY);
+}
+
+export function validateCorpusMeasurements(contract, metrics) {
+  if (contract.fields.some(field => field.id === LATENCY)) throw new Error('latency_ms is reserved for owner measurements, not scoring fields.');
+  for (const metric of metrics) if (metric.id === LATENCY && (metric.direction !== 'lower' || metric.unit !== 'ms' || !['mean', 'p95'].includes(metric.aggregation))) throw new Error('latency_ms requires lower direction, ms units and mean or p95 aggregation.');
+}
+
 function validateCorpusEvaluation(plan, evaluation) {
   if (experimentDigest(evaluation) !== plan.evaluation.digest || !Array.isArray(evaluation.cases) || !evaluation.cases.length || evaluation.cases.length > L.cases
     || Buffer.byteLength(JSON.stringify(evaluation)) > L.evaluationBytes || !evaluation.resources || typeof evaluation.resources !== 'object') throw new Error('Invalid corpus evaluation identity or size.');
   validateCorpusContract(evaluation.contract);
-  const fields = new Set(['score', ...evaluation.contract.fields.map(field => field.id)]);
+  validateCorpusMeasurements(evaluation.contract, plan.metrics);
+  const fields = new Set(['score', LATENCY, ...evaluation.contract.fields.map(field => field.id)]);
   if (!evaluation.scorers || Object.keys(evaluation.scorers).length !== plan.metrics.length || plan.metrics.some(metric => !Object.hasOwn(evaluation.scorers, metric.id) || !fields.has(evaluation.scorers[metric.id]))) throw new Error('Corpus scorers must cover the declared metrics.');
+  if (plan.metrics.some(metric => (metric.id === LATENCY) !== (evaluation.scorers[metric.id] === LATENCY))) throw new Error('Owner latency requires the reserved latency_ms metric and scorer.');
   const ids = new Set();
   for (const item of evaluation.cases) {
     if (!/^[a-f0-9]{64}$/.test(item.id || '') || ids.has(item.id) || !Object.hasOwn(item, 'input') || !item.resources || typeof item.resources !== 'object' || Array.isArray(item.resources) || !Object.keys(item.resources).length) throw new Error('Invalid corpus case.');
     ids.add(item.id);
     const scored = scoreCorpusAnswer(evaluation.contract, item.expected, {});
-    for (const field of Object.values(evaluation.scorers)) if (field !== 'score' && !Object.hasOwn(scored.values, field)) throw new Error('Missing answer coverage for a selected metric.');
+    for (const field of Object.values(evaluation.scorers)) if (field !== 'score' && field !== LATENCY && !Object.hasOwn(scored.values, field)) throw new Error('Missing answer coverage for a selected metric.');
     for (const [alias, binding] of Object.entries(item.resources)) {
       if (!/^[a-z][a-z0-9_]{0,63}$/.test(alias) || !validResourceBinding(binding)) throw new Error('Invalid resource binding.');
       const resource = evaluation.resources[binding.resource_id];
