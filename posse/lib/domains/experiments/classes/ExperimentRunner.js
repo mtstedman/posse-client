@@ -134,7 +134,7 @@ export class ExperimentRunner {
       const remaining = EXPERIMENT_SOURCE_LIMITS.lookupTurns - lookups;
       const tools = remaining ? [...finalTools, readTool, searchTool, batchTool, ...resourceTools, ...skillTools] : finalTools;
       const call = await this.toolDecision(record, role, [{ role: "user", content: JSON.stringify({ ...context,
-        source_lookups_remaining: remaining, notes, ...(preview ? { retained_preview: preview } : {}), ...(skillContext.length ? { skills: skillContext } : {}),
+        source_lookups_remaining: remaining, notes, ...skillSession?.context(), ...(preview ? { retained_preview: preview } : {}), ...(skillContext.length ? { skills: skillContext } : {}),
         ...(remaining > 0 && remaining <= EXPERIMENT_SOURCE_LIMITS.lookupNudgeRemaining ? { source_nudge:
           `Only ${remaining} source lookup turn${remaining === 1 ? " remains" : "s remain"}. Identify the exact remaining uncertainty and batch final independent reads. ${role === "writer"
             ? "Converge on a supported patch, or decline with the concrete missing evidence; never invent source."
@@ -154,6 +154,7 @@ export class ExperimentRunner {
       const keepPreview = view => {
         result = view.result;
         if (view.images?.length) {
+          if (call.name !== 'image.transform') skillSession?.releasePreview();
           result = { ...result, image_preview: true };
           images = view.images;
           preview = { tool: call.name, source: call.arguments.source || { case_index: call.arguments.case_index, alias: call.arguments.alias },
@@ -329,10 +330,9 @@ export class ExperimentRunner {
       const context = { ...(skills.length ? { skills } : {}), objective: c.plan.objective, acceptance: c.plan.acceptance || { mode: "human" },
         corpus: this.service.evaluations[c.plan.evaluation.ref]?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA
           ? { id: this.service.evaluations[c.plan.evaluation.ref].corpus_id, revision: this.service.evaluations[c.plan.evaluation.ref].corpus_revision, requirements: this.service.evaluations[c.plan.evaluation.ref].contract.interface?.requirements || [] } : undefined,
-        findings: agentFindings(c), decision_tables: decisionTables(c, 3), ...sourceContext, ...sourcePacket(reads, {}, sourceBudget), source_lookups_remaining: remaining, notes,
+        ...skillSession?.context(), findings: agentFindings(c), decision_tables: decisionTables(c, 3), ...sourceContext, ...sourcePacket(reads, {}, sourceBudget), source_lookups_remaining: remaining, notes,
         next: `${remaining ? "Use prefetched anchors first. Search/read only unresolved details." : "Source lookup allowance is exhausted. Delegate deeper source discovery to the editor."} Prefer test.propose_batch with 3–5 ranked, independent briefs (at most the remaining iterations), each with a concise general hypothesis, expected metric tradeoff, and optional digest-checked file targets. test.prepare remains available for a single supported idea. Do not write code or a diff. The deterministic harness dispatches editing, review and measurement.` };
       const call = await this.toolDecision(record, "idea", [{ role: "user", content: JSON.stringify(context) }], tools, signal, images);
-      images = [];
       if ([prepareTool.name, proposalsTool.name].includes(call.name)) {
         const proposals = call.name === proposalsTool.name ? call.arguments.proposals : [call.arguments];
         // Validate the entire batch before persisting any part of it.
@@ -344,7 +344,10 @@ export class ExperimentRunner {
       }
       try {
         let result;
-        if (skillTools.some(tool => tool.name === call.name)) ({ result, images } = await skillSession.execute(call, signal));
+        if (skillTools.some(tool => tool.name === call.name)) {
+          const viewed = await skillSession.execute(call, signal); result = viewed.result;
+          if (viewed.images.length) { images = viewed.images; result = { ...result, image_preview: true }; }
+        }
         else if (call.name === EXPERIMENT_CORPUS_CASES_TOOL.name) {
           const evaluation = this.service.evaluations[c.plan.evaluation.ref];
           if (evaluation?.schema !== EXPERIMENT_CORPUS_EVALUATION_SCHEMA) throw Error('This experiment has no corpus resources.');
@@ -357,6 +360,8 @@ export class ExperimentRunner {
           result = await this.lookup(record, call, files, null, signal, reads);
           rememberSourceRead(reads, { tool: call.name, request: call.arguments, ...result });
         } else result = await this.execute(record, call, signal);
+        if (skillTools.some(tool => tool.name === call.name) || call.name === EXPERIMENT_CORPUS_CASES_TOOL.name)
+          rememberSourceRead(reads, { tool: call.name, request: call.arguments, ...result });
         previous = { action: call.name, arguments: call.arguments, result };
       }
       catch (error) {

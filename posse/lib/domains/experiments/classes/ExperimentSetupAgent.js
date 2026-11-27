@@ -28,7 +28,7 @@ export class ExperimentSetupAgent {
     }
     this.evaluation = await this.corpora.evaluation(corpus, [{ id: 'score', role: 'goal', direction: 'higher', aggregation: 'mean', unit: 'score' }]);
     this.selected = corpus;
-    this.skillSession?.clear(); this.skillSession = experimentSkillSession(this.record.skills, this.evaluation, 'setup');
+    this.skillSession?.clear(); this.images = []; this.skillSession = experimentSkillSession(this.record.skills, this.evaluation, 'setup');
     return { ready: true, ...publicCorpusContract(this.evaluation) };
   }
   async execute(call, signal) {
@@ -43,7 +43,7 @@ export class ExperimentSetupAgent {
       return { attached: this.record.skills, tools: experimentSkillTools(this.record.skills, 'setup').map(tool => tool.name) };
     }
     if (experimentSkillTools(this.record.skills, 'setup').some(tool => tool.name === call.name)) {
-      const viewed = await this.skillSession.execute(call, signal); this.images = viewed.images; return viewed.result;
+      const viewed = await this.skillSession.execute(call, signal); if (viewed.images.length) this.images = viewed.images; return viewed.result;
     }
     if (call.name === 'setup.install_deps') {
       if (this.request.image) throw new Error('The request pins an existing runtime image. Omit request.image in a new setup request to provision dependencies.');
@@ -96,7 +96,9 @@ export class ExperimentSetupAgent {
     if (call.name === 'test.corpus_cases' || call.name === 'test.inspect_resource') {
       if (!this.evaluation) throw new Error('Select a ready corpus first.');
       if (call.name === 'test.corpus_cases') return corpusInspectionCases(this.evaluation, args);
-      const viewed = await inspectCorpusResource(this.evaluation, args, { signal }); this.images = viewed.images; return viewed.result;
+      const viewed = await inspectCorpusResource(this.evaluation, args, { signal });
+      if (viewed.images.length) { this.skillSession?.releasePreview(); this.images = viewed.images; }
+      return viewed.result;
     }
     if (call.name === 'setup.blocked') { this.record.state = args.needs_inputs ? S.INPUTS : S.BLOCKED; this.record.error = args.reason; return { state: this.record.state }; }
     if (call.name === 'setup.submit' || call.name === 'setup.reuse') {
@@ -148,7 +150,7 @@ export class ExperimentSetupAgent {
         const remaining = budget.model_calls - usage.model_calls;
         const tools = remaining === 1 ? TOOLS.filter(t => ['setup.submit', 'setup.reuse', 'setup.blocked'].includes(t.name)) : [...TOOLS, ...experimentSkillTools(record.skills, 'setup')];
         const context = { objective: request.objective, base_commit: record.base_commit, inventory, anchors: prefetched.overview, unavailable_prefetch: prefetched.unavailable,
-          available_skills: experimentSkillInventory(record.skills), skills: experimentSkillContext(record.skills, 'setup'),
+          ...this.skillSession?.context(), available_skills: experimentSkillInventory(record.skills), skills: experimentSkillContext(record.skills, 'setup'),
           available_artifacts: artifacts, corpus_options: options, selected_corpus: this.evaluation ? publicCorpusContract(this.evaluation) : null,
           candidate_check_contract: 'Optional setup.candidate_checks runs fixed commands inside the prepared isolated runtime before full-corpus measurement. Each check has program,args,cwd (work or work/subdir),timeout_seconds (1..120),when_nonempty (declared payload paths; run if any has content, or always for []). Maximum eight checks and 300 total seconds. Include needed tests/support in the payload. Configure focused existing unit tests when available; failed checks return bounded diagnostics to the writer for repair. This is separate from host integration checks.',
           payload_api: EXPERIMENT_CORPUS_PAYLOAD_API, template_example: { setup: { plan: { objective: request.objective, entrypoint: 'work/adapter.mjs',
@@ -171,7 +173,7 @@ export class ExperimentSetupAgent {
           if (error.stats) this.jobs.charge(record, error.stats);
           throw new Error(dispatchFailureMessage(error));
         }
-        this.jobs.guard(signal); this.jobs.save(record); this.images = []; this.batchReceipt = null;
+        this.jobs.guard(signal); this.jobs.save(record); this.batchReceipt = null;
         const calls = decision.message?.tool_calls || [], call = calls[0], tool = tools.find(t => t.name === call?.name);
         try {
           if (calls.length !== 1 || !tool) throw new Error('Return exactly one valid setup tool request.');

@@ -10,7 +10,7 @@ const integer = (minimum, maximum) => ({ type: 'integer', minimum, maximum });
 const point = { type: 'array', minItems: 2, maxItems: 2, items: number(0, 32768) };
 const quad = { type: 'array', minItems: 4, maxItems: 4, items: point };
 export const IMAGE_TOOL_LIMITS = { inputBytes: 32 * 1024 * 1024, inputPixels: 16000000, outputPixels: 2000000, maxSide: 8192,
-  variants: 4, steps: 8, artifacts: 16, cacheBytes: 32 * 1024 * 1024, work: 120000000, previewSide: 768 };
+  variants: 4, steps: 8, inspections: 8, inspectionBytes: 4096, artifacts: 16, cacheBytes: 32 * 1024 * 1024, work: 120000000, previewSide: 768 };
 export const IMAGE_OPERATIONS = [
   { name: 'crop', description: 'Crop to a pixel rectangle in the current image.', parameters: object({ x: integer(0, 8191), y: integer(0, 8191), width: integer(1, 8192), height: integer(1, 8192) }) },
   { name: 'resize', description: 'Area-resample to explicit dimensions; preserve aspect ratio unless intentionally rectifying.', parameters: object({ width: integer(1, 8192), height: integer(1, 8192) }) },
@@ -28,10 +28,10 @@ export const IMAGE_OPERATIONS = [
 export const IMAGE_SOURCE_SCHEMA = { oneOf: [object({ case_index: integer(0, 999), alias: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,63}$' } }), object({ artifact: { type: 'string', pattern: '^[a-f0-9]{64}$' } })] };
 export const IMAGE_TOOLS = [
   { name: 'image.tools', description: 'Discover image operations and their parameter schemas. No pixel data or answers.', parameters: object({}) },
-  { name: 'image.transform', description: 'Step parameter schemas are included below; no discovery call is required. Compare up to four recipes from one original corpus image or a session artifact. Returns immutable artifact hashes, recipes, geometry and optional pixel previews; never rewrites corpus resources or scores.', parameters: object({ source: IMAGE_SOURCE_SCHEMA,
+  { name: 'image.transform', description: 'Step parameter schemas are included below; no discovery call is required. Compare up to four recipes from one original corpus image or a session artifact. Returns immutable artifact hashes, recipes, geometry and optional pixel previews; never rewrites corpus resources or scores.', parameters: object({ source: IMAGE_SOURCE_SCHEMA, notes: { type: 'string', maxLength: 2000, description: 'Carry forward concise visual findings before replacing a preview.' }, revisit_reason: { type: 'string', minLength: 20, maxLength: 240, description: 'Specific unresolved visual question requiring a previously inspected recipe whose pixels are no longer retained.' },
     variants: { type: 'array', minItems: 1, maxItems: IMAGE_TOOL_LIMITS.variants, items: object({ label: { type: 'string', minLength: 1, maxLength: 80 },
       steps: { type: 'array', minItems: 0, maxItems: IMAGE_TOOL_LIMITS.steps, items: { oneOf: IMAGE_OPERATIONS.map(operation => ({ ...operation.parameters, properties: { op: { const: operation.name }, ...operation.parameters.properties }, required: ['op', ...operation.parameters.required] })) } },
-      preview: { type: 'boolean' } }, ['label', 'steps']) } }) },
+      preview: { type: 'boolean' } }, ['label', 'steps']) } }, ['source', 'variants']) },
 ];
 export const EXPERIMENT_SKILL_SETUP_TOOLS = [
   { name: 'setup.skills', description: 'List built-in optional experiment skills and their attached state. Tool schemas and instructions load only after attachment.', parameters: object({}) },

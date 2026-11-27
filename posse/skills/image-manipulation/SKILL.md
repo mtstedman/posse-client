@@ -30,10 +30,17 @@ artifacts can be chained by hash within the current agent session. They are boun
 and expire with that session; originals remain immutable. Previews may be scaled
 for delivery; receipts retain full dimensions and a separate preview hash. Do not
 paste image bytes into notes; retain recipe parameters and the concrete finding.
-Record useful visual observations before requesting more source. Improvement
+Carry concise visual findings forward in the optional `notes` on each image call,
+especially before replacing a preview or switching images. Improvement
 agents retain only the latest successful preview batch through subsequent source
 reads and submission; a new preview replaces it. The context identifies that
-retained preview. It is not shared with other roles or later candidates.
+retained preview. A bounded `inspected_images` receipt list remembers completed recipes without
+retaining their pixels. Do not repeat a small image survey after every tool call;
+use those receipts and your notes, then propose or edit. Identical recipes are
+blocked even if their labels change. If an unresolved visual question requires an
+older image whose pixels are no longer attached, provide a specific
+`revisit_reason`; already attached previews remain blocked. Inspection history,
+notes and previews are not shared with other roles or later candidates.
 
 These tools help investigate. Their artifacts are not substituted into benchmark
 inputs and visual preference is not a score. To measure an improvement, implement

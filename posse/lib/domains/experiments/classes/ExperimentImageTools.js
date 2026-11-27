@@ -1,3 +1,4 @@
+import { experimentDigest } from '../functions/snapshots.js';
 import { imageSkillPreview } from '../functions/image-preview.js';
 import { createHash } from 'node:crypto';
 import { IMAGE_TOOLS, IMAGE_OPERATIONS, IMAGE_TOOL_LIMITS as L } from '../../../catalog/experiment-skills.js';
@@ -15,9 +16,14 @@ const dimensions = image => ({ width: image.width, height: image.height });
 export class ExperimentImageTools {
   constructor(evaluation, { decode = decodeSkillImage, load = readCorpusResource } = {}) {
     this.evaluation = evaluation; this.decode = decode; this.load = load;
-    this.artifacts = new Map(); this.bytes = 0;
+    this.artifacts = new Map(); this.bytes = 0; this.inspections = new Map(); this.previewDigest = null;
   }
-  clear() { this.artifacts.clear(); this.bytes = 0; }
+  clear() { this.artifacts.clear(); this.bytes = 0; this.inspections.clear(); this.previewDigest = null; }
+  releasePreview() { this.previewDigest = null; }
+  context() {
+    return this.inspections.size ? { retained_image_request: this.previewDigest, inspected_images: [...this.inspections.values()],
+      image_reuse_rule: 'These recipes already succeeded. Keep visual findings in notes before replacing a preview. Do not repeat inspection to reconstruct history; proceed to the supported edit/proposal. Revisit only for a specific unresolved visual question when those pixels are no longer retained.' } : {};
+  }
   async source(source, signal) {
     if (source.artifact) {
       const artifact = this.artifacts.get(source.artifact);
@@ -42,6 +48,13 @@ export class ExperimentImageTools {
     for (const variant of call.arguments.variants) for (const { op, ...args } of variant.steps) {
       const operation = IMAGE_OPERATIONS.find(item => item.name === op);
       if (!operation || !validateToolArguments({ name: op, parameters: operation.parameters }, args).ok) throw Error('Invalid image step parameters; use image.tools for the schema.');
+    }
+    const requestDigest = experimentDigest({ source: call.arguments.source,
+      variants: call.arguments.variants.map(variant => ({ steps: variant.steps, preview: variant.preview !== false })) });
+    const prior = this.inspections.get(requestDigest);
+    if (prior && (!call.arguments.revisit_reason || this.previewDigest === requestDigest)) {
+      return { result: { image_reuse: { blocked: true, request_digest: requestDigest,
+        reason: this.previewDigest === requestDigest ? 'This preview is already attached. Use it and proceed.' : 'This recipe was already inspected. Use saved notes, or supply a specific revisit_reason if its absent pixels are still needed.' } }, images: [] };
     }
     const source = await this.source(call.arguments.source, signal), decoded = await this.decode(source.bytes, signal);
     const budget = { remaining: L.work }, rows = [], images = [], pending = [];
@@ -75,6 +88,11 @@ export class ExperimentImageTools {
       }
       this.artifacts.set(item.id, item); this.bytes += item.bytes.length;
     }
+    this.inspections.delete(requestDigest);
+    this.inspections.set(requestDigest, { request_digest: requestDigest, source: source.root, previewed: images.length > 0,
+      variants: call.arguments.variants.map(variant => ({ label: variant.label, operations: variant.steps.map(step => step.op) })) });
+    while (this.inspections.size > L.inspections || Buffer.byteLength(JSON.stringify([...this.inspections.values()])) > L.inspectionBytes) this.inspections.delete(this.inspections.keys().next().value);
+    if (images.length) this.previewDigest = requestDigest;
     return { result: { suite: 'image-manipulation', version: 1, original: { sha256: source.id, decoder: decoded.decoder || 'provided', rgba_sha256: hash(decoded.data), ...dimensions(decoded) }, variants: rows, ephemeral: true }, images };
   }
 }

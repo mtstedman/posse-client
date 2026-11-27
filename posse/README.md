@@ -2983,8 +2983,13 @@ Resources are selected only by pinned corpus case and alias, or by an artifact
 from the same agent session. Derived PNGs are bounded, immutable and temporary;
 the latest successful preview batch stays available as image blocks through
 source reads and submission within that improvement role. A new preview replaces
-it and its prior preview receipt, freeing the source window; previews never
-accumulate across candidates or roles. Failed preview requests retain the last
+it and its detailed preview receipt, freeing the source window. A separate compact
+inspection history retains at most eight receipts within 4 KiB, without pixels.
+Image calls accept optional `notes` to carry findings forward. Identical recipes
+are blocked even if relabeled; a specific `revisit_reason` permits revisiting an
+older view only when its pixels are no longer retained. Setup and idea agents also
+retain the current preview through source reads. Previews and inspection history
+never accumulate across candidates or roles. Failed preview requests retain the last
 successful image and receipt. Text receipts hold
 recipes, geometry and hashes, never base64 or hidden answers. Tool use consumes
 the agent's existing lookup/call budget. These caller-owned tools grant no shell,
