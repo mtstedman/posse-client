@@ -2915,8 +2915,10 @@ Explicit bindings supplied when reusing an artifact replace its inherited role
 map. Changing diagnostic tool bindings alone reuses adapter/runtime validation.
 
 The packaged [image-manipulation skill](skills/image-manipulation/SKILL.md) provides
-short, role-local instructions plus `image.tools` and `image.transform`. Discover
-operation schemas once; transform up to four named recipes in one call. Operations
+short, role-local instructions plus `image.tools` and `image.transform`. Exact
+operation schemas are included in `image.transform`, so no discovery call is needed;
+`image.tools` can inspect runtime capabilities. Transform up to four named recipes
+in one call. Operations
 include crop, resize, grayscale, Gaussian blur, contrast normalization, fixed/Otsu
 and adaptive thresholds, inversion, morphology, Sobel edges, perspective correction
 and convex-quad masking. PNG decoding is built in; JPEG/WebP use the existing

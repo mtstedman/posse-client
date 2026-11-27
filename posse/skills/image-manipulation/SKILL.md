@@ -4,7 +4,9 @@ description: Inspect and compare deterministic image preprocessing when building
 ---
 
 This suite is attached to your specific role in this test, not to other agents.
-Use `image.tools` to discover operations and their exact parameter schemas. Use
+The `image.transform` tool already includes each operation and its exact parameter
+schema. Call `image.tools` only for runtime limits or decoder availability; do not
+spend repeated turns rediscovering parameters. Use
 `test.corpus_cases` to select a source by `case_index` and resource `alias`.
 `image.transform` accepts up to four named recipes in one call. Every recipe
 starts from the same source; steps within it run in order. An empty recipe previews
@@ -28,9 +30,14 @@ artifacts can be chained by hash within the current agent session. They are boun
 and expire with that session; originals remain immutable. Previews may be scaled
 for delivery; receipts retain full dimensions and a separate preview hash. Do not
 paste image bytes into notes; retain recipe parameters and the concrete finding.
+Pixel previews accompany the next decision only. Later decisions retain receipts
+and your notes, so record useful visual observations before requesting more source.
 
 These tools help investigate. Their artifacts are not substituted into benchmark
 inputs and visual preference is not a score. To measure an improvement, implement
-a general preprocessing change in the allowed production code and rerun the frozen
-suite. A backend test that replays frozen OCR cannot measure image-processing
+a general change in the allowed production code and submit it for review. The
+harness runs the frozen suite after approval; writers do not need an evaluation
+tool or proof of a score gain before submitting. A supported incremental candidate
+may leave difficult cases unresolved; do not require every final goal to be solved
+in one edit. A backend test that replays frozen OCR cannot measure image-processing
 improvements. Keep answer keys out of preprocessing and do not tune per-card rules.

@@ -28,9 +28,9 @@ export const IMAGE_OPERATIONS = [
 export const IMAGE_SOURCE_SCHEMA = { oneOf: [object({ case_index: integer(0, 999), alias: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,63}$' } }), object({ artifact: { type: 'string', pattern: '^[a-f0-9]{64}$' } })] };
 export const IMAGE_TOOLS = [
   { name: 'image.tools', description: 'Discover image operations and their parameter schemas. No pixel data or answers.', parameters: object({}) },
-  { name: 'image.transform', description: 'Use image.tools for exact step parameters. Compare up to four recipes from one original corpus image or a session artifact. Returns immutable artifact hashes, recipes, geometry and optional pixel previews; never rewrites corpus resources or scores.', parameters: object({ source: IMAGE_SOURCE_SCHEMA,
+  { name: 'image.transform', description: 'Step parameter schemas are included below; no discovery call is required. Compare up to four recipes from one original corpus image or a session artifact. Returns immutable artifact hashes, recipes, geometry and optional pixel previews; never rewrites corpus resources or scores.', parameters: object({ source: IMAGE_SOURCE_SCHEMA,
     variants: { type: 'array', minItems: 1, maxItems: IMAGE_TOOL_LIMITS.variants, items: object({ label: { type: 'string', minLength: 1, maxLength: 80 },
-      steps: { type: 'array', minItems: 0, maxItems: IMAGE_TOOL_LIMITS.steps, items: { type: 'object', required: ['op'], properties: { op: { enum: IMAGE_OPERATIONS.map(op => op.name) } }, additionalProperties: true } },
+      steps: { type: 'array', minItems: 0, maxItems: IMAGE_TOOL_LIMITS.steps, items: { oneOf: IMAGE_OPERATIONS.map(operation => ({ ...operation.parameters, properties: { op: { const: operation.name }, ...operation.parameters.properties }, required: ['op', ...operation.parameters.required] })) } },
       preview: { type: 'boolean' } }, ['label', 'steps']) } }) },
 ];
 export const EXPERIMENT_SKILL_SETUP_TOOLS = [
