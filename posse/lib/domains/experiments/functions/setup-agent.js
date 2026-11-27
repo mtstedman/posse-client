@@ -22,7 +22,7 @@ export async function setupTemplateFiles(template, source) {
 // all repository implementations are loaded from the frozen Git snapshot.
 export async function materializeSetupTemplate(template, { source, corpus, selected, objective }) {
   if (!template || Object.keys(template).some(k => !['setup', 'mapping', 'checks', 'prepare', 'image'].includes(k))
-    || !template.setup || Object.keys(template.setup).some(k => !['plan', 'files', 'prompt', 'guidelines', 'skills'].includes(k))) throw new Error('Submit an init template with setup, mapping, checks and optional prepare/image only.');
+    || !template.setup || Object.keys(template.setup).some(k => !['plan', 'files', 'prompt', 'guidelines', 'skills', 'candidate_checks'].includes(k))) throw new Error('Submit an init template with setup, mapping, checks and optional prepare/image only.');
   if (!template.setup.plan?.files?.length || !template.setup.plan.entrypoint || !template.setup.plan.metrics?.length) throw new Error('Template requires plan.files, entrypoint, metrics and integration checks.');
   const copy = structuredClone(template);
   const plan = { ...experimentPlanExample(), ...copy.setup.plan, objective };
@@ -46,7 +46,7 @@ export async function materializeSetupTemplate(template, { source, corpus, selec
   plan.evaluation = { ref: 'setup-validation', digest: experimentDigest(evaluation) };
   const setup = { schema: EXPERIMENT_SETUP_SCHEMA, prompt: copy.setup.prompt || objective,
     guidelines: copy.setup.guidelines || 'Preserve interfaces. Improve production algorithms generally; never infer or special-case evaluation answers.',
-    plan, files, ...(copy.setup.skills ? { skills: copy.setup.skills } : {}), models: structuredClone(D.models), budget: { ...D.budget },
+    plan, files, ...(copy.setup.skills ? { skills: copy.setup.skills } : {}), ...(copy.setup.candidate_checks ? { candidate_checks: copy.setup.candidate_checks } : {}), models: structuredClone(D.models), budget: { ...D.budget },
     integration: { strategy: 'direct', repo_path: source.repo, worktree_path: path.join(path.dirname(source.repo), 'posse-workbranch', path.basename(source.repo), 'setup-validation'),
       branch: 'experiment/setup-validation', trunk_branch: 'main', base_commit: source.base, commit_message: 'Apply accepted experiment', mapping,
       files: mapping.map(item => ({ path: item.target, mode: 'modify' })), checks: copy.checks, prepare: copy.prepare || [], budget: { ...D.integration_budget } } };

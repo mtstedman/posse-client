@@ -251,7 +251,36 @@ in case results and included in execution evidence.
 `posse experiment case-results <prepared-directory>` saves a labeled component
 score table to `case-results.json`. `status` includes the weakest cases and tag
 summaries. Raw `case-results` requests accept `{id,which}` with `latest`, `accepted`
-or `baseline`. Detailed answer keys are never included in optimizer context.
+or `baseline`. `latest` means the most recently completed measurement, including
+rejected candidates; staging, running or failing a new attempt does not replace
+that evidence with the original baseline. Live partial metrics remain in
+`progress` and `status.active_run`. Detailed answer keys are never included in
+optimizer context.
+
+Optional `setup.candidate_checks` runs fixed unit checks after independent review
+and before staging a full-corpus iteration. These commands execute inside the
+prepared, network-disabled sandbox with payload source and installed dependencies;
+corpus inputs and answer keys are not mounted. They are separate from repository
+integration checks. For example, with both files declared in the payload:
+
+```json
+{"candidate_checks":[{"program":"node","args":["--test","algorithm.test.mjs"],"cwd":"work","timeout_seconds":60,"when_nonempty":["work/algorithm.mjs","work/algorithm.test.mjs"]}]}
+```
+
+`cwd` must be `work` or a directory beneath it. Checks run when any listed
+`when_nonempty` file has content in the accepted or candidate snapshot; an empty
+list runs unconditionally. This skips unused creation slots without letting a
+candidate disable checks by deleting previously present code. Include all needed
+tests and support files in the payload. Up to eight checks may be declared, each
+with a timeout of at most 120 seconds and a combined timeout allowance of 300
+seconds. Output is bounded independently of model context.
+
+Failed checks return concise diagnostics and the existing candidate to its writer
+for at most two repair attempts, each independently reviewed and charged to the
+normal model budget. They do not consume a measured iteration. Identical source
+and check configurations reuse their recorded result. Pending validation keeps
+the owner's sandbox reservation until cleanup is confirmed, including recovery
+after an interrupted owner.
 
 ### Owner and Bossy corpus selection
 

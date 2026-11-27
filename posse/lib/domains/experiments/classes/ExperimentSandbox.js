@@ -50,7 +50,7 @@ export class ExperimentSandbox {
       if (entry.startsWith(`${name}-`)) await fs.rm(path.join(os.tmpdir(), entry), { recursive: true, force: true });
     }
   }
-  async run({ runId, plan, files, evaluation, signal, onObservation }) {
+  async run({ runId, plan, files, evaluation, signal, onObservation, onDiagnostic }) {
     const name = this.identity(runId);
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), `${name}-`));
     let failure = null; let result;
@@ -78,7 +78,7 @@ export class ExperimentSandbox {
         `--property=RuntimeMaxSec=${plan.resources.wall_seconds}`, "--property=TimeoutStopSec=5",
         `--property=ExecStopPost=/bin/sh -c '${docker} rm -f ${name} >/dev/null 2>&1'`, "--", docker, "start", "--attach", "--interactive", name],
       { env: environment(), stdio: ["pipe", "pipe", "pipe"] });
-      const { messages, observations } = await this.exchange(child, { runId, plan, evaluation, corpus, signal, onObservation });
+      const { messages, observations } = await this.exchange(child, { runId, plan, evaluation, corpus, signal, onObservation, onDiagnostic });
       result = { evidence_digest: experimentDigest({ evaluation: plan.evaluation.digest, image: this.images[plan.runtime.profile], files, messages,
         ...(hasLatencyMeasurement(evaluation) ? { protocol: EXPERIMENT_TIMED_CORPUS_PROTOCOL, observations } : {}) }) };
     } catch (error) { failure = error; }
@@ -89,7 +89,7 @@ export class ExperimentSandbox {
   }
   // The owner times the entire response boundary, including input transport and
   // first-case startup. The guest can never supply its own elapsed duration.
-  exchange(child, { runId, plan, evaluation, corpus, signal, onObservation }) {
+  exchange(child, { runId, plan, evaluation, corpus, signal, onObservation, onDiagnostic }) {
     const timed = hasLatencyMeasurement(evaluation), messages = [], observations = [];
     return new Promise((resolve, reject) => {
       let bytes = 0, buffer = '', error = null, pending = null, next = 0, advance = null, processing = false, closed = false, receivedAt;
@@ -147,7 +147,11 @@ export class ExperimentSandbox {
         } catch (err) { stop(err); }
         finally { processing = false; }
       });
-      child.stderr.on('data', chunk => { bytes += chunk.length; if (bytes > plan.resources.max_output_bytes) stop(new Error('Output limit exceeded.')); });
+      child.stderr.on('data', chunk => {
+        bytes += chunk.length;
+        if (bytes > plan.resources.max_output_bytes) stop(new Error('Output limit exceeded.'));
+        else if (onDiagnostic) { try { onDiagnostic(chunk); } catch (error) { stop(error); } }
+      });
       child.stdin.on('error', err => stop(err));
       child.on('error', err => { error ||= err; });
       child.on('close', code => {

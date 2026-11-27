@@ -191,11 +191,11 @@ export class ExperimentSetupService {
   async installDeps(record, recipe, source, signal) {
     this.guard(signal);
     recipe = mergeEnvironmentRecipe(record.runtime?.recipe, recipe);
-    if (this.installActive || this.smokeActive || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish first.');
+    if (this.installActive || this.smokeActive || this.service.runner?.hasPendingValidation() || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish first.');
     const inputs = await runtimeRecipe(recipe, source), attempt = experimentDigest({ recipe: inputs.recipe, files: inputs.files });
     this.guard(signal);
     if (record.install_failures?.[attempt]) throw new Error(`This unchanged dependency recipe already failed; no installation was repeated. Correct the recipe or report the blocker. Previous error: ${record.install_failures[attempt]}`);
-    if (this.installActive || this.smokeActive || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish first.');
+    if (this.installActive || this.smokeActive || this.service.runner?.hasPendingValidation() || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish first.');
     this.installActive = record.id;
     if (record.environment) { record.environment.state = 'building'; this.save(record); }
     try {
@@ -245,7 +245,7 @@ export class ExperimentSetupService {
     return this.validateSmoke(materialized, { image, sandbox: this.sandbox, signal,
       reserve: (id, images) => {
         this.guard(signal);
-        if (this.installActive || this.smokeActive || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish before adapter validation.');
+        if (this.installActive || this.smokeActive || this.service.runner?.hasPendingValidation() || this.service.active.size || this.service.campaigns.store.list(EXPERIMENT_OBJECTS.CAMPAIGNS).some(c => c.active_run)) throw new Error('Another owner sandbox run or dependency install must finish before adapter validation.');
         this.smokeActive = record.id; record.smoke = { id, images }; this.save(record);
       },
       release: unconfirmed => {

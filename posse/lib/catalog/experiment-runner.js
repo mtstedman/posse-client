@@ -1,4 +1,5 @@
 import { EXPERIMENT_SKILLS_SCHEMA } from './experiment-skills.js';
+import { EXPERIMENT_CANDIDATE_CHECKS_SCHEMA } from './experiment-candidate-checks.js';
 import { EXPERIMENT_BUDGET_SCHEMA } from './experiment-budget.js';
 import { EXPERIMENT_INIT_DEFAULTS } from './experiment-workspace.js';
 import { EXPERIMENT_SETUP_SCHEMA, EXPERIMENT_PLAN_JSON_SCHEMA, EXPERIMENT_RUNNER_ROLES, experimentPlanExample } from "./experiments.js";
@@ -22,6 +23,7 @@ export const experimentSetupSchema = object({
 });
 
 experimentSetupSchema.properties.skills = EXPERIMENT_SKILLS_SCHEMA;
+experimentSetupSchema.properties.candidate_checks = EXPERIMENT_CANDIDATE_CHECKS_SCHEMA;
 experimentSetupSchema.properties.integration = EXPERIMENT_INTEGRATION_SCHEMA;
 
 export function experimentSetupContract() {
