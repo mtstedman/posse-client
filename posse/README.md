@@ -414,8 +414,12 @@ remain supported for compatibility. The harness computes the diff deterministica
 Assessors receive that compact diff, local candidate context, and review constraints,
 then return a review decision. Writer and assessor do not receive unrelated
 accepted/rejected history. Truncated changes require further reading before approval.
-Writer and assessor each have at most eight lookup turns per preparation, including
+Writer and assessor each have at most twelve lookup turns per preparation, including
 resource inspection; a batch counts as one turn with at most eight operations.
+With three, two, and one lookup turns remaining, a concise nudge asks them to
+identify the exact remaining uncertainty, batch final independent reads, and
+converge on a supported patch or review decision, or state a concrete reason to
+decline or reject. The idea phase retains its four-turn lookup allowance.
 Afterward only final tools remain. The writer can use `test.decline_candidate`
 when evidence is insufficient, and the assessor can reject. No unsafe edit or
 approval is required to satisfy a limit. These unsuccessful preparations use the

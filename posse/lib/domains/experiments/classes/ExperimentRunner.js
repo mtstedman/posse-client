@@ -115,7 +115,12 @@ export class ExperimentRunner {
       const remaining = EXPERIMENT_SOURCE_LIMITS.lookupTurns - lookups;
       const tools = remaining ? [...finalTools, readTool, searchTool, batchTool, ...resourceTools] : finalTools;
       const call = await this.toolDecision(record, role, [{ role: "user", content: JSON.stringify({ ...context,
-        source_lookups_remaining: remaining, ...(!remaining ? { source_limit: role === "writer"
+        source_lookups_remaining: remaining,
+        ...(remaining > 0 && remaining <= EXPERIMENT_SOURCE_LIMITS.lookupNudgeRemaining ? { source_nudge:
+          `Only ${remaining} source lookup turn${remaining === 1 ? " remains" : "s remain"}. Identify the exact remaining uncertainty and batch final independent reads. ${role === "writer"
+            ? "Converge on a supported patch, or decline with the concrete missing evidence; never invent source."
+            : "Converge on a supported review decision, or reject with the concrete missing evidence."}` } : {}),
+        ...(!remaining ? { source_limit: role === "writer"
           ? "Lookup allowance exhausted. Submit only a supported edit, or use test.decline_candidate if source evidence is insufficient. Never invent missing source."
           : "Lookup allowance exhausted. Reject the candidate if source evidence is insufficient for a supported review." } : {}),
         ...sourcePacket(reads, batchReceipt ? { last_source_batch: batchReceipt } : {}) }) }], tools, signal, images);
