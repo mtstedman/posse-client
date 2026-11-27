@@ -190,6 +190,15 @@ export const PARKED_JOB_STATUSES = Object.freeze([
 ]);
 export const PARKED_JOB_STATUSES_SQL = sqlList(PARKED_JOB_STATUSES);
 
+// An implementation may be settled by its human review while still in
+// assessment or after it has parked on the operator.
+export const REVIEW_SETTLEMENT_ORIGINAL_JOB_STATUSES = readonlySet([
+  "waiting_on_human",
+  "waiting_on_review",
+  "blocked",
+  "awaiting_assessment",
+]);
+
 export const TERMINAL_JOB_STATUSES = Object.freeze([
   "succeeded",
   "failed",

@@ -1,6 +1,6 @@
 import { testCommandScriptPaths } from "./test-command-script-paths.js";
 import { NODE_PACKAGE_MANAGER_EXECUTABLES } from "../../../catalog/node-package-managers.js";
-import { MUTATING_TEST_FLAGS, INTERACTIVE_TEST_FLAGS } from "../../../catalog/test-command-policy.js";
+import { GO_OUTPUT_FLAGS, MUTATING_TEST_FLAGS, INTERACTIVE_TEST_FLAGS } from "../../../catalog/test-command-policy.js";
 import { declaredNodeTestCommand } from "../../../shared/tools/functions/toolkit/repository-test-runner.js";
 import { readRepositoryVerificationConfig } from "./verification-plan.js";
 import { interpreterTestRunner, resolveInterpreterTestCommand } from "./interpreter-test-runner.js";
@@ -128,7 +128,7 @@ export function validatePlannerTestCommand(command) {
     return { ok: false, reason: "test_command_contains_interactive_flag" };
   }
   const runnerSpecificMutatingFlags = executable === "go" || executable === "go.exe"
-    ? new Set(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"])
+    ? GO_OUTPUT_FLAGS
     : executable === "dotnet" || executable === "dotnet.exe"
       ? new Set(["-o"])
       : executable === "deno" || executable === "deno.exe"

@@ -1,16 +1,8 @@
 // @ts-check
 
+import { firstNonemptyLineWithoutAnsi as firstLine } from "../../format/functions/ansi.js";
 import { BINARY_NAMES, nativeBinaryEntry } from "../../../catalog/binary.js";
 import { nativeBinaries as defaultNativeBinaries } from "../../tools/classes/BinaryManager.js";
-
-function firstLine(value) {
-  return String(value || "")
-    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "")
-    .replace(/\r(?!\n)/gu, "\n")
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .find(Boolean) || "";
-}
 
 function resultMessage(result, packageName, dryRun) {
   const version = String(result?.version || "").trim();

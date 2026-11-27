@@ -3,6 +3,7 @@
 // Native ATLAS v2 memory handlers. These replace the original ATLAS-MCP memory
 // graph with a durable ATLAS memory store while keeping public action names stable.
 
+import { clampParsedInteger as clampInt } from "../../../../../shared/format/functions/parse-integer.js";
 import fs from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
@@ -1051,12 +1052,6 @@ function normalizePaths(values) {
 }
 
 
-
-function clampInt(value, min, max, fallback) {
-  const n = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
-}
 
 // Identity hash. Domain/lifespan are mutable policy (filter + tenure), not
 // identity, so the same knowledge re-derived with different domain tags still

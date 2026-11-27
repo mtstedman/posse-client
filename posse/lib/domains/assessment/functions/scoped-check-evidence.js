@@ -1,3 +1,4 @@
+import { currentHeadRef } from "../../verification/functions/receipt-fingerprint.js";
 import { lineageChangedTestPaths } from "../../worker/functions/helpers/test-execution-receipt.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import crypto from "node:crypto";
@@ -45,14 +46,6 @@ function artifactJson(artifact) {
 async function currentCommit(cwd) {
   try {
     return normalizedCommit(await gitExecAsync(["rev-parse", "HEAD"], cwd));
-  } catch {
-    return null;
-  }
-}
-
-async function currentHeadRef(cwd) {
-  try {
-    return String(await gitExecAsync(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd) || "").trim() || null;
   } catch {
     return null;
   }

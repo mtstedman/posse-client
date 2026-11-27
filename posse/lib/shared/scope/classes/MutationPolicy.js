@@ -1,3 +1,4 @@
+import { GO_OUTPUT_FLAGS } from "../../../catalog/test-command-policy.js";
 import { Scope } from "./Scope.js";
 import { validateScopedPath } from "../functions/validation.js";
 import fs from "fs";
@@ -35,7 +36,6 @@ const BLOCKED_INLINE_SCRIPT_WRITE = /\b(?:node\s+-e|python3?\s+-c)\b[\s\S]*(?:wr
 // (`-uo x`) that its output/command flag guards below do not catch.
 const READONLY_BASH_ALLOWLIST = /^\s*(cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|ls(?:\s|$)|find(?:\s|$)|wc(?:\s|$)|file(?:\s|$)|du(?:\s|$)|diff(?:\s|$)|grep(?:\s|$)|rg(?:\s|$)|cut(?:\s|$)|tr(?:\s|$)|uniq(?:\s|$)|echo(?:\s|$)|pwd\s*$|whoami\s*$)/i;
 const FIND_MUTATING_FLAGS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]);
-const GO_OUTPUT_FLAGS = new Set(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"]);
 const CARGO_OUTPUT_FLAGS = new Set(["--target-dir", "--out-dir"]);
 const DOTNET_OUTPUT_FLAGS = new Set(["-o", "--output"]);
 const TSC_OUTPUT_FLAGS = new Set(["--outdir", "--outfile", "--tsbuildinfofile"]);

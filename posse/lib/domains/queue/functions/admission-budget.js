@@ -1,7 +1,7 @@
 import { logEvent } from "./events.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { randomUUID } from "node:crypto";
-import { BUDGET_PAUSED, BUDGET_STATES as S, BUDGET_REASONS as R } from "../../../catalog/admission-budget.js";
+import { BUDGET_PAUSED, BUDGET_STATE_ACTIONS, BUDGET_STATES as S, BUDGET_REASONS as R } from "../../../catalog/admission-budget.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { runImmediateTransaction } from "./common.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
@@ -140,7 +140,7 @@ export function configureAdmissionBudget(id, { limitUsd = null, reservationUsd =
   });
 }
 export function changeBudgetState(id, action) {
-  if (!["pause", "resume", "disable"].includes(action)) throw new Error("Expected pause, resume or disable");
+  if (!BUDGET_STATE_ACTIONS.includes(action)) throw new Error("Expected pause, resume or disable");
   const db = getDb();
   const result = runImmediateTransaction(db, () => {
     reconcileDead(id, db);

@@ -1,3 +1,4 @@
+import { AGENT_COORDINATION_MODE_VALUES } from "../../../catalog/setting-policy.js";
 import { pruneTestHandoff } from "../../verification/functions/test-capability.js";
 import { pruneBlockedFileRequirements } from "../../runtime/functions/blocked-file-requirements.js";
 // Handoff context builder + deterministic context enrichment.
@@ -883,7 +884,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting, reviewe
     throw new Error("final-review child identity does not match its parent call");
   }
   packet.agent_coordination = {
-    mode: ["off", "handoff", "subagents"].includes(coordinationMode) ? coordinationMode : "off",
+    mode: AGENT_COORDINATION_MODE_VALUES.includes(coordinationMode) ? coordinationMode : "off",
     agent_handoff_v1: handoffEnabled,
     agent_handoff_compact_v1: handoffEnabled,
     agent_handoff_compact_v2: handoffEnabled,

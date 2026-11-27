@@ -246,6 +246,7 @@ export function agentFindings(c, role = "coordinator") {
 }
 
 export function rememberSourceRead(history, entry) {
+  if (entry.source_reuse) history.reuse = { path: entry.path, version: entry.version, start_line: entry.start_line, ...entry.source_reuse };
   // Deduplication must use the bytes the next decision can actually see, not
   // the larger raw read that sourcePacket would otherwise trim afterwards.
   const bounded = value => value.tool === "test.read" && typeof value.content === "string" ? sourcePacket({ entries: [value], omitted: 0 }).requested_source[0] : value;
@@ -253,18 +254,20 @@ export function rememberSourceRead(history, entry) {
   history.entries = history.entries.map(bounded);
   const key = value => JSON.stringify([value.tool, value.request, value.request_omitted ? value.batch_index : null]);
   let retained = entry;
-  history.entries = history.entries.filter(value => {
+  history.entries = history.entries.flatMap(value => {
     const sameSource = retained.tool === "test.read" && value.tool === "test.read" && retained.sha256 && value.sha256 === retained.sha256 && value.path === retained.path && value.version === retained.version;
     if (sameSource) {
       const covers = (outer, inner) => outer.start_line <= inner.start_line && inner.start_line <= outer.start_line + outer.content.split("\n").length - 1
         && outer.content.split("\n").slice(inner.start_line - outer.start_line).join("\n").startsWith(inner.content);
-      if (covers(value, retained)) { retained = value; return false; }
-      if (covers(retained, value)) return false;
-      // Partial overlap does not imply replacement. Keep both useful tails;
-      // the shared byte window explicitly reports any actual eviction.
-      return true;
+      if (covers(value, retained)) { retained = value; return []; }
+      if (covers(retained, value)) return [];
+      // Keep the older uncovered tails, not a second copy of overlapping lines.
+      // A partial last line cannot subtract the complete line in another read.
+      const lines = retained.content.split('\n');
+      if (retained.partial_line) lines.pop();
+      return lines.length ? uncoveredSource(value, [{ ...retained, content: lines.join('\n') }]) : [value];
     }
-    return key(value) !== key(entry);
+    return key(value) !== key(entry) ? [value] : [];
   });
   history.entries.push(retained);
   history.fresh = Math.min(history.entries.length, (history.fresh || 0) + 1);
@@ -272,6 +275,20 @@ export function rememberSourceRead(history, entry) {
 }
 
 export function sourcePacket(history, extra = {}, maxBytes = L.contextBytes) {
+  if (history.reuse) extra = { ...extra, source_reuse: history.reuse };
+  if (history.pinned?.length) {
+    const pins = history.pinned;
+    // Reserve a small, complete edit anchor within the existing byte cap. Other
+    // source is still bounded, and overlapping lines appear only once.
+    const entries = history.entries.flatMap(entry => uncoveredSource(entry, pins));
+    const rest = { entries, omitted: history.omitted, fresh: Math.min(history.fresh || 0, entries.length) };
+    const reserve = Buffer.byteLength(JSON.stringify(pins)) + 64;
+    const packet = sourcePacket(rest, extra, maxBytes - reserve);
+    packet.requested_source = [...pins, ...packet.requested_source];
+    history.entries = packet.requested_source; history.omitted = rest.omitted; history.fresh = 0;
+    if (Buffer.byteLength(JSON.stringify(packet)) > maxBytes) throw new Error("Pinned source exceeds its byte budget.");
+    return packet;
+  }
   if (Buffer.byteLength(JSON.stringify(extra)) > maxBytes / 4) extra = { metadata_truncated: true,
     last_source_batch: (extra.last_source_batch || []).slice(0, L.batchItems).map((item, index) => ({ index, action: brief(item.action, 32), ok: !!item.ok,
       ...(item.error ? { error: "Error details omitted to fit source budget." } : {}) })) };
@@ -312,6 +329,29 @@ export function sourcePacket(history, extra = {}, maxBytes = L.contextBytes) {
   return packet;
 }
 
+function uncoveredSource(entry, pins) {
+  if (entry.tool !== 'test.read' || typeof entry.content !== 'string') return [entry];
+  const matching = pins.filter(pin => pin.path === entry.path && pin.version === entry.version && pin.sha256 === entry.sha256);
+  if (!matching.length) return [entry];
+  const lines = entry.content.split('\n'), segments = []; let start = null;
+  for (let i = 0; i <= lines.length; i++) {
+    const covered = i === lines.length || matching.some(pin => {
+      const offset = entry.start_line + i - pin.start_line;
+      return offset >= 0 && offset < pin.content.split('\n').length && pin.content.split('\n')[offset] === lines[i];
+    });
+    if (!covered && start === null) start = i;
+    if (covered && start !== null) {
+      const content = lines.slice(start, i).join('\n'), end = entry.start_line + i - 1;
+      segments.push({ ...entry, start_line: entry.start_line + start, end_line: end, content,
+        content_bytes: Buffer.byteLength(content), returned_bytes: Buffer.byteLength(content),
+        partial_line: !!entry.partial_line && i === lines.length,
+        next_line: entry.partial_line && i === lines.length ? end : end < entry.total_lines ? end + 1 : null });
+      start = null;
+    }
+  }
+  return segments;
+}
+
 export function prefetchSource(plan, files, targets, overview, version = "accepted") {
   const selected = targets.length ? targets : overview.files.filter(file => file.mode !== "read" && file.anchors.length).slice(0, 3)
     .map(file => ({ path: file.path, start_line: file.anchors[0][2], line_count: Math.max(20, file.anchors[0][3]) }));
@@ -330,6 +370,13 @@ export function prefetchSource(plan, files, targets, overview, version = "accept
   // Prefetch gets at most half the source window, leaving room for requested
   // reads. Exact source remains available through the scoped test.read tool.
   sourcePacket(history, {}, L.contextBytes / 2);
+  const pinned = [];
+  for (const target of targets) {
+    const request = { path: target.path, version, start_line: target.start_line, line_count: Math.min(200, target.line_count) };
+    const entry = { tool: 'test.read', request, version, ...fileExcerpt(files, request, L.pinnedBytes), prefetched: true, pinned: true };
+    if (!entry.truncated && Buffer.byteLength(JSON.stringify([...pinned, entry])) <= L.pinnedBytes) pinned.push(entry);
+  }
+  if (pinned.length) history.pinned = pinned;
   return history;
 }
 
@@ -341,6 +388,8 @@ export function lookupDiagnostic(role, used, limit, call, result) {
       start_line: item.arguments.start_line, line_count: item.arguments.line_count,
       end_line: value?.result?.end_line, next_line: value?.result?.next_line, partial_line: value?.result?.partial_line,
       truncated: value?.result?.truncated ?? value?.truncated ?? false,
+      ...(value?.result?.source_reuse ? { source_reuse: { blocked: value.result.source_reuse.blocked,
+        reused_lines: value.result.source_reuse.reused_lines, read_ranges: value.result.source_reuse.read_ranges } } : {}),
       ...(value?.error ? { error: brief(value.error, 160) } : {}) };
   });
   const diagnostic = { role, turns_used: used, turns_remaining: limit - used, limit, action: call.name, operations: calls.length, pending: result === undefined, items, omitted: 0 };

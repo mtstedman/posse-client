@@ -1,3 +1,4 @@
+import { shortJobTitle } from "../../../../shared/policies/functions/role-utils.js";
 import { DEAD_LETTER_RECOVERY_PROVIDERS } from "../../../../catalog/provider.js";
 // lib/domains/worker/functions/helpers/dead-letter.js
 //
@@ -109,14 +110,6 @@ function emitRecoveryCapReached(worker, job, suppression) {
       max_recoveries: MAX_DEAD_LETTER_RECOVERY_RETRIES,
     }),
   });
-}
-
-function shortJobTitle(job) {
-  const title = String(job?.title || "");
-  if (/^improvement\s*:/i.test(title)) {
-    return title.replace(/^improvement\s*:\s*/i, "[I] ");
-  }
-  return title;
 }
 
 function buildAttemptSummary(jobId) {

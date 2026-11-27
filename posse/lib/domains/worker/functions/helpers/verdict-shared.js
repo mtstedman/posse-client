@@ -1,3 +1,4 @@
+import { mergeUniquePaths } from "../../../assessment/functions/assessment-scope.js";
 import { compactTestFailureOutput, testReceiptDiagnosticPaths } from "./test-receipt-evidence.js";
 // lib/domains/worker/functions/helpers/verdict-shared.js
 //
@@ -5,7 +6,7 @@ import { compactTestFailureOutput, testReceiptDiagnosticPaths } from "./test-rec
 
 import path from "path";
 import { INFERRED_SCOPE_BARE_EXTENSIONS } from "../../../../catalog/files.js";
-import { RECEIPT_CONFIDENCE_POLICY, REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID, UNESTABLISHED_COVERAGE_STATUSES, TEST_REQUIRED_FILE_MISSING_REASON } from "../../../../catalog/verification.js";
+import { EXECUTED_VERIFICATION_STATUSES, RECEIPT_CONFIDENCE_POLICY, REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID, UNESTABLISHED_COVERAGE_STATUSES, TEST_REQUIRED_FILE_MISSING_REASON } from "../../../../catalog/verification.js";
 import { inferGeneratedArtifactDeletionTargets } from "../../../../shared/scope/classes/MutationPolicy.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import { getAgentCalls, countFailedJobs, getAttempts, getDependents, getEventsByWorkItem, getJob, getWorkItem, listJobsByWorkItem, logEvent, runInTransaction, updateJobPayload, updateJobStatus, updateWorkItemMetadata } from "../../../queue/functions/index.js";
@@ -512,7 +513,7 @@ function latestCanonicalVerification(jobId, assessedCommitHash) {
     for (const row of rows) {
       let detail;
       try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
-      if (detail?.source !== "setting" || !["passed", "failed", "timed_out"].includes(detail?.status)) continue;
+      if (detail?.source !== "setting" || !EXECUTED_VERIFICATION_STATUSES.has(detail?.status)) continue;
       if (detail?.verification_eligible !== true) continue;
       const assessedCommit = String(detail?.assessed_commit_hash || "").trim().toLowerCase();
       if (assessedCommit !== requiredCommit) continue;
@@ -1239,10 +1240,6 @@ function _mergeFixEditableScope(existingFiles = [], createFiles = []) {
   ].filter(Boolean))];
 }
 
-function _mergeUniquePaths(...groups) {
-  return [...new Set(groups.flat().filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))];
-}
-
 function _normalizeFixTitle(title = "") {
   const raw = String(title || "").trim().replace(/^(fix:\s*)+/i, "");
   return raw ? `Fix: ${raw}` : "Fix";
@@ -1354,7 +1351,7 @@ function _buildStructuredDataArtifactFixPlan(job, {
       files_to_modify: [],
       files_to_create: outputFiles,
       files_to_delete: [],
-      create_roots: _mergeUniquePaths([artifactRoot], originalCreateRoots),
+      create_roots: mergeUniquePaths([artifactRoot], originalCreateRoots),
       success_criteria: Array.isArray(originalSuccessCriteria) ? originalSuccessCriteria : [],
       _planner_set_files: true,
     },
@@ -1477,7 +1474,7 @@ function _sanitizeScopedFixPaths(paths = [], label = "path") {
     const err = validateScopedPath(raw, `${label}[${i}]`);
     if (!err) kept.push(String(raw).replace(/\\/g, "/"));
   }
-  return _mergeUniquePaths(kept);
+  return mergeUniquePaths(kept);
 }
 
 
@@ -1611,8 +1608,8 @@ export function _extractScopedPathsFromInstructions(text = "") {
   }
 
   return {
-    files_to_modify: _mergeUniquePaths(files_to_modify),
-    files_to_create: _mergeUniquePaths(files_to_create),
+    files_to_modify: mergeUniquePaths(files_to_modify),
+    files_to_create: mergeUniquePaths(files_to_create),
     create_roots: _parentDirs(files_to_create),
   };
 }
@@ -1751,7 +1748,7 @@ export {
   _logBadInput as logBadInput,
   _looksLikeStructuredDataRepoTransformRecovery as looksLikeStructuredDataRepoTransformRecovery,
   _mergeFixEditableScope as mergeFixEditableScope,
-  _mergeUniquePaths as mergeUniquePaths,
+  mergeUniquePaths as mergeUniquePaths,
   _normalizeFixTitle as normalizeFixTitle,
   _parentDirs as parentDirs,
   _queueInternalAssessmentRetry as queueInternalAssessmentRetry,

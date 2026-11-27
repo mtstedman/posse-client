@@ -1,6 +1,7 @@
 // lib/domains/git/functions/workflow-auto-merge.js
 // End-of-run auto-merge orchestration.
 
+import { OPEN_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import {
   activeWorkItemDispositionGates,
   authorizeWorkItemAutoMerge,
@@ -24,16 +25,6 @@ import { mergeFailureDiagnostics } from "./merge-failure-diagnostics.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE } from "../../../catalog/human-input.js";
 import { gitExecSafeAsync } from "./utils.js";
-
-const AUTO_MERGE_STATUS_RECONCILE_STATUSES = [
-  "queued",
-  "planning",
-  "planned",
-  "running",
-  "blocked",
-  "waiting_on_human",
-  "waiting_on_review",
-];
 
 // Merge results carry a message, or at least a reason code; never print "undefined".
 function mergeResultText(result, fallback) {
@@ -115,7 +106,7 @@ export function createAutoMergeWorkflowHelpers(context, {
     runGc = true,
     mergeLockAlreadyHeld = false,
   } = {}) {
-    refreshWorkItemStatuses(AUTO_MERGE_STATUS_RECONCILE_STATUSES);
+    refreshWorkItemStatuses(OPEN_WORK_ITEM_STATUSES);
     const mergeable = listEndOfRunMergeableWorkItems();
 
     const say = (message) => {

@@ -1,3 +1,4 @@
+import { clampParsedInteger as clampInt } from "../../../format/functions/parse-integer.js";
 import fs from "fs";
 import path from "path";
 import { TOOL_BRIEF_DEFAULT_EXTENSIONS } from "../../../../catalog/files.js";
@@ -28,12 +29,6 @@ const STOP_WORDS = new Set([
   "token", "file", "files", "code", "repo", "project", "endpoint", "flow",
 ]);
 
-
-function clampInt(value, min, max, fallback) {
-  const parsed = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(min, Math.min(max, parsed));
-}
 
 function normalizePath(value) {
   return String(value || "").replace(/\\/g, "/").trim();

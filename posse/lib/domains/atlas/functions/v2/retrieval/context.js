@@ -2,6 +2,7 @@
 //
 // context and agent.feedback handlers.
 
+import { clampParsedInteger as clampInt } from "../../../../../shared/format/functions/parse-integer.js";
 import { sliceBuild } from "./slice.js";
 import { memoryGet } from "./memory.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
@@ -842,10 +843,4 @@ function nextBestActionFor({ params, cards, memories }) {
   if (params.taskType === "review") return "review.risk";
   if (cards.length > 0) return "code.skeleton";
   return "memory.get";
-}
-
-function clampInt(value, min, max, fallback) {
-  const n = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
 }

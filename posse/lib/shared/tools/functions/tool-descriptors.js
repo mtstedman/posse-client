@@ -518,7 +518,7 @@ function atlasRoleAllowlistForTool(toolName) {
   return new Set(roles);
 }
 
-function capabilityFlagsFor(access) {
+export function capabilityFlagsFor(access) {
   return Object.freeze({
     read: access === "read",
     write: access === "write",

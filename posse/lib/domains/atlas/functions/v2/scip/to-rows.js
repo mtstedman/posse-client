@@ -23,6 +23,7 @@ import {
   descriptorsToQualifiedName,
   externalDisplayName,
   isStructuralScipDefinition,
+  lastDescriptorName,
 } from "./symbol-parser.js";
 import { scipConfidence } from "./confidence.js";
 import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
@@ -342,15 +343,6 @@ function kindGuess(parsed) {
     case "meta": return "var";
     default: return "var";
   }
-}
-
-/**
- * @param {ScipParsedSymbol} parsed
- * @returns {string}
- */
-function lastDescriptorName(parsed) {
-  const last = parsed.descriptors[parsed.descriptors.length - 1];
-  return last ? last.name : "";
 }
 
 /**

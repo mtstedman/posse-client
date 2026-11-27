@@ -1,3 +1,4 @@
+import { normalizeReadRange } from "../../../shared/tools/functions/chain-ledger.js";
 import { runLiveScopeHold } from "../../queue/functions/live-scope-hold.js";
 import { PLANNER_CLARIFICATION_TOOL, PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../catalog/tools/planner-clarification.js";
 import { requestPlannerClarification, runPlannerClarification } from "../../planning/functions/planner-clarification.js";
@@ -1215,16 +1216,10 @@ function attachEnvironmentTools() {
   }
 }
 
-function _normalizeReadRange(argVal, fallback) {
-  const n = Number.parseInt(String(argVal ?? ""), 10);
-  if (!Number.isFinite(n) || n <= 0) return fallback;
-  return n;
-}
-
 function _buildReadDedupeKey(args = {}) {
   const relPath = String(args.path || "").replace(/\\/g, "/");
-  const offset = _normalizeReadRange(args.offset, 1);
-  const limit = _normalizeReadRange(args.limit, 2000);
+  const offset = normalizeReadRange(args.offset, 1);
+  const limit = normalizeReadRange(args.limit, 2000);
   const structured = [
     args.maxBytes == null ? "" : `maxBytes=${args.maxBytes}`,
     args.search == null ? "" : `search=${args.search}`,

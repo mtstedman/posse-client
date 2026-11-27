@@ -27,6 +27,7 @@ export const TOOL_CUSTOM_TOOLS = Object.freeze({
     },
   },
 });
+export const SKILL_BINDING_KINDS = Object.freeze(["repository", "folder", "global", "run-only"]);
 export const AUTOMATION_RESOURCE_OPERATIONS = Object.freeze(["list", "read", "write"]);
 export const AUTOMATION_BUILTINS = Object.freeze({
   "files.list": { operation: "list", description: "List regular files in one approved resource", input: { type: "object", additionalProperties: false, required: ["resource"], properties: { resource: { type: "string" }, directory: { type: "string" }, extension: { type: "string" } } } },

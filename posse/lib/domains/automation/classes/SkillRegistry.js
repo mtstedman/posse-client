@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { AUTOMATION_BUILTINS } from "../../../catalog/custom-tools.js";
+import { AUTOMATION_BUILTINS, SKILL_BINDING_KINDS } from "../../../catalog/custom-tools.js";
 import { definitionDigest, demand, validateDefinition } from "../functions/policy.js";
 
 export class SkillRegistry {
@@ -11,7 +11,7 @@ export class SkillRegistry {
   entryID(definition) { const scope = definition.binding.kind === "repository" ? definition.binding.repo_id : definition.binding.kind === "folder" ? definition.binding.folder_path : ""; return `skill:${scope ? encodeURIComponent(scope) + "/" : ""}${this.identity(definition)}`; }
   draftKey(definition) { return JSON.stringify([definition.name, definition.binding.kind, definition.binding.repo_id || definition.binding.folder_path || ""]); }
   saveDraft(definition) {
-    demand(definition && /^[a-z][a-z0-9-]*$/.test(definition.name) && ["repository", "folder", "global", "run-only"].includes(definition.binding?.kind), "Invalid draft identity");
+    demand(definition && /^[a-z][a-z0-9-]*$/.test(definition.name) && SKILL_BINDING_KINDS.includes(definition.binding?.kind), "Invalid draft identity");
     demand(definition.binding.kind !== "repository" || definition.binding.repo_id, "Draft repository is required");
     demand(definition.binding.kind !== "folder" || typeof definition.binding.folder_path === "string" && path.isAbsolute(definition.binding.folder_path) && path.normalize(definition.binding.folder_path) === definition.binding.folder_path, "Draft folder root must be a clean absolute path");
     // A run-only draft may stay scoped to the repository it was written in.
@@ -28,7 +28,7 @@ export class SkillRegistry {
   reset(name, binding) { return this.saveDraft(instructionTemplate(name || "new-skill", binding)); }
   deleteDraft(name, binding) {
     demand(typeof name === "string" && name, "Draft name is required", "draft_invalid");
-    demand(binding && ["repository", "folder", "global", "run-only"].includes(binding.kind), "Invalid draft binding", "draft_invalid");
+    demand(binding && SKILL_BINDING_KINDS.includes(binding.kind), "Invalid draft binding", "draft_invalid");
     const key = this.draftKey({ name, binding });
     const removed = Boolean(this.store.get("drafts", key));
     this.store.remove("drafts", key);

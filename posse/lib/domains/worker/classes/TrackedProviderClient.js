@@ -1,3 +1,4 @@
+import { AGENT_COORDINATION_MODE_VALUES } from "../../../catalog/setting-policy.js";
 import { reserveBudget, attachBudgetCall, settleBudget, isBudgetPaused, budgetPauseError } from "../../queue/functions/admission-budget.js";
 import { BUDGET_PAUSED } from "../../../catalog/admission-budget.js";
 import { selectWebResearchProvider } from "../../web-research/functions/provider-selection.js";
@@ -59,14 +60,12 @@ import { selectFallbackProvider } from "../../providers/functions/delegation-rou
 import { buildResumeHandoff, composePromptRemoteAware } from "../../handoff/functions/index.js";
 import { bindAutoExpandedDevBriefEvidenceToAgentCall } from "../../handoff/functions/helpers/hash-ref-packet.js";
 import { getReplayMemoryStats, recordRecoveryCheckpoint, retainReplayOutput, retainReplayPrompt, retainReplayToolUses } from "../../observability/functions/recovery/job-replay.js";
-import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
 import { isAbortError, signalAbortError } from "../../runtime/functions/yield.js";
 import { recordMemorySample } from "../../../shared/telemetry/functions/memory.js";
 import {
   getSessionManager,
   resolveSessionRecycleModeForWorkItem,
 } from "../../session/functions/manager-singleton.js";
-import { isRecyclableLane } from "../../session/functions/keys.js";
 import {
   estimateTokensFromChars,
   resolveContextCompactionConfig,
@@ -83,12 +82,12 @@ import {
 } from "../../handoff/functions/agent-handoff.js";
 import { agentHandoffTerminator } from "../../handoff/classes/AgentHandoffTerminator.js";
 import {
-  getAgentHandoffToolSchemaForRole,
-} from "../../../catalog/native-tools.js";
-import { toolSchemaTelemetry } from "../../../shared/tools/functions/tool-schema-telemetry.js";
-import {
-  resolveAtlasResearcherSchemaDiet,
-} from "../../integrations/functions/deterministic-mcp/gate-settings.js";
+  agentGateSurfaceFingerprint,
+  agentHandoffToolSchemaTelemetry,
+  issuedAtlasAvailable,
+  isSessionReuseCandidate,
+  sessionContractFingerprint,
+} from "../functions/execution/provider-session-contract.js";
 import { AGENT_ACTIVITY_LIMITS } from "../../../catalog/event.js";
 import { AGENT_CALL_ROLE_LABELS, AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import { RESEARCH_CHILD_FALLBACK_MODEL_TIER } from "../../../catalog/planner-dispatch.js";
@@ -111,106 +110,16 @@ import {
   summarizeUsageSegments,
 } from "../../billing/functions/usage-segments.js";
 
-function agentHandoffToolSchemaTelemetry(
-  role,
-  compactCompletion = false,
-  compactV3 = false,
-  compactV4 = false,
-  requireResearcherCoverage = false,
-) {
-  const schema = getAgentHandoffToolSchemaForRole(role, {
-    compactCompletion,
-    compactV3,
-    compactV4,
-    requireResearcherCoverage,
-  });
-  return toolSchemaTelemetry(schema);
-}
+import {
+  buildAccountingStats,
+  completionAccountingFields,
+  contextPressureMetrics,
+  defaultResolveCallCostEstimate,
+  nonNegativeTokenCount,
+  resolveProviderAccounting,
+} from "../functions/execution/provider-call-accounting.js";
 
-function sortedUniqueStrings(value) {
-  return [...new Set(
-    (Array.isArray(value) ? value : [])
-      .map((entry) => String(entry || "").trim())
-      .filter(Boolean),
-  )].sort();
-}
-
-function agentGateSurfaceFingerprint(options = {}, providerName = "") {
-  const issued = options?._remoteIssuedPolicy;
-  if (issued?.valid !== true) return "unissued";
-  return crypto.createHash("sha256").update(JSON.stringify({
-    tools: sortedUniqueStrings(issued.toolAllowlist?.tools),
-    atlas: sortedUniqueStrings(issued.toolAllowlist?.atlas),
-    projectDbCapability: String(issued.projectDbCapability || "none"),
-    toolPolicy: {
-      allowRead: issued.toolPolicy?.allow_read === true,
-      allowWrite: issued.toolPolicy?.allow_write === true,
-      allowShell: issued.toolPolicy?.allow_shell === true,
-      allowTests: issued.toolPolicy?.allow_tests === true,
-      fallbackReads: Number(issued.toolPolicy?.fallback_reads) || 0,
-    },
-    coordination: {
-      agentHandoffV1: issued.coordination?.agentHandoffV1 === true,
-      agentHandoffCompactV1: issued.coordination?.agentHandoffCompactV1 === true,
-      agentHandoffCompactV2: issued.coordination?.agentHandoffCompactV2 === true,
-      agentHandoffCompactV3: issued.coordination?.agentHandoffCompactV3 === true,
-      subAgentV1: issued.coordination?.subAgentV1 === true,
-      subAgentNextInputV1: issued.coordination?.subAgentNextInputV1 === true,
-      dispatchAgentV1: issued.coordination?.dispatchAgentV1 === true,
-      researchInvestigationV1: issued.coordination?.researchInvestigationV1 === true,
-      webResearchHandoffV1: issued.coordination?.webResearchHandoffV1 === true,
-      finalReviewV1: issued.coordination?.finalReviewV1 === true,
-    },
-    researcherSchemaDiet: String(options?.role || "").trim().toLowerCase() === "researcher"
-      && resolveAtlasResearcherSchemaDiet(),
-  })).digest("hex");
-}
-
-function issuedAtlasAvailable(options = {}) {
-  if (options?._subAgentChild === true) return false;
-  const issued = options?._remoteIssuedPolicy;
-  if (issued?.valid === true) return (issued.toolAllowlist?.atlas || []).length > 0;
-  return options.disableAtlas !== true && options.atlasConfig?.enabled !== false;
-}
-
-export function sessionContractFingerprint(options = {}, providerName = "") {
-  const effective = narrowProviderOptionsToRemoteIssuance(options);
-  const coordination = effective?._remoteIssuedPolicy?.coordination || {};
-  const researcherReportOnly = String(effective.role || "").trim().toLowerCase() === "researcher"
-    && coordination.agentHandoffCompactV3 === true
-    && usesResearcherReportOnlyHandoff(
-      effective.promptProfile || effective.sessionPacket?.prompt_profile,
-    );
-  const schema = agentHandoffToolSchemaTelemetry(
-    effective.role,
-    coordination.agentHandoffCompactV1 === true,
-    coordination.agentHandoffCompactV3 === true,
-    researcherReportOnly,
-  );
-  const packet = effective.sessionPacket || {};
-  const remoteSystemPrompt = String(effective.remoteSystemPrompt || "");
-  const promptVersion = String(
-    packet?.remote_prompt_metadata?.prompt_version
-    || packet?.remote_prompt_response?.prompt_version
-    || packet?.posse_remote?.metadata?.prompt_version
-    || "",
-  );
-  return crypto.createHash("sha256").update(JSON.stringify({
-    provider: String(providerName || "").trim().toLowerCase(),
-    role: String(effective.role || "").trim().toLowerCase(),
-    disableSystemTools: effective.disableSystemTools === true,
-    promptVersion,
-    remoteSystemPromptSha256: remoteSystemPrompt
-      ? crypto.createHash("sha256").update(remoteSystemPrompt).digest("hex")
-      : "",
-    agentHandoffSchemaSha256: schema.sha256,
-    compactV1: coordination.agentHandoffCompactV1 === true,
-    compactV2: coordination.agentHandoffCompactV2 === true,
-    compactV3: coordination.agentHandoffCompactV3 === true,
-    researcherReportOnly,
-    agentGateSurfaceSha256: agentGateSurfaceFingerprint(effective, providerName),
-  })).digest("hex");
-}
+export { sessionContractFingerprint };
 
 function terminalHandoffContractChars(options = {}) {
   const systemPrompt = String(options.remoteSystemPrompt || options.systemPrompt || "");
@@ -282,7 +191,7 @@ function assertExpectedCoordination(options, { localHandoff, remoteHandoff } = {
     && SUB_AGENT_CALLER_ROLES.has(role)
     && options?.sessionPacket?.job_type !== "fix";
   const childCursorExpected = options?._subAgentChild === true && expected === "subagents";
-  if (!["off", "handoff", "subagents"].includes(expected)
+  if (!AGENT_COORDINATION_MODE_VALUES.includes(expected)
     || localHandoff !== handoffExpected
     || remoteHandoff !== handoffExpected
     || localSubAgent !== subAgentExpected
@@ -368,22 +277,6 @@ function resolveRuntimeModelFallback(providerName, tier, attemptedModel) {
   return effectiveFallback;
 }
 
-function defaultResolveCallCostEstimate(stats) {
-  const candidates = [
-    stats?.costUsd,
-    stats?.cost_usd,
-    stats?.estimatedCostUsd,
-    stats?.totalCostUsd,
-    stats?.total_cost_usd,
-  ];
-  for (const value of candidates) {
-    if (value == null || String(value).trim() === "") continue;
-    const numeric = Number(value);
-    if (Number.isFinite(numeric) && numeric >= 0) return numeric;
-  }
-  return null;
-}
-
 function positiveIntegerOrNull(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : null;
@@ -465,109 +358,6 @@ const DEFAULT_DEPS = {
   summarizeUsageSegments,
 };
 
-function nonNegativeTokenCount(value) {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) && numeric >= 0 ? Math.floor(numeric) : null;
-}
-
-function providerUsageStatus(stats, { measured, unavailable } = {}) {
-  if (unavailable) return "unavailable_after_terminal_stop";
-  if (measured && stats.usagePartialAfterStop === true) return "measured_partial_after_terminal_stop";
-  if (stats.usageEstimated === true || stats.usageCapturePrecision === "unknown") return "estimated";
-  if (!measured) return "unavailable";
-  return stats.tokenUsageSource === "codex_rollout"
-    ? "measured_codex_rollout"
-    : "measured";
-}
-
-function buildAccountingStats(stats, {
-  inputTokens,
-  outputTokens,
-  outputChars,
-  durationMs = stats.durationMs,
-  exitCode,
-  providerUsageStatus: usageStatus,
-  providerName,
-  modelTier,
-  modelName,
-  resolvedMaxOutputTokens,
-  outputTruncated = stats.outputTruncated === true,
-  outputLimitReason = stats.outputLimitReason || null,
-  providerStopCode = null,
-  // The cache counters that belong with inputTokens/outputTokens. An exact
-  // terminal lower bound takes all four from the segment sums.
-  cachedInputTokens = stats.cachedInputTokens,
-  cacheCreationInputTokens = stats.cacheCreationInputTokens,
-} = {}) {
-  const measured = inputTokens != null && outputTokens != null;
-  return {
-    ...stats,
-    inputTokens,
-    outputTokens,
-    cachedInputTokens: measured ? (cachedInputTokens ?? null) : null,
-    cacheCreationInputTokens: measured ? (cacheCreationInputTokens ?? null) : null,
-    reasoningOutputTokens: measured ? (stats.reasoningOutputTokens ?? null) : null,
-    outputChars,
-    durationMs,
-    exitCode,
-    providerUsageStatus: usageStatus,
-    ...(providerStopCode ? { providerStopCode } : {}),
-    provider: providerName,
-    modelTier,
-    modelName: stats.modelName || modelName,
-    maxOutputTokens: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
-    outputTruncated,
-    outputLimitReason,
-  };
-}
-
-function completionAccountingFields({
-  stats,
-  accountingStats,
-  segmentSummary,
-  providerUsageMeasured,
-  providerUsageStatus: usageStatus,
-  resolvedMaxTurns,
-  resolvedMaxOutputTokens,
-  opts,
-  resolveCallCostEstimate,
-} = {}) {
-  const aggregateEstimateAvailable = providerUsageMeasured
-    && segmentSummary.precision === "aggregate_only";
-  return {
-    input_tokens: accountingStats.inputTokens,
-    output_tokens: accountingStats.outputTokens,
-    reasoning_output_tokens: accountingStats.reasoningOutputTokens,
-    cached_input_tokens: accountingStats.cachedInputTokens,
-    cache_creation_input_tokens: accountingStats.cacheCreationInputTokens,
-    turns_used: stats.numTurns ?? null,
-    max_turns_configured: stats.maxTurns ?? resolvedMaxTurns,
-    max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
-    output_truncated: accountingStats.outputTruncated,
-    output_limit_reason: accountingStats.outputLimitReason,
-    duration_ms: accountingStats.durationMs,
-    exit_code: accountingStats.exitCode,
-    atlas_method: opts.disableAtlas ? null : (stats.atlasMethod || opts.atlasMethod || null),
-    atlas_prefetch_status: opts.disableAtlas ? null : (opts.atlasPrefetchStatus || null),
-    cost_estimate_usd: segmentSummary.exact
-      ? segmentSummary.costUsd
-      : aggregateEstimateAvailable
-        ? resolveCallCostEstimate(accountingStats)
-        : null,
-    provider_usage_status: usageStatus,
-    billing_precision: segmentSummary.precision,
-    exact_billable_input_tokens: segmentSummary.exact ? segmentSummary.billableInputTokens : null,
-    long_context_tier_input_tokens: segmentSummary.longContextTierInputTokens,
-    // Provider time measured by the usage segments only. The call's wall time
-    // is already duration_ms; copying it here would hide that no segment
-    // measured its request.
-    provider_request_duration_ms: segmentSummary.durationMs ?? null,
-    usage_segment_count: segmentSummary.requestCount,
-    skills: opts.skillsAttached || null,
-    session_handle: stats.sessionHandle || stats.responseId || null,
-  };
-}
-
 // The live-channel contract asks agents to open with a START line and close
 // with a FINISH line. The marker only tells the agent when to speak; the
 // operator log shows the sentence without it.
@@ -584,79 +374,6 @@ function agentCommentaryFields(value) {
       ).trim()
     : null;
   return { text, summary, detail: detail || null };
-}
-
-function contextPressureMetrics({ stats = {}, promptChars = 0, requestContextInputTokens = null } = {}) {
-  const inputTokens = nonNegativeTokenCount(stats.inputTokens);
-  const outputTokens = nonNegativeTokenCount(stats.outputTokens);
-  const cachedInputTokens = nonNegativeTokenCount(stats.cachedInputTokens) || 0;
-  const cacheCreationInputTokens = nonNegativeTokenCount(stats.cacheCreationInputTokens) || 0;
-  const promptEstimateTokens = estimateTokensFromChars(promptChars);
-  // Pressure is a property of one request's context window. stats.inputTokens
-  // is billed input summed over every request of the call (1.1M over 21 Codex
-  // requests in the 2026-10-01 run), so the largest single request is used
-  // whenever it is known; the cumulative figure stays for the cache ratios.
-  const peakRequestTokens = [requestContextInputTokens, stats.longContextInputTokens]
-    .map((value) => (value == null ? null : nonNegativeTokenCount(value)))
-    .find((value) => value != null && value > 0) ?? null;
-  const billedInputTokens = inputTokens ?? promptEstimateTokens;
-  const observedInputTokens = peakRequestTokens ?? billedInputTokens;
-  const uncachedInputTokensApprox = Math.max(0, billedInputTokens - cachedInputTokens);
-  return {
-    inputTokens,
-    outputTokens,
-    cachedInputTokens,
-    cacheCreationInputTokens,
-    promptEstimateTokens,
-    requestContextInputTokens: peakRequestTokens,
-    observedInputTokens,
-    observedInputBasis: peakRequestTokens != null
-      ? "request_peak"
-      : inputTokens != null ? "cumulative_input" : "prompt_estimate",
-    observedInputTokensEstimated: peakRequestTokens == null && inputTokens == null,
-    uncachedInputTokensApprox,
-    cachedInputRatio: billedInputTokens > 0 ? cachedInputTokens / billedInputTokens : null,
-  };
-}
-
-function codexReuseContractAllowsScope(opts = {}) {
-  const root = path.resolve(opts.cwd || opts.projectDir || process.cwd());
-  const scopedPaths = [
-    ...(Array.isArray(opts.scopedFiles) ? opts.scopedFiles : []),
-    ...(Array.isArray(opts.createFiles) ? opts.createFiles : []),
-    ...(Array.isArray(opts.createRoots) ? opts.createRoots : []),
-    ...(Array.isArray(opts.deleteFiles) ? opts.deleteFiles : []),
-  ];
-  for (const entry of scopedPaths) {
-    if (!entry) continue;
-    const target = path.isAbsolute(String(entry))
-      ? path.resolve(String(entry))
-      : path.resolve(root, String(entry));
-    if (!isInsideRoot(target, root)) return false;
-  }
-  return true;
-}
-
-function isSessionReuseCandidate({ providerName, opts, job_id, work_item_id }) {
-  const provider = String(providerName || "").toLowerCase();
-  if (!provider) return false;
-  if (opts?._subAgentChild === true) return false;
-  if (opts?._webResearchChild === true || opts?._researchChild === true) return false;
-  // Provider self-declares session-resume support via the capabilities flag
-  // on its module. Replaces a hardcoded ["openai","claude","codex"] whitelist
-  // so a new provider that supports resume just sets capabilities.sessionResume.
-  let supportsResume = false;
-  try {
-    const providerInstance = getProvider(null, provider);
-    supportsResume = !!providerInstance?.hasCapability?.("sessionResume");
-  } catch {
-    supportsResume = false;
-  }
-  if (!supportsResume) return false;
-  if (job_id == null || work_item_id == null) return false;
-  if (opts?._fallbackAttempted) return false;
-  if (provider === "codex" && !codexReuseContractAllowsScope(opts)) return false;
-  return isRecyclableLane(opts?.role);
 }
 
 function normalizeAttemptedProviders(value) {
@@ -949,102 +666,8 @@ export class TrackedProviderClient {
     return await this.call(prompt, opts, meta);
   }
 
-  _resolveProviderAccounting({
-    agentCallId,
-    providerName,
-    modelTier,
-    modelName,
-    stats,
-    terminalUsageUnavailable = false,
-    missingUsagePrecision = "unknown",
-  }) {
-    const providerUsageMeasured = !terminalUsageUnavailable
-      && stats.inputTokens != null
-      && stats.outputTokens != null
-      && stats.usageEstimated !== true
-      && stats.usageCapturePrecision !== "unknown";
-    const captureIncomplete = terminalUsageUnavailable
-      || stats.usageCapturePrecision === "incomplete"
-      || (!providerUsageMeasured && missingUsagePrecision === "incomplete");
-    let usageStatus = providerUsageStatus(stats, {
-      measured: providerUsageMeasured,
-      unavailable: terminalUsageUnavailable,
-    });
-    const expectedTotals = providerUsageMeasured ? {
-      inputTokens: stats.inputTokens,
-      outputTokens: stats.outputTokens,
-      cachedInputTokens: stats.cachedInputTokens,
-      cacheCreationInputTokens: stats.cacheCreationInputTokens,
-    } : null;
-    let segmentSummary = this.deps.summarizeUsageSegments(agentCallId, {
-      modelTier,
-      expectedTotals,
-    });
-    // Completed request segments remain exact even when a terminal stop may
-    // have prevented a later request from reporting. The call is a measured
-    // lower bound; its status carries that qualification separately.
-    const exactTerminalLowerBound = (terminalUsageUnavailable || stats.usagePartialAfterStop === true)
-      && segmentSummary.exact === true;
-    if (exactTerminalLowerBound) usageStatus = "measured_lower_bound";
-    else if (captureIncomplete) {
-      this.deps.markUsageSegmentsIncomplete(agentCallId);
-      segmentSummary = this.deps.summarizeUsageSegments(agentCallId, { modelTier, expectedTotals });
-    }
-    if (!providerUsageMeasured && segmentSummary.requestCount === 0) {
-      segmentSummary = {
-        ...segmentSummary,
-        exact: false,
-        precision: captureIncomplete ? "incomplete" : missingUsagePrecision,
-        costUsd: null,
-        billableInputTokens: null,
-      };
-    }
-    if (providerUsageMeasured && segmentSummary.requestCount === 0) {
-      this.deps.recordUsageSegment({
-        agentCallId,
-        requestOrdinal: 1,
-        provider: providerName,
-        modelName: stats.modelName || modelName,
-        inputTokens: stats.inputTokens,
-        outputTokens: stats.outputTokens,
-        cachedInputTokens: stats.cachedInputTokens,
-        cacheCreationInputTokens: stats.cacheCreationInputTokens,
-        cacheCreation5mTokens: stats.cacheCreation5mTokens ?? null,
-        cacheCreation1hTokens: stats.cacheCreation1hTokens ?? null,
-        requestContextInputTokens: stats.longContextInputTokens ?? stats.inputTokens,
-        durationMs: stats.durationMs,
-        usageSource: "aggregate_only",
-        precision: captureIncomplete ? "incomplete" : "aggregate_only",
-      });
-      segmentSummary = this.deps.summarizeUsageSegments(agentCallId, {
-        modelTier,
-        expectedTotals,
-      });
-    }
-    if (captureIncomplete && !exactTerminalLowerBound && !segmentSummary.exact) {
-      segmentSummary = {
-        ...segmentSummary,
-        precision: "incomplete",
-        costUsd: null,
-        billableInputTokens: null,
-      };
-    }
-    return {
-      providerUsageMeasured,
-      providerUsageStatus: usageStatus,
-      segmentSummary,
-      accountingInputTokens: exactTerminalLowerBound ? segmentSummary.inputTokens
-        : providerUsageMeasured ? stats.inputTokens : null,
-      accountingOutputTokens: exactTerminalLowerBound ? segmentSummary.outputTokens
-        : providerUsageMeasured ? stats.outputTokens : null,
-      // The cache counters follow the same source as input/output, so a
-      // lower-bound row prices its segment-sum input with the cache split
-      // those segments measured instead of stale or absent terminal stats.
-      accountingCachedInputTokens: exactTerminalLowerBound ? segmentSummary.cachedInputTokens
-        : providerUsageMeasured ? (stats.cachedInputTokens ?? null) : null,
-      accountingCacheCreationInputTokens: exactTerminalLowerBound ? segmentSummary.cacheCreationInputTokens
-        : providerUsageMeasured ? (stats.cacheCreationInputTokens ?? null) : null,
-    };
+  _resolveProviderAccounting(options) {
+    return resolveProviderAccounting(this.deps, options);
   }
 
   _isProviderCircuitOpen(providerName) {

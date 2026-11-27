@@ -238,6 +238,8 @@ export const TEST_RECEIPT_MAX_EVIDENCE_OUTPUT_CHARS = 1600;
 // Timeouts are not reusable; a completed pass/fail is still subject to the
 // receipt consumer's policy, toolchain, tree, and environment identity checks.
 export const REUSABLE_RECEIPT_STATUSES = readonlySet(["passed", "failed"]);
+// Results that reached execution, including a command stopped by timeout.
+export const EXECUTED_VERIFICATION_STATUSES = readonlySet([...REUSABLE_RECEIPT_STATUSES, "timed_out"]);
 export const SCOPE_ATTRIBUTABLE_DELTAS = readonlySet([
   "changed_failure",
   "regression",

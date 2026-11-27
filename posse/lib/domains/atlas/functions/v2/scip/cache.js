@@ -14,7 +14,7 @@
 
 import { sha256Hex } from "../hash.js";
 import { buildLineStarts, scipRangeToJs } from "./position.js";
-import { externalDisplayName, isStructuralScipDefinition, parseScipSymbol } from "./symbol-parser.js";
+import { externalDisplayName, isStructuralScipDefinition, lastDescriptorName, parseScipSymbol } from "./symbol-parser.js";
 import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
 
 /** @typedef {import("./decode.js").ScipIndex} ScipIndex */
@@ -347,13 +347,4 @@ function computeDefinitionIntervals(occurrences, definitionLocalIds) {
   }
   intervals.sort((a, b) => a.start - b.start || b.end - a.end);
   return intervals;
-}
-
-/**
- * @param {ScipParsedSymbol} parsed
- * @returns {string}
- */
-function lastDescriptorName(parsed) {
-  const last = parsed.descriptors[parsed.descriptors.length - 1];
-  return last ? last.name : "";
 }

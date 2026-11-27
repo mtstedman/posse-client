@@ -1,3 +1,4 @@
+import { OPEN_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { QueueShutdownRecovery } from "../classes/QueueShutdownRecovery.js";
 import { ASSESS_ONLY_PAYLOAD_SQL } from "../../../catalog/queue-recovery.js";
 import { canonicalHumanGatePayload } from "../../../catalog/human-input.js";
@@ -17,7 +18,7 @@ import { registerAttemptStartHook } from "./attempts.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { ATLAS_FRESHNESS_PRELEASE_FENCE_MS } from "../../../catalog/atlas.js";
 import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, MERGE_FAILURE_KINDS, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE, humanGateStateAllowsAnswer, isPostCompletionGatePayload, tryHumanGateNameForPayload } from "../../../catalog/human-input.js";
-import { MUTATING_JOB_TYPES, NON_COMPLETION_BLOCKING_JOB_TYPES, ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
+import { MUTATING_JOB_TYPES, NON_COMPLETION_BLOCKING_JOB_TYPES, ONESHOT_SCOPE_SELECTION_SUBTYPE, REVIEW_SETTLEMENT_ORIGINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
 import { parseJobPayload, resetJobPayloadForReexecution } from "./payload.js";
@@ -647,12 +648,6 @@ function hasRecordedReviewResolution(job) {
   }
 }
 
-const REVIEW_SETTLEMENT_ORIGINAL_STATUSES = new Set([
-  "waiting_on_human",
-  "waiting_on_review",
-  "blocked",
-  "awaiting_assessment",
-]);
 const TERMINAL_REVIEW_ASSESSMENT_STATES = new Set([
   "assessment_waived",
   "assessment_failed",
@@ -694,7 +689,7 @@ function pendingWorkItemReviewSettlement(id) {
       || (
         referencedOriginalIds.has(Number(job.id))
         && (
-          REVIEW_SETTLEMENT_ORIGINAL_STATUSES.has(job.status)
+          REVIEW_SETTLEMENT_ORIGINAL_JOB_STATUSES.has(job.status)
           || job.assessor_verdict === "needs_review"
         )
       )
@@ -719,7 +714,7 @@ function settleWorkItemReviewPlan(id, plan, { resolution }) {
   for (const job of plan.originals || []) {
     let changed = false;
     let waived = false;
-    if (REVIEW_SETTLEMENT_ORIGINAL_STATUSES.has(job.status)) {
+    if (REVIEW_SETTLEMENT_ORIGINAL_JOB_STATUSES.has(job.status)) {
       changed = forceUpdateJobStatus(job.id, "succeeded", {
         expectedStatuses: [job.status],
       }) || changed;
@@ -1991,16 +1986,7 @@ export function requeueWorkItemAfterRejection(id, {
 
 export function reopenWorkItemForFollowUp(id, { status = "planning", reason = "follow_up" } = {}) {
   const db = getDb();
-  const allowedStatuses = new Set([
-    "queued",
-    "planning",
-    "planned",
-    "running",
-    "blocked",
-    "waiting_on_human",
-    "waiting_on_review",
-  ]);
-  if (!allowedStatuses.has(status)) return false;
+  if (!OPEN_WORK_ITEM_STATUSES.includes(status)) return false;
 
   // Preserve event ordering before writing the recovery marker below. In
   // particular, a buffered merge event must receive an earlier durable id

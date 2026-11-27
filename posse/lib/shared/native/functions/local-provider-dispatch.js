@@ -1,7 +1,7 @@
 // Universal dispatch transport hosted by posse-ml's authenticated resident worker.
 import {
   LOCAL_PROVIDER_ADAPTER_VERSION, ML_CAPABILITIES_METHOD, ML_PROVIDER_DISPATCH_METHOD,
-  PROVIDER_DISPATCH_PROTOCOL, PROVIDER_DISPATCH_EVENTS, PROVIDER_DISPATCH_MAX_EVENT_BYTES,
+  PROVIDER_DISPATCH_PROTOCOL, PROVIDER_DISPATCH_EVENTS, PROVIDER_DISPATCH_TERMINAL_EVENTS, PROVIDER_DISPATCH_MAX_EVENT_BYTES,
 } from "../../../catalog/binary.js";
 import { ProviderDispatchGateway, providerDispatchSurfaceDigest } from "../../tools/classes/ProviderDispatchGateway.js";
 import { runMlNativeMethodAsync } from "./ml-invoke.js";
@@ -58,7 +58,7 @@ export async function dispatchLocalProvider(request, {
     } else if (["output.delta", "tool.requested", "tool.completed", "usage.segment", "dispatch.completed"].includes(frame.type) && !attested) {
       throw protocolError("Local provider activity preceded tool surface attestation");
     }
-    if (terminal !== ["dispatch.completed", "dispatch.failed", "dispatch.cancelled"].includes(frame.type)) throw protocolError("Unexpected local provider terminal event");
+    if (terminal !== PROVIDER_DISPATCH_TERMINAL_EVENTS.includes(frame.type)) throw protocolError("Unexpected local provider terminal event");
     sequence += 1;
     if (frame.type === "output.delta") output += String(frame.text || "");
     if (frame.type === "usage.segment") {

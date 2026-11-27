@@ -132,6 +132,11 @@ export const PROVIDER_DISPATCH_MAX_WALL_TIMEOUT_MS = 4 * 60 * 60 * 1_000;
 // before the dispatch starts: an expiry mid-call is an authorization failure,
 // which is permanent and dead-letters the job.
 export const NATIVE_TOOL_GRANT_RENEWAL_LEAD_SECONDS = PROVIDER_DISPATCH_MAX_WALL_TIMEOUT_MS / 1_000 + 15 * 60;
+export const PROVIDER_DISPATCH_TERMINAL_EVENTS = Object.freeze([
+  "dispatch.completed",
+  "dispatch.failed",
+  "dispatch.cancelled",
+]);
 export const PROVIDER_DISPATCH_EVENTS = Object.freeze([
   "dispatch.started",
   "surface.attested",
@@ -145,9 +150,7 @@ export const PROVIDER_DISPATCH_EVENTS = Object.freeze([
   "usage.segment",
   "usage.progress",
   "prompt.finalized",
-  "dispatch.completed",
-  "dispatch.failed",
-  "dispatch.cancelled",
+  ...PROVIDER_DISPATCH_TERMINAL_EVENTS,
 ]);
 export const PROVIDER_DISPATCH_PROVIDERS = Object.freeze([
   "claude",

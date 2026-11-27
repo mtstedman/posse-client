@@ -4,6 +4,7 @@
 // generated from the current v2 descriptor table so they cannot drift into
 // old ATLAS sidecar behavior.
 
+import { clampParsedInteger as clampInt } from "../../../../../shared/format/functions/parse-integer.js";
 import { ATLAS_TOOL_ACTIONS } from "../contracts/tool-params.js";
 import { ATLAS_TOOL_DEFS, isAtlasActionSurfaced } from "../../../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { projectAgentToolSchema } from "../../../../../shared/tools/functions/agent-schema.js";
@@ -287,10 +288,4 @@ function nextActionsFor(action) {
     "runtime.execute": ["runtime.queryOutput"],
   };
   return next[action] || [];
-}
-
-function clampInt(value, min, max, fallback) {
-  const n = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
 }

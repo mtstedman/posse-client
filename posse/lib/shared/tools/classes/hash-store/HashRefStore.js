@@ -5,6 +5,7 @@ import {
   HASH_REF_ENTRY_KIND_LIST_SQL,
   HASH_REF_ENTRY_KIND_SET,
   HASH_REF_OWNER_SCOPE_SET,
+  normalizeHashRefAlias,
 } from "../../../../catalog/hash-store.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
 import { logEvent } from "../../../../domains/queue/functions/events.js";
@@ -46,12 +47,6 @@ const SOURCE_WINDOW_PROVENANCE_KEYS = Object.freeze([
 
 function nowIso() {
   return new Date().toISOString();
-}
-
-function normalizeRef(value) {
-  const raw = String(value || "").trim().toLowerCase();
-  if (!raw) return "";
-  return raw.startsWith("#") ? raw : `#${raw}`;
 }
 
 function sha256Hex(value) {
@@ -425,7 +420,7 @@ export class HashRefStore {
 
   surface(entry = {}) {
     this.ensureSchema();
-    const preferredRef = normalizeRef(entry.ref ?? entry.refAlias ?? entry.hash ?? "");
+    const preferredRef = normalizeHashRefAlias(entry.ref ?? entry.refAlias ?? entry.hash ?? "");
     if (preferredRef && !HASH_REF_ALIAS_PATTERN.test(preferredRef)) {
       throw new Error(`Invalid hash ref alias: ${preferredRef}`);
     }
@@ -643,8 +638,8 @@ export class HashRefStore {
 
   giveHash(ref, opts = {}) {
     this.ensureSchema();
-    if (!this.parent) return { ok: false, found: false, ref: normalizeRef(ref), error: "missing_parent_hash_owner" };
-    const normalized = normalizeRef(ref);
+    if (!this.parent) return { ok: false, found: false, ref: normalizeHashRefAlias(ref), error: "missing_parent_hash_owner" };
+    const normalized = normalizeHashRefAlias(ref);
     if (!normalized) return { ok: false, found: false, ref: "", error: "missing_ref" };
     const own = this._selectOwnedRef(normalized);
     if (!own?.entry) return { ok: false, found: false, ref: normalized, error: "not_owned_by_current_hash_owner" };
@@ -670,7 +665,7 @@ export class HashRefStore {
 
   fetch(ref, opts = {}) {
     this.ensureSchema();
-    const normalized = normalizeRef(ref);
+    const normalized = normalizeHashRefAlias(ref);
     if (!normalized) return { ok: false, found: false, ref: "", error: "missing_ref" };
     const own = this._selectByRef(normalized);
     if (own) {
@@ -754,8 +749,8 @@ export class HashRefStore {
   }
 
   _bindAlias(ref, targetRef) {
-    const normalized = normalizeRef(ref);
-    const target = normalizeRef(targetRef);
+    const normalized = normalizeHashRefAlias(ref);
+    const target = normalizeHashRefAlias(targetRef);
     if (!HASH_REF_ALIAS_PATTERN.test(normalized)) {
       throw new Error(`Invalid hash ref alias: ${normalized}`);
     }
@@ -802,7 +797,7 @@ export class HashRefStore {
   }
 
   _deleteOwnedRef(ref, selected) {
-    const normalized = normalizeRef(ref);
+    const normalized = normalizeHashRefAlias(ref);
     if (selected?.kind === "alias") {
       this.db.prepare(`
         DELETE FROM ${this.config.aliasTable}
@@ -985,7 +980,7 @@ export class HashRefStore {
   }
 
   _selectByRef(ref) {
-    const normalized = normalizeRef(ref);
+    const normalized = normalizeHashRefAlias(ref);
     return this.db.prepare(`
       SELECT * FROM ${this.config.table}
       WHERE ${this.config.ownerColumn} = ? AND ref = ?
@@ -994,7 +989,7 @@ export class HashRefStore {
   }
 
   _selectAliasByRef(ref) {
-    const normalized = normalizeRef(ref);
+    const normalized = normalizeHashRefAlias(ref);
     return this.db.prepare(`
       SELECT *
       FROM ${this.config.aliasTable}
@@ -1048,6 +1043,6 @@ export const __testHashRefStoreInternals = Object.freeze({
   OWNER_TABLES,
   contentHashForEntry,
   lineFingerprintMap,
-  normalizeRef,
+  normalizeHashRefAlias,
   stableJsonStringify,
 });

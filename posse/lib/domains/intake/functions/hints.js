@@ -25,6 +25,14 @@ import {
   looksLikeImageDepictionRequest,
 } from "./request-semantics.js";
 
+export function splitHintList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 const VALID_INTENTS = new Set(INTAKE_INTENT_TYPES);
 const VALID_DELIVERABLES = new Set(INTAKE_DELIVERABLE_TYPES);
 const VALID_OUTPUTS = new Set(INTAKE_OUTPUT_MODES);
@@ -77,14 +85,6 @@ function _isSafeHintPath(value) {
 
 function _resolveWithinProject(projectDir, relPath) {
   return resolvePathWithin(projectDir, relPath);
-}
-
-function _splitList(value) {
-  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
-  return String(value || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
 }
 
 function _dedupe(list, mapFn = (v) => v) {
@@ -209,7 +209,7 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
 }
 
 function _parseDesiredOutputs(inputValue, inferred = []) {
-  const raw = _splitList(inputValue).map((item) => String(item || "").trim().toLowerCase());
+  const raw = splitHintList(inputValue).map((item) => String(item || "").trim().toLowerCase());
   const filtered = _dedupe(raw.filter((item) => VALID_DESIRED_OUTPUTS.has(item)));
   if (filtered.length > 0) return filtered;
   return _dedupe((Array.isArray(inferred) ? inferred : [inferred]).filter((item) => VALID_DESIRED_OUTPUTS.has(item)));
@@ -238,7 +238,7 @@ export function normalizeIntakeHints(input = {}, { requestText = "", fallbackMod
   const inferredOutputMode = String(inferred.output_mode || "auto").toLowerCase();
   const inputOutputMode = String(input.output_mode || "").trim().toLowerCase();
   const explicitDesiredOutputs = _dedupe(
-    _splitList(input.desired_outputs)
+    splitHintList(input.desired_outputs)
       .map((item) => String(item || "").trim().toLowerCase())
       .filter((item) => VALID_DESIRED_OUTPUTS.has(item)),
   );
@@ -267,19 +267,19 @@ export function normalizeIntakeHints(input = {}, { requestText = "", fallbackMod
     ? "explicit"
     : inputIntentSource;
   const suspectedFiles = _dedupe(
-    _splitList(input.suspected_files)
+    splitHintList(input.suspected_files)
       .filter(_isSafeHintPath)
       .map(_normPath),
     (v) => v.toLowerCase(),
   );
   const suspectedDirs = _dedupe(
-    _splitList(input.suspected_dirs)
+    splitHintList(input.suspected_dirs)
       .filter(_isSafeHintPath)
       .map((item) => _normPath(item).replace(/\/+$/, "")),
     (v) => v.toLowerCase(),
   );
-  const subtasks = _dedupe(_splitList(input.subtasks).map((item) => item.trim()), (v) => v.toLowerCase());
-  const constraints = _dedupe(_splitList(input.constraints).map((item) => item.trim()), (v) => v.toLowerCase());
+  const subtasks = _dedupe(splitHintList(input.subtasks).map((item) => item.trim()), (v) => v.toLowerCase());
+  const constraints = _dedupe(splitHintList(input.constraints).map((item) => item.trim()), (v) => v.toLowerCase());
 
   return {
     intent_type: VALID_INTENTS.has(intent) ? intent : inferred.intent_type,

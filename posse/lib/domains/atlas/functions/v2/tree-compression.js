@@ -1,3 +1,4 @@
+import { clampParsedInteger as clampInt } from "../../../../shared/format/functions/parse-integer.js";
 import { missingTables } from "./ledger/missing-tables.js";
 // @ts-check
 //
@@ -927,12 +928,6 @@ function normalizeRepoPath(value) {
     .replace(/^\/+|\/+$/g, "");
 }
 
-
-function clampInt(value, min, max, fallback) {
-  const parsed = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(min, Math.min(max, parsed));
-}
 
 function numberOr(value, fallback) {
   const n = Number(value);

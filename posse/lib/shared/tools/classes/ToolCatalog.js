@@ -1,4 +1,5 @@
 import {
+  capabilityFlagsFor,
   TOOL_CATALOG,
   WEB_TOOL_ROLES,
   getBaseToolNamesForRole,
@@ -34,16 +35,6 @@ function freezeEntry(entry = {}) {
       atlas: !!entry?.capabilityFlags?.atlas,
       coordination: !!entry?.capabilityFlags?.coordination,
     }),
-  });
-}
-
-function deriveCapabilityFlags(access = "unknown") {
-  return Object.freeze({
-    read: access === "read",
-    write: access === "write",
-    shell: access === "shell",
-    atlas: access === "atlas",
-    coordination: access === "coordination",
   });
 }
 
@@ -181,7 +172,7 @@ export class ToolCatalog {
       deprecationReason: descriptor.deprecationReason || null,
       roleAllowlist,
       gateTier,
-      capabilityFlags: descriptor.capabilityFlags || deriveCapabilityFlags(access),
+      capabilityFlags: descriptor.capabilityFlags || capabilityFlagsFor(access),
     });
     RUNTIME_TOOL_OVERRIDES.set(name, entry);
     return entry;

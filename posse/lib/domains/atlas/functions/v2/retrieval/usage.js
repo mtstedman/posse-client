@@ -3,6 +3,7 @@
 // Native ATLAS v2 usage accounting. This intentionally records compact local
 // events rather than depending on the original ATLAS token accumulator.
 
+import { clampParsedInteger as clampInt } from "../../../../../shared/format/functions/parse-integer.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import {
   enqueueAtlasUsageEvent,
@@ -151,12 +152,6 @@ function usageStoreUnavailable(versionId, err = null) {
 function effectiveRepo(ctxRepoId, paramRepoId) {
   const text = String(paramRepoId || ctxRepoId || "default").trim();
   return text || "default";
-}
-
-function clampInt(value, min, max, fallback) {
-  const n = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
 }
 
 function readUsageRows(db, { repoId, since, limit }) {

@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import {
   PROVIDER_DISPATCH_MAX_EVENT_BYTES,
   PROVIDER_DISPATCH_EVENTS,
+  PROVIDER_DISPATCH_TERMINAL_EVENTS,
   PROVIDER_DISPATCH_MAX_START_BYTES,
   PROVIDER_DISPATCH_PROTOCOL,
   PROVIDER_DISPATCH_PROVIDERS,
@@ -34,11 +35,6 @@ const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_MESSAGE_STDERR_CHARS = 2 * 1024;
 const CANCEL_GRACE_MS = 2_000;
 const FORCE_KILL_GRACE_MS = 1_000;
-const TERMINAL_EVENTS = new Set([
-  "dispatch.completed",
-  "dispatch.failed",
-  "dispatch.cancelled",
-]);
 const EVENT_TYPES = new Set(PROVIDER_DISPATCH_EVENTS);
 
 export class ProviderDispatchError extends Error {
@@ -445,7 +441,7 @@ export async function dispatchProvider(request, {
       expectedSequence += 1;
       sawStarted = true;
       onEvent?.(frame);
-      if (TERMINAL_EVENTS.has(frame.type)) {
+      if (PROVIDER_DISPATCH_TERMINAL_EVENTS.includes(frame.type)) {
         terminal = frame;
         completedBeforeAbort = frame.type === "dispatch.completed" && !cancelSent && !signal?.aborted;
         proc.stdin.end();

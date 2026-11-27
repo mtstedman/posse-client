@@ -20,6 +20,8 @@
 // patch)`, `updateZip`, `updateTree`, `updateEncode`. `lines()` returns the
 // rendered rows.
 
+import { TERMINAL_BOOT_PROGRESS_STATES } from "../../../catalog/run-boot.js";
+
 const SECTION_ORDER = ["scheduler", "workspace", "providers"];
 const SECTION_LABELS = {
   scheduler: "scheduler",
@@ -1003,10 +1005,9 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
         : status === "deferred"
           ? "continuing in background"
           : "not needed";
-    const terminalLangStates = new Set(["done", "skipped", "deferred", "failed"]);
     for (const [lang, entry] of langs.entries()) {
       for (const side of ["atlas", "scip"]) {
-        if (terminalLangStates.has(entry?.[side]?.state)) continue;
+        if (TERMINAL_BOOT_PROGRESS_STATES.has(entry?.[side]?.state)) continue;
         updateLang(lang, side, {
           state: langState,
           detail,
@@ -1015,9 +1016,8 @@ export function createBootPanel({ C, columns = () => 100, rows = () => Infinity,
       }
     }
 
-    const terminalTailStates = new Set(["done", "skipped", "deferred", "failed"]);
     const finalizeTail = (current, update) => {
-      if (terminalTailStates.has(current?.state)) return;
+      if (TERMINAL_BOOT_PROGRESS_STATES.has(current?.state)) return;
       const neverStarted = !current || current.state === "idle";
       const state = neverStarted && status === "ok" ? "skipped" : langState;
       update({

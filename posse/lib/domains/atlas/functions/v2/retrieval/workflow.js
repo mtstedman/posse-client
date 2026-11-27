@@ -4,6 +4,7 @@
 // for ATLAS actions and deterministic data transforms. It deliberately routes
 // through native v2 dispatch callbacks instead of reintroducing atlas-mcp.
 
+import { clampParsedInteger as clampInt } from "../../../../../shared/format/functions/parse-integer.js";
 import { ATLAS_TOOL_ACTIONS } from "../contracts/tool-params.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { snakeToCamelKey } from "../../../../../catalog/field-case.js";
@@ -662,10 +663,4 @@ function preview(value, maxTokens) {
   })();
   const maxChars = maxTokens * 4;
   return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
-}
-
-function clampInt(value, min, max, fallback) {
-  const n = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
 }

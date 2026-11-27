@@ -1,3 +1,4 @@
+import { EXECUTED_VERIFICATION_STATUSES } from "../../../catalog/verification.js";
 import { buildFollowUpEvidence } from "../../planning/functions/follow-up-context.js";
 import { renderRequirementContracts } from "../../planning/functions/requirement-contract.js";
 import { renderUnresolvedScopeRequests } from "../../queue/functions/scope-expansion.js";
@@ -234,7 +235,7 @@ function renderTestRun(testRun, label = "DECLARED TESTS") {
     ? `, ${testRun.test_counts.total} test(s)`
     : "";
   const exit = testRun.code ?? testRun.exit_code;
-  const executionLabel = ["passed", "failed", "timed_out"].includes(testRun.status)
+  const executionLabel = EXECUTED_VERIFICATION_STATUSES.has(testRun.status)
     ? "ran on the current workspace" : "verification result";
   const checks = Array.isArray(testRun.check_runs)
     ? testRun.check_runs.map((check) => `- ${check.check_id || check.command}: ${String(check.status || "unknown").toUpperCase()} [coverage: ${check.coverage_status || "unknown"}]${check.reason ? ` (${check.reason})` : ""}`).join("\n")

@@ -3,6 +3,7 @@
 // Native governed runtime actions. Execution is disabled by default and
 // controlled by the native ATLAS policy stored in the ledger.
 
+import { clampParsedInteger as clampInt } from "../../../../../shared/format/functions/parse-integer.js";
 import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
@@ -652,10 +653,4 @@ function runtimeDescriptor(name, aliases, extension, command, opts = {}) {
  */
 function runtimeKey(value) {
   return String(value || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
-}
-
-function clampInt(value, min, max, fallback) {
-  const n = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
 }

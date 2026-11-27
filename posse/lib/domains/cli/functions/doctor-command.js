@@ -1,3 +1,4 @@
+import { firstNonemptyLineWithoutAnsi as firstLine } from "../../../shared/format/functions/ansi.js";
 import { renderDoctorHelp } from "./maintenance-help.js";
 import { FIRST_TASK_FLAG, FIRST_TASK_READINESS } from "../../../catalog/first-task-readiness.js";
 import path from "path";
@@ -16,15 +17,6 @@ import {
 } from "../../runtime/functions/client-provenance.js";
 import { DEFAULT_INSTALLED_POSSE_ROOT } from "../../../shared/platform/functions/managed-install-state.js";
 import { isInstallationDoctor, isPosseProjectInitialized } from "./project-init-state.js";
-
-function firstLine(value) {
-  return String(value || "")
-    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "")
-    .replace(/\r(?!\n)/gu, "\n")
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .find(Boolean) || "";
-}
 
 function relativePath(projectDir, value) {
   const text = String(value || "").trim();

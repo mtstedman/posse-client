@@ -1,3 +1,4 @@
+import { admitSnapshotRead } from '../functions/source-admission.js';
 import { gitExecAsync } from '../../git/functions/utils.js';
 import { integrationRelativePath } from '../functions/integration-config.js';
 import { SETUP_AGENT_LIMITS as L } from '../../../catalog/experiment-setup-agent.js';
@@ -64,10 +65,10 @@ export class ExperimentSetupSource {
     const targets = overview.files.flatMap(file => file.anchors.slice(0, 1).map(anchor => ({ path: file.path, sha256: file.sha256, start_line: anchor[2], line_count: anchor[3] })));
     return { overview, unavailable, reads: prefetchSource(this.plan(), this.files, targets, overview) };
   }
-  async lookup(call, signal) {
+  async lookup(call, signal, reads = null) {
     const args = call.arguments;
     if (args.version !== 'accepted') throw new Error('Setup can inspect only the frozen accepted source.');
-    if (call.name === 'test.read') { await this.load(args.path); return { version: 'accepted', ...fileExcerpt(this.files, args, 16384) }; }
+    if (call.name === 'test.read') { await this.load(args.path); return admitSnapshotRead(reads, this.files, args, async request => ({ version: 'accepted', ...fileExcerpt(this.files, request, 16384) })); }
     if (call.name !== 'test.search') throw new Error('Only source read/search requests may be batched.');
     if (args.path) await this.load(args.path);
     // Broad searches cover loaded snapshots; inventory filters find additional

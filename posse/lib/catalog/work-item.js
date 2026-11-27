@@ -62,3 +62,7 @@ export const TERMINAL_WORK_ITEM_STATUSES = Object.freeze([
   "canceled",
 ]);
 export const TERMINAL_WORK_ITEM_STATUSES_SQL = sqlList(TERMINAL_WORK_ITEM_STATUSES);
+
+export const OPEN_WORK_ITEM_STATUSES = Object.freeze(
+  WORK_ITEM_STATUSES.filter((status) => !TERMINAL_WORK_ITEM_STATUSES.includes(status)),
+);

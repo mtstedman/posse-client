@@ -3,6 +3,7 @@ import {
   WAITING_LANE_DEMAND_REASONS,
   WAITING_LANE_PREPARATORY_STATES,
   WAITING_LANE_STATES,
+  WAITING_LANE_TERMINAL_STATES,
   WAITING_LANE_TRANSITION_OUTCOMES,
   normalizeWaitingLaneGeneration,
   waitingLaneGenerationsEqual,
@@ -929,7 +930,7 @@ export function clearWaitingLanePreparedAssetProof({ workItemId, expectedVersion
   return runImmediateTransaction(db, () => {
     const { row, matches } = casRow(db, workItemId, expectedVersion);
     if (!matches) return transitionResult("version_conflict", decodePreparation(row));
-    if (!row || !["retired", "poisoned"].includes(row.state)) {
+    if (!row || !WAITING_LANE_TERMINAL_STATES.has(row.state)) {
       return transitionResult("ineligible", decodePreparation(row), "state_not_terminal");
     }
     if (

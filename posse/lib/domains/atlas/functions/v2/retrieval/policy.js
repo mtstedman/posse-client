@@ -3,6 +3,7 @@
 // Native ATLAS v2 policy handlers. Policy lives in the v2 ledger so raw-window,
 // slice, memory, and runtime decisions do not depend on the original ATLAS server.
 
+import { clampParsedInteger as clampInt } from "../../../../../shared/format/functions/parse-integer.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import {
   ATLAS_CODE_WINDOW_DEFAULT_POLICY,
@@ -186,12 +187,6 @@ function normalizePolicy(policy) {
       maxEstimatedTokens: clampInt(policy.budgetCaps?.maxEstimatedTokens, 100, 500_000, DEFAULT_ATLAS_POLICY.budgetCaps.maxEstimatedTokens),
     },
   };
-}
-
-function clampInt(value, min, max, fallback) {
-  const n = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
 }
 
 function clampNumber(value, min, max, fallback) {

@@ -5,6 +5,7 @@
 // attempt, freezes an exact detached checkout with the existing activation
 // tombstone, and exposes only a physically verified read root to the planner.
 
+import { WAITING_LANE_TERMINAL_STATES } from "../../../../catalog/waiting-lane.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -238,7 +239,7 @@ export async function gateWaitingLanePlannerReadiness(worker, job, leaseToken, {
     }
   }
 
-  if (["poisoned", "retired"].includes(preparation.state)) {
+  if (WAITING_LANE_TERMINAL_STATES.has(preparation.state)) {
     return markPlannerFallback(worker, job, `preparation_${preparation.state}`);
   }
 

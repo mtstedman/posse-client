@@ -33,3 +33,17 @@ export function canonicalJsonNativePrimitives(value) {
   }
   return JSON.stringify(value);
 }
+
+/**
+ * Build a key-ordered JSON value for callers that hash JSON.stringify's
+ * output. Preserve integer-key ordering, omitted properties, and array slots.
+ * @param {any} value
+ * @returns {any}
+ */
+export function canonicalJsonValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJsonValue(value[key])]));
+  }
+  return value;
+}

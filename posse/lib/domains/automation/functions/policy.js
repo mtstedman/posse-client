@@ -1,19 +1,17 @@
+import { canonicalJsonValue as canonical } from "../../../shared/format/functions/canonical-json.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { SchemaValidatorCache } from "../classes/SchemaValidatorCache.js";
 import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
-import { AUTOMATION_RESOURCE_OPERATIONS } from "../../../catalog/custom-tools.js";
+import { AUTOMATION_RESOURCE_OPERATIONS, SKILL_BINDING_KINDS } from "../../../catalog/custom-tools.js";
 import { AGENT_LIMITS } from "../../../catalog/agent.js";
 
 const ajv = new SchemaValidatorCache();
 export function demand(condition, message, code = "invalid_request") {
   if (!condition) throw Object.assign(new Error(message), { code });
 }
-export function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
-  return value;
-}
+export { canonical };
+
 export function digest(value) { return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex"); }
 export function definitionDigest(value) {
   const copy = structuredClone(value);
@@ -81,7 +79,7 @@ export function validateDefinition(definition) {
   demand(typeof definition.intent === "string" && definition.intent.trim().length > 0 && definition.intent.length <= 20000, "Invalid skill intent");
   const binding = definition.binding;
   object(binding, ["kind", "repo_id", "folder_path"], ["kind"]);
-  demand(["repository", "folder", "global", "run-only"].includes(binding.kind), "Invalid skill binding");
+  demand(SKILL_BINDING_KINDS.includes(binding.kind), "Invalid skill binding");
   demand(binding.kind !== "repository" || !!binding.repo_id, "Repository required");
   demand(binding.kind !== "folder" || typeof binding.folder_path === "string" && path.isAbsolute(binding.folder_path) && path.normalize(binding.folder_path) === binding.folder_path, "Folder skill requires a clean absolute root");
   demand(["repository", "run-only"].includes(binding.kind) || !binding.repo_id, "Only repository and run-only skills can bind a repository");

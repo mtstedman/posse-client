@@ -1,3 +1,4 @@
+import { canonicalJsonValue as canonical } from "../../../shared/format/functions/canonical-json.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
 
@@ -112,12 +113,6 @@ export function agentSessionIdleExpired(session, now) {
   if (!Number.isInteger(minutes) || session.status !== "idle") return false;
   const last = Date.parse(session.updated_at || session.created_at || "");
   return Number.isFinite(last) && now - last > minutes * 60_000;
-}
-
-function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
-  return value;
 }
 
 export function agentDefinitionDigest(definition) {

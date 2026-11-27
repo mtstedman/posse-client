@@ -1,4 +1,4 @@
-import { TEST_RECEIPT_MAX_EVIDENCE_OUTPUT_CHARS as MAX_EVIDENCE_OUTPUT_CHARS, REUSABLE_RECEIPT_STATUSES } from "../../../../catalog/verification.js";
+import { TEST_RECEIPT_MAX_EVIDENCE_OUTPUT_CHARS as MAX_EVIDENCE_OUTPUT_CHARS, EXECUTED_VERIFICATION_STATUSES, REUSABLE_RECEIPT_STATUSES } from "../../../../catalog/verification.js";
 import path from "path";
 import { parseTypecheckDiagnostics } from "../../../../shared/tools/functions/toolkit/scoped-runners.js";
 import { isVerificationInfrastructureOutcome, verificationOutcome, isUnrunnableTestResult } from "./verification-outcome.js";
@@ -269,7 +269,7 @@ export function renderTestExecutionEvidence({
       ? `post_change_baseline: ${baselineAttributionSummary(postChange.baseline_attribution)}`
       : null,
     changedTests
-      ? `changed_test_files: ${statusLabel(changedTests)} (${changedTests.paths.join(", ")}): test files this change created or edited, run after the frozen command on the same commit${["passed", "failed", "timed_out"].includes(changedTests.status) ? "" : `; they did not run to a result (${changedTests.reason || changedTests.status}), so this is neither a pass nor a failure of the change`}`
+      ? `changed_test_files: ${statusLabel(changedTests)} (${changedTests.paths.join(", ")}): test files this change created or edited, run after the frozen command on the same commit${EXECUTED_VERIFICATION_STATUSES.has(changedTests.status) ? "" : `; they did not run to a result (${changedTests.reason || changedTests.status}), so this is neither a pass nor a failure of the change`}`
       : null,
     changedTests?.baseline_attribution
       ? `changed_test_files_baseline: ${baselineAttributionSummary(changedTests.baseline_attribution)}`

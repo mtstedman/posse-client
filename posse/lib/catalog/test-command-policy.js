@@ -7,6 +7,9 @@ export const NODE_TEST_VALUE_FLAGS = readonlySet([
 ]);
 export const PHP_TEST_VALUE_FLAGS = readonlySet(["-d", "--define", "-c", "--php-ini"]);
 
+// Go output flags shared by command validation and the shell mutation guard.
+export const GO_OUTPUT_FLAGS = readonlySet(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"]);
+
 // Flags rejected in planner commands and their declared package scripts.
 export const MUTATING_TEST_FLAGS = readonlySet([
   "-u", "--accept", "--bless", "--coverage", "--cov", "--fix", "--record",

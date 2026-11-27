@@ -3,6 +3,7 @@
 // Preview-only edit planning. This gives agents a structured way to propose
 // symbol/file-scoped edits with preconditions before using scoped write tools.
 
+import { clampParsedInteger as clampInt } from "../../../../../shared/format/functions/parse-integer.js";
 import { sha256Hex } from "../hash.js";
 import { isCanonicalRepoPath } from "../paths.js";
 import { parseSymbolId, symbolIdOf, etagOf } from "./cards.js";
@@ -169,10 +170,4 @@ function normalizeOperation(value, params) {
   if (params.search && params.replace != null) return "replace";
   if (params.search && params.replace == null) return "inspect";
   return "inspect";
-}
-
-function clampInt(value, min, max, fallback) {
-  const n = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
 }

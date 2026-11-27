@@ -2,7 +2,7 @@ import { RESEARCH_DIRECT_PATH_MAX_SOURCE_BYTES } from "../../../catalog/research
 import { WEB_VENDOR_HINTS, FILE_MENTION_RE } from "../../../catalog/research-routing.js";
 import { normalizeResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { slugify } from "../../../shared/format/functions/slug.js";
-import { hasExplicitOneshotIntent } from "../../intake/functions/hints.js";
+import { hasExplicitOneshotIntent, splitHintList } from "../../intake/functions/hints.js";
 import { evaluateScopedContractDirectEligibility, ONESHOT_AMBIGUOUS_SIGNAL_RE as AMBIGUOUS_RE, ONESHOT_BROAD_SCOPE_SIGNAL_RE as BROAD_SCOPE_RE, ONESHOT_COMPLEX_SIGNAL_RE as COMPLEX_RE, ONESHOT_FORMAT_SWEEP_SIGNAL_RE as FORMAT_RE, ONESHOT_LOW_BLAST_SCOPE_RE as LOW_BLAST_SCOPE_RE, ONESHOT_RENAME_SIGNAL_RE as RENAME_RE, evaluateOneshotRequestEligibility } from "./oneshot-policy.js";
 
 const SIMPLE_NO_RESEARCH_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|rename|renaming|copy\s*edit|docs?\s+fix|formatting|whitespace)\b/i;
@@ -45,14 +45,6 @@ function normalizePathLike(value) {
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
-}
-
-function splitHintList(value) {
-  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
-  return String(value || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
 }
 
 function normalizeExplicitBudget(value) {

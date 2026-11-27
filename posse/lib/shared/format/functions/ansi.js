@@ -90,3 +90,12 @@ export function fit(value, width, { reset = "\x1b[0m" } = {}) {
   const resetSuffix = hasAnsi && reset && !text.endsWith(reset) ? reset : "";
   return text + resetSuffix + " ".repeat(width - columns);
 }
+
+export function firstNonemptyLineWithoutAnsi(value) {
+  return String(value || "")
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/\r(?!\n)/gu, "\n")
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find(Boolean) || "";
+}

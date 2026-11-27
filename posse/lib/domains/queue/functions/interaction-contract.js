@@ -1,4 +1,4 @@
-import { gateQuestionChoiceEntries, questionChoiceDanger, validQuestionChoiceEntries } from "../../../catalog/question-choices.js";
+import { gateQuestionChoiceEntries, questionChoiceDanger, questionChoiceId, validQuestionChoiceEntries } from "../../../catalog/question-choices.js";
 import { CHOICE_COPY } from "../../../catalog/work-item-interaction-copy.js";
 import { ACTION_BEARING_INTERACTION_KINDS_SQL, ACTION_ID_LOOKUP_EXPRESSION_SQL, ACTION_METADATA_KEY, QUESTION_CAPABILITY, MAX_QUESTIONS, MAX_NUDGES, MAX_FEEDBACK, MAX_PROMPT_CHARS, MAX_CONTEXT_CHARS, MAX_FEEDBACK_SUMMARY_CHARS, MAX_FEEDBACK_DETAIL_CHARS, MAX_NUDGE_BODY_CHARS, MAX_ACTION_ID_BYTES, DIRECT_ACTION_RESERVATION_STALE_MS, LIVE_OWNER_DELIVERY_HANDLERS, LIVE_OWNER_DELIVERY_HANDLERS_SQL, FEEDBACK_PHASES, FEEDBACK_STATUSES, HANDLER_BY_KIND } from "../../../catalog/work-item-interactions.js";
 import { JOB_TYPE_ROLE_REGISTRY } from "../../../catalog/provider.js";
@@ -308,22 +308,12 @@ export function typedKindForGate(payload) {
   try { return humanGateNameForPayload(payload); } catch { return "legacy_unstructured"; }
 }
 
-function choiceIdFromEntry(entry) {
-  if (typeof entry === "string") return entry;
-  if (!entry || typeof entry !== "object") return "";
-  return String(entry.choice_id ?? entry.value ?? entry.id ?? "").trim();
-}
-
-function validChoiceEntries(kind, entries) {
-  return validQuestionChoiceEntries(kind, entries);
-}
-
 function gateChoiceRecords(kind, payload) {
   if (kind === "legacy_unstructured") return [];
   if (kind === "one_shot_file_scope") {
     const options = Array.isArray(payload?.selector?.options) ? payload.selector.options : [];
-    if (options.length > 32 || !validChoiceEntries(kind, options)) return [];
-    return options.map((option) => choiceRecord(choiceIdFromEntry(option), option));
+    if (options.length > 32 || !validQuestionChoiceEntries(kind, options)) return [];
+    return options.map((option) => choiceRecord(questionChoiceId(option), option));
   }
 
   const explicit = gateQuestionChoiceEntries(kind, payload);
@@ -332,11 +322,11 @@ function gateChoiceRecords(kind, payload) {
       ? (WORK_ITEM_QUESTION_CHOICE_IDS[kind] || []).map((choiceId) => choiceRecord(choiceId))
       : [];
   }
-  if (!validChoiceEntries(kind, explicit)) {
+  if (!validQuestionChoiceEntries(kind, explicit)) {
     return [];
   }
   return explicit.map((entry) => {
-    const choiceId = choiceIdFromEntry(entry);
+    const choiceId = questionChoiceId(entry);
     if (kind === "merge_failure_recovery" && choiceId === "commit") return choiceRecord(choiceId, {
       label: "Commit and merge", consequence: "Commit pending branch and target edits, then retry the merge.", danger: "destructive",
     });
@@ -531,8 +521,8 @@ function durableQuestionChoices(metadata) {
   const kind = String(metadata.question_kind || metadata.kind || "").trim();
   if (!Object.hasOwn(WORK_ITEM_QUESTION_CHOICE_IDS, kind)) return { kind: "legacy_unstructured", choices: [] };
   const raw = Array.isArray(metadata.choices) ? metadata.choices : [];
-  if (raw.length > 32 || !validChoiceEntries(kind, raw)) return { kind, choices: [] };
-  return { kind, choices: raw.map((entry) => choiceRecord(choiceIdFromEntry(entry), entry)) };
+  if (raw.length > 32 || !validQuestionChoiceEntries(kind, raw)) return { kind, choices: [] };
+  return { kind, choices: raw.map((entry) => choiceRecord(questionChoiceId(entry), entry)) };
 }
 
 function projectDurableQuestions(db, workItemId, observedAt, limit = MAX_QUESTIONS) {

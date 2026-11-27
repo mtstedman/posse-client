@@ -19,7 +19,7 @@ import { CONTEXT_CHAIN_READ_DEFAULT_LIMIT_LINES } from "../../../catalog/context
 // chainRead must not store it in the research buffer.
 const READ_FILE_EOF_SENTINEL_RE = /^File has \d+ lines\. Requested offset \d+ is beyond end of file\.$/;
 
-function normalizeReadRange(argVal, fallback) {
+export function normalizeReadRange(argVal, fallback) {
   const n = Number.parseInt(String(argVal ?? ""), 10);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return n;

@@ -358,3 +358,12 @@ export function externalDisplayName(parsed) {
   const last = parsed.descriptors[parsed.descriptors.length - 1];
   return last.name || descriptorsToQualifiedName(parsed.descriptors);
 }
+
+/**
+ * @param {ScipParsedSymbol} parsed
+ * @returns {string}
+ */
+export function lastDescriptorName(parsed) {
+  const last = parsed.descriptors[parsed.descriptors.length - 1];
+  return last ? last.name : "";
+}

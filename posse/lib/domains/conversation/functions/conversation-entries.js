@@ -19,17 +19,7 @@ import { promptFromGatePayload } from "../../bridge/functions/gate-prompt.js";
 import { nudgeState } from "../../queue/functions/interaction-contract.js";
 import { projectGateQuestionContract, sanitizeChoiceRecord } from "../../bridge/functions/gate-question.js";
 import { boundedText, renderCallItem } from "./tool-call-tiers.js";
-import { isTerminalJob } from "./tool-group-store.js";
-
-function parseObject(value) {
-  if (value && typeof value === "object" && !Array.isArray(value)) return value;
-  try {
-    const parsed = JSON.parse(String(value ?? "null"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
+import { isTerminalJob, parseConversationObject } from "./tool-group-store.js";
 
 function id(value) {
   const number = Number(value);
@@ -103,7 +93,7 @@ export function jobMarkerEntry({ job, attempt, firstCall = null }) {
 
 /** The agent's own typed agent_feedback message. */
 export function agentMessageEntry({ row, toolGroupId = null }) {
-  const metadata = parseObject(row.metadata_json);
+  const metadata = parseConversationObject(row.metadata_json);
   return {
     ...common({
       kind: KIND.AGENT_MESSAGE,
@@ -135,7 +125,7 @@ function lifecycleTimes(lifecycle) {
 
 /** The operator's nudge with its delivery receipt. */
 export function operatorMessageEntry({ row, observedAt, supersededByFallback = null }) {
-  const metadata = parseObject(row.metadata_json);
+  const metadata = parseConversationObject(row.metadata_json);
   const lifecycle = metadata.nudge_lifecycle && typeof metadata.nudge_lifecycle === "object" ? metadata.nudge_lifecycle : {};
   const state = nudgeState(row, observedAt);
   const replaceable = AGENT_CONVERSATION_REPLACEABLE_NUDGE_STATES.has(state)
@@ -178,7 +168,7 @@ function answerText(gateJob, resolution, choiceIds = []) {
   const direct = [resolution.feedback, resolution.operator_feedback, resolution.operator_note]
     .find((value) => typeof value === "string" && value.trim());
   if (direct) return direct;
-  const result = parseObject(gateJob.result_json);
+  const result = parseConversationObject(gateJob.result_json);
   const answers = Array.isArray(result.answers) ? result.answers : [];
   for (let index = answers.length - 1; index >= 0; index -= 1) {
     const metadata = answers[index]?.metadata;
@@ -199,7 +189,7 @@ function answerText(gateJob, resolution, choiceIds = []) {
  * their reply. `gateJob` carries human_gates columns as hg_*.
  */
 export function gateEntry({ db, gateJob, observedAt, toolGroupId = null, originalJob = null, acceptedAction = null }) {
-  const payload = parseObject(gateJob.payload_json);
+  const payload = parseConversationObject(gateJob.payload_json);
   // The feed's question contract for gate:<job>:0. A choice gate asks one
   // joined question there; a multi-question text gate is not answered inline.
   const contract = projectGateQuestionContract(db, {
@@ -214,7 +204,7 @@ export function gateEntry({ db, gateJob, observedAt, toolGroupId = null, origina
     .slice(0, BOUNDS.GATE_CHOICES)
     // Whether question.answer may carry a feedback note with this choice.
     .map((choice) => ({ ...choice, accepts_feedback: humanGateActionAcceptsFeedback(contract.kind, choice.choice_id) }));
-  const resolution = parseObject(gateJob.hg_resolution_payload_json);
+  const resolution = parseConversationObject(gateJob.hg_resolution_payload_json);
   const resolved = gateJob.hg_gate_state === "resolved" || contract.state === "answered";
   const choiceIds = new Set(choices.map((choice) => choice.choice_id));
   const resolvedChoice = gateJob.hg_resolution_action && choiceIds.has(gateJob.hg_resolution_action)

@@ -1,14 +1,9 @@
+import { canonicalJsonValue as canonical } from "../../../shared/format/functions/canonical-json.js";
 import Ajv from "ajv";
 import { createHash } from "node:crypto";
 import { EXPERIMENT_LIMITS, EXPERIMENT_PLAN_JSON_SCHEMA, EXPERIMENT_PLAN_SCHEMA, EXPERIMENT_PLAN_ISSUES as I, EXPERIMENT_EXECUTION_UNAVAILABLE } from "../../../catalog/experiments.js";
 
 const validate = new Ajv({ allErrors: true, strict: false, ownProperties: true }).compile(EXPERIMENT_PLAN_JSON_SCHEMA);
-
-function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
-  return value;
-}
 
 // Reject ambiguous paths rather than normalizing them into a different grant.
 export function validExperimentWorkPath(value) {

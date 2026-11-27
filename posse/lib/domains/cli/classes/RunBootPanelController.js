@@ -1,3 +1,4 @@
+import { TERMINAL_BOOT_PROGRESS_STATES } from "../../../catalog/run-boot.js";
 import readline from "readline";
 
 import {
@@ -24,8 +25,6 @@ const STEP_SECTION_MAP = new Map([
   ["pre-loop hooks", "scheduler"],
   ["workspace health", "workspace"],
 ]);
-
-const TERMINAL_BOOT_LANG_STATES = new Set(["done", "skipped", "deferred", "failed"]);
 
 // Event-loop stall detector cadence/threshold. Boot renders to the console
 // from the main thread, and on Windows a console that stops draining (text
@@ -117,7 +116,7 @@ export class RunBootPanelController {
   }
 
   get terminalLangStates() {
-    return TERMINAL_BOOT_LANG_STATES;
+    return TERMINAL_BOOT_PROGRESS_STATES;
   }
 
   terminalColumns() {

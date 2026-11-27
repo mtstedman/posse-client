@@ -583,6 +583,16 @@ after byte limits, not the originally requested range. Reads prefer complete
 lines; if a single line cannot fit, `partial_line` is true and `next_line` points
 to that same incomplete line. Contained reads retain a useful larger visible
 prefix; continuation ranges are compared against delivered bytes before deduplication.
+Setup, idea, writer, and assessor reads use role-local snapshot admission: a fully
+covered range is blocked before extraction, and partial overlap reads only its
+uncovered lines. `source_reuse` reports blocked reads and reused line counts.
+Coverage requires the same path, version and content digest; search hits,
+incomplete lines and evicted source never suppress a later read. Idea source now
+uses the same window rather than repeating source in recent-action history.
+Explicit edit targets reserve up to 4 KiB for complete anchors within the existing
+16 KiB cap, so auxiliary reads cannot evict those anchors. Oversized targets are
+not silently clipped into pinned evidence. Lookup attempts still consume their
+turn allowance, including blocked duplicates; use the retained source and notes.
 Prefer `test.submit_patch` exact replacements; full-file candidates
 remain supported for compatibility. The harness computes the diff deterministically.
 Assessors receive that compact diff, local candidate context, and review constraints,

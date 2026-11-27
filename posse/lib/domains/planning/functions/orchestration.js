@@ -20,7 +20,7 @@ import { researchPayload } from "../../research/functions/payload.js";
 import { getResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { isTransientSharedTrunkMergeResult, sharedTrunkTeamResultNeedsAttention } from "../../git/functions/shared-trunk.js";
-import { ACTIVE_LEASE_STATUSES, DEADLOCK_TERMINAL_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { ACTIVE_LEASE_STATUSES, DEADLOCK_TERMINAL_STATUSES, PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const ACTIVE_LEASE_STATUS_SET = new Set(ACTIVE_LEASE_STATUSES);
@@ -36,7 +36,7 @@ function activeIterativePassStatus(jobs) {
   if (!Array.isArray(jobs) || jobs.length === 0) return null;
   if (jobs.some((job) => ACTIVE_LEASE_STATUS_SET.has(job.status))) return "running";
   if (jobs.some((job) => job.status === "queued")) return "planning";
-  if (jobs.some((job) => ["blocked", "waiting_on_human", "waiting_on_review"].includes(job.status))) return "blocked";
+  if (jobs.some((job) => PARKED_JOB_STATUSES.includes(job.status))) return "blocked";
   return null;
 }
 

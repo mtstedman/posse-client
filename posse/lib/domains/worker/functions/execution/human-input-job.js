@@ -70,7 +70,7 @@ import {
   parseOneshotScopeSelection,
   resolveOneshotScopeCandidates,
 } from "../../../research/functions/oneshot-scope-selection.js";
-import { ONESHOT_SCOPE_SELECTION_SUBTYPE, REPLAN_TRIGGERS } from "../../../../catalog/job.js";
+import { ONESHOT_SCOPE_SELECTION_SUBTYPE, REPLAN_TRIGGERS, REVIEW_SETTLEMENT_ORIGINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import {
   BLOCKED_RECOVERY_RETRY_SCOPES,
@@ -84,12 +84,6 @@ import {
 } from "./human-gate-action.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
-const REVIEW_DECISION_ORIGINAL_STATUS_SET = new Set([
-  "waiting_on_human",
-  "waiting_on_review",
-  "blocked",
-  "awaiting_assessment",
-]);
 const DEAD_LETTER_RECOVERY_REVIEW_TYPES = new Set([
   "dead_letter_recovery",
   "stall_exhausted_recovery",
@@ -1362,7 +1356,7 @@ export async function runHumanInputJob(worker, job, {
           ? "skip"
           : exactAction);
       const assessmentReview = ASSESSMENT_REVIEW_TYPES.has(payload.review_type);
-      if (origJob && !REVIEW_DECISION_ORIGINAL_STATUS_SET.has(origJob.status)) {
+      if (origJob && !REVIEW_SETTLEMENT_ORIGINAL_JOB_STATUSES.has(origJob.status)) {
         handledReviewDecision = true;
         cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
         worker.emit(job.id, `${C.yellow}[human] Ignored stale review gate #${job.id}; original job #${origJob.id} is already ${origJob.status}${C.reset}`);
@@ -1376,7 +1370,7 @@ export async function runHumanInputJob(worker, job, {
           // so a job that genuinely executed keeps its ordinary pass path.
           handledReviewDecision = true;
           const settled = await worker._setJobRowStatus(origJob, "succeeded", {
-            expectedStatuses: [...REVIEW_DECISION_ORIGINAL_STATUS_SET],
+            expectedStatuses: [...REVIEW_SETTLEMENT_ORIGINAL_JOB_STATUSES],
             force: true,
           });
           if (settled !== false) {
@@ -1402,7 +1396,7 @@ export async function runHumanInputJob(worker, job, {
         } else if (reviewDecision === "pass") {
           handledReviewDecision = true;
           const settled = await worker._setJobRowStatus(origJob, "succeeded", {
-            expectedStatuses: [...REVIEW_DECISION_ORIGINAL_STATUS_SET],
+            expectedStatuses: [...REVIEW_SETTLEMENT_ORIGINAL_JOB_STATUSES],
             force: true,
           });
           if (settled !== false) {
@@ -1430,7 +1424,7 @@ export async function runHumanInputJob(worker, job, {
         } else if (reviewDecision === "fail") {
           handledReviewDecision = true;
           const settled = await worker._setJobRowStatus(origJob, "failed", {
-            expectedStatuses: [...REVIEW_DECISION_ORIGINAL_STATUS_SET],
+            expectedStatuses: [...REVIEW_SETTLEMENT_ORIGINAL_JOB_STATUSES],
             force: true,
           });
           if (settled !== false) {
@@ -1520,7 +1514,7 @@ export async function runHumanInputJob(worker, job, {
           handledReviewDecision = true;
           const targetStatus = assessmentReview ? "succeeded" : "canceled";
           const settled = await worker._setJobRowStatus(origJob, targetStatus, {
-            expectedStatuses: [...REVIEW_DECISION_ORIGINAL_STATUS_SET],
+            expectedStatuses: [...REVIEW_SETTLEMENT_ORIGINAL_JOB_STATUSES],
             force: true,
           });
           if (settled !== false) {

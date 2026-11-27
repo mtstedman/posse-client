@@ -14,7 +14,7 @@ import { groupJobConversation } from "./tool-groups.js";
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const DIGEST_VERSION = 1;
 
-function parseObject(value) {
+export function parseConversationObject(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
   try {
     const parsed = JSON.parse(String(value ?? "null"));
@@ -31,7 +31,7 @@ function isConversationObservationType(type) {
 
 /** A typed agent_feedback interaction (the agent's own message). */
 export function isAgentMessageInteraction(row) {
-  const metadata = parseObject(row?.metadata_json);
+  const metadata = parseConversationObject(row?.metadata_json);
   return FEEDBACK_PHASES.has(String(metadata.phase || "")) && FEEDBACK_STATUSES.has(String(metadata.status || metadata.action || ""));
 }
 
@@ -211,7 +211,7 @@ export function persistToolGroupsForJobs(jobIds, { db = getDb() } = {}) {
 /** Rebuild a group object from its persisted row. */
 export function persistedToolGroup(row) {
   if (!row) return null;
-  const digest = parseObject(row.digest_json);
+  const digest = parseConversationObject(row.digest_json);
   return {
     group_id: `tools:${row.job_id}:${row.partition_key}:${row.group_seq}`,
     job_id: Number(row.job_id),

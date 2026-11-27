@@ -1,3 +1,4 @@
+import { clampParsedInteger as clampInt } from "../../../format/functions/parse-integer.js";
 import { COMPACT_RELATIONSHIP_PROJECTION } from "../../../../catalog/atlas-presentation.js";
 import path from "path";
 import { recordToolInvocation } from "../../../../domains/observability/functions/observations.js";
@@ -30,12 +31,6 @@ const ATLAS_TOOL_NAME_TO_ACTION = Object.freeze(
     atlas_agent_context: "context",
   },
 );
-
-function clampInt(value, min, max, fallback) {
-  const parsed = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(min, Math.min(max, parsed));
-}
 
 function sanitizeString(value, maxLen = 1024) {
   if (value == null) return "";
