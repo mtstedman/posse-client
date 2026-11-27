@@ -257,8 +257,9 @@ that evidence with the original baseline. Live partial metrics remain in
 `progress` and `status.active_run`. Detailed answer keys are never included in
 optimizer context.
 
-Optional `setup.candidate_checks` runs fixed unit checks after independent review
-and before staging a full-corpus iteration. These commands execute inside the
+Optional `setup.candidate_checks` runs fixed unit checks before independent review
+and staging a full-corpus iteration. Failed checks return directly to the writer,
+so invalid candidates spend no assessor calls. These commands execute inside the
 prepared, network-disabled sandbox with payload source and installed dependencies;
 corpus inputs and answer keys are not mounted. They are separate from repository
 integration checks. For example, with both files declared in the payload:
@@ -276,8 +277,8 @@ with a timeout of at most 120 seconds and a combined timeout allowance of 300
 seconds. Output is bounded independently of model context.
 
 Failed checks return concise diagnostics and the existing candidate to its writer
-for at most two repair attempts, each independently reviewed and charged to the
-normal model budget. They do not consume a measured iteration. Identical source
+for at most two repair attempts charged to the normal model budget. The passing
+candidate then receives independent review. They do not consume a measured iteration. Identical source
 and check configurations reuse their recorded result. Pending validation keeps
 the owner's sandbox reservation until cleanup is confirmed, including recovery
 after an interrupted owner.
@@ -572,7 +573,13 @@ positions. Each role can retain up to 1,200 characters of verified facts and
 remaining uncertainty in lookup `notes`; editor notes never substitute for
 independent reviewer evidence.
 
-Fresh requested source takes priority over older reads within the same 16 KiB
+Writer and assessor decisions retain up to 32 KiB of requested source so a
+helper, its integration point, and a small test contract can remain visible
+together. This is a ceiling on actual retained content, not an instruction to
+fetch more source. Initial prefetch stays bounded at 8 KiB; idea discovery and
+individual lookup batches stay at 16 KiB. Findings and run history remain compact.
+
+Fresh requested source takes priority over older reads within the role’s bounded
 window. Old reads use spare room or are explicitly counted as omitted, rather
 than repeatedly shortening the new span. Setup uses the same source packing.
 All source clipping uses serialized UTF-8 bytes and complete lines when possible;
@@ -589,7 +596,7 @@ Results include file digests, line ranges, and pagination; old digests cannot
 authorize a target against changed accepted files.
 When several independent source facts are missing, `test.lookup_batch` accepts
 up to eight `test.read`/`test.search` requests in one model turn. It preserves
-request order and per-item errors within the shared 16 KiB source window,
+request order and per-item errors within a 16 KiB batch result,
 including receipt metadata. Short results release unused space to larger
 results; truncated items retain continuation information or request an individual lookup. A batch
 uses one of the idea phase's four lookup turns. Editor and assessor batches share
@@ -609,7 +616,7 @@ and concise prefetched source for these targets. Legacy preparation gets a small
 default source packet around discovered editable-file anchors. Prefetch uses at
 most 8 KiB and includes complete targeted spans when they fit that total budget;
 only genuinely small files may be included whole. Requested source
-and prefetch share a 16 KiB serialized window, with overlapping reads deduplicated
+and prefetch share a bounded serialized window, with overlapping reads deduplicated
 and omitted/truncated content identified. `test.read` retrieves further scoped
 ranges. Returned `end_line` and `next_line` describe the source actually delivered
 after byte limits, not the originally requested range. Reads prefer complete
@@ -628,7 +635,7 @@ Coverage requires the same path, version and content digest; search hits,
 incomplete lines and evicted source never suppress a later read. Idea source now
 uses the same window rather than repeating source in recent-action history.
 Explicit edit targets reserve up to 4 KiB for complete anchors within the existing
-16 KiB cap, so auxiliary reads cannot evict those anchors. Oversized targets are
+source cap, so auxiliary reads cannot evict those anchors. Oversized targets are
 not silently clipped into pinned evidence. Lookup attempts still consume their
 turn allowance, including blocked duplicates; use the retained source and notes.
 Prefer `test.submit_patch` exact replacements. An empty `before` string fills an
