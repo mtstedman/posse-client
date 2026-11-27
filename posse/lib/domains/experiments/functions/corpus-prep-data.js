@@ -3,6 +3,18 @@ import path from 'node:path';
 import { CORPUS_PREP_DATA_LIMITS as L } from '../../../catalog/experiment-corpus-prep.js';
 import { EXPERIMENT_CORPUS_LIMITS } from '../../../catalog/experiment-corpus.js';
 
+export function rememberPrepResult(record, tool, result) {
+  const value = Buffer.byteLength(JSON.stringify(result)) <= L.bytes ? result : { note: 'Large result omitted from working context; retrieve a smaller page.' };
+  const history = record.recent_results ||= [];
+  history.push({ tool, result: value });
+  while (history.length > L.recentResults || Buffer.byteLength(JSON.stringify(history)) > L.bytes) history.shift();
+}
+
+export function prepReadRequest(args) {
+  return Object.fromEntries(['id', 'path', 'format', 'offset', 'limit', 'search', 'array_path', 'fields']
+    .filter(key => args[key] !== undefined).map(key => [key, args[key]]));
+}
+
 function page(rows, { offset = 0, limit = L.page }, project = row => row) {
   if (!Number.isInteger(offset) || offset < 0 || offset > rows.length || !Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid data page.');
   const selected = []; let bytes = 0;

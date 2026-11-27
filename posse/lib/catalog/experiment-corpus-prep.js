@@ -5,7 +5,7 @@ const descriptions = { type: 'object', maxProperties: 32, additionalProperties: 
 const tool = (name, description, properties, required = []) => ({ name, description, parameters: { type: 'object', properties: { ...properties, notes: { type: 'string', maxLength: 4000, description: 'Replace working notes retained across decisions; keep inspected IDs, findings and next steps.' } }, required, additionalProperties: false } });
 export const CORPUS_PREP_DEFAULTS = { model: 'standard', reasoning_effort: 'medium', model_calls: 100, tokens: 1000000, spend_usd: 25, wall_seconds: 3600 };
 export const CORPUS_BATCH_DOWNLOAD = { items: 100, concurrency: 4, delayMs: 200 };
-export const CORPUS_PREP_DATA_LIMITS = { bytes: 16000, cell: 512, page: 20, reports: 100 };
+export const CORPUS_PREP_DATA_LIMITS = { bytes: 16000, cell: 512, page: 20, reports: 100, recentResults: 4, operationHistory: 12 };
 export const CORPUS_PREP_TOOLS = [
   tool('define_contract', 'Create the missing scoring contract. Fields: id, path (array), kind exact|number|set|objects, positive weight, optional depends_on naming earlier fields. Number supports tolerance and partial_range; exact answers can supply accepted alternatives; objects require iou_threshold and optional attribute fields. Interface maps resource/input/prediction names to short STRING descriptions; requirements is an array of strings. Existing contracts cannot change. Unknown answers stay unscored.', { contract: { type: 'object', additionalProperties: false, required: ['fields'], properties: {
     fields: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'object' } },

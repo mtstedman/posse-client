@@ -156,6 +156,10 @@ field paths from an archived JSON resource or input file into a bounded table;
 array indexes and pagination avoid sending large API responses through the model.
 For example, `{id, array_path:["data"], fields:{name:["name"],image:["image_uris","large"]}}`
 reads just the selected columns. Truncated cells are explicitly marked.
+Prep keeps at most four recent results within 16 KiB of working context, plus
+compact notes and twelve recent operation summaries. Related metadata and
+resource IDs therefore survive the next tool call without replaying the full
+history; read parameters remain in the ledger for reproducible retrieval.
 Defaults are standard/medium, 100 calls,
 1,000,000 tokens, $25 and one hour. It uses bounded context with working notes and
 an operation ledger; usage and download provenance are saved in its report.
