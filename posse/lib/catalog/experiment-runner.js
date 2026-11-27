@@ -69,8 +69,8 @@ const prepareParameters = object({ instructions: toolText, targets: { type: "arr
   path: text(240), sha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, start_line: count(1000000), line_count: count(200), change: text(400),
 }) } });
 prepareParameters.required = ["instructions"];
-export const EXPERIMENT_PROPOSALS_TOOL = { name: "test.propose_batch", description: "Queue up to five ranked, independent improvement briefs against the current accepted snapshot. Supply intent and digest-checked anchors, never code or a proposed diff. Rejection advances the queue; acceptance invalidates it. Use fewer ideas when evidence or remaining iterations do not justify five.", parameters: object({
-  proposals: { type: "array", minItems: 1, maxItems: EXPERIMENT_IDEA_LIMITS.proposals, items: prepareParameters },
+export const EXPERIMENT_PROPOSALS_TOOL = { name: "test.propose_batch", description: "Queue up to five ranked, independent improvement briefs against the current accepted snapshot. Each proposal requires structured targets with current file digests and exact line ranges for writer prefetch; naming locations only in prose is insufficient. Supply intent, never code or a proposed diff. Rejection advances the queue; acceptance invalidates it. Use fewer ideas when evidence or remaining iterations do not justify five.", parameters: object({
+  proposals: { type: "array", minItems: 1, maxItems: EXPERIMENT_IDEA_LIMITS.proposals, items: { ...prepareParameters, required: ["instructions", "targets"] } },
 }) };
 export const EXPERIMENT_RUNNER_TOOLS = [
   { name: "test.prepare", description: "Dispatch the writer and independent assessor, then stage the reviewed candidate. Prefer a concise edit brief with optional targets from test.search/read: current file digest, line range, and intended change. Targets guide the edit without changing the approved file scope. Consumes one iteration only after review passes.", parameters: prepareParameters },

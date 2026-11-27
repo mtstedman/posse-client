@@ -272,6 +272,10 @@ export function rememberSourceRead(history, entry) {
   // A blocked duplicate adds no evidence and must not evict a dependency or
   // consume the fresh-result allowance merely by being requested again.
   if (entry.source_reuse?.blocked) return;
+  // Only the latest successful preview's pixels survive. Its replaced receipts
+  // must not displace source or imply that older images are still attached.
+  // A failed image request has no marker and preserves the previous success.
+  if (entry.image_preview) history.entries = history.entries.filter(value => !value.image_preview);
   // Deduplication must use the bytes the next decision can actually see, not
   // the larger raw read that sourcePacket would otherwise trim afterwards.
   const bounded = value => value.tool === "test.read" && typeof value.content === "string" ? sourcePacket({ entries: [value], omitted: 0 }).requested_source[0] : value;

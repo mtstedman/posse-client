@@ -150,6 +150,7 @@ export class ExperimentRunner {
       const keepPreview = view => {
         result = view.result;
         if (view.images?.length) {
+          result = { ...result, image_preview: true };
           images = view.images;
           preview = { tool: call.name, source: call.arguments.source || { case_index: call.arguments.case_index, alias: call.arguments.alias },
             ...(call.arguments.variants ? { variants: call.arguments.variants.map(variant => variant.label) } : {}) };

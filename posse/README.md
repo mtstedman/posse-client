@@ -572,6 +572,8 @@ tool, not general tool batching, repository Atlas access, or corpus access.
 (at most 200), and a short `change` description. The idea model supplies this
 edit brief, not replacement code or a generated diff. Targets guide the writer
 without expanding or narrowing the approved editable-file scope.
+`test.propose_batch` requires these structured targets for every queued proposal;
+file locations written only in its prose do not produce targeted prefetch.
 
 Writers receive current accepted measurements, applicable file instructions,
 and concise prefetched source for these targets. Legacy preparation gets a small
@@ -2942,7 +2944,9 @@ Resources are selected only by pinned corpus case and alias, or by an artifact
 from the same agent session. Derived PNGs are bounded, immutable and temporary;
 the latest successful preview batch stays available as image blocks through
 source reads and submission within that improvement role. A new preview replaces
-it; previews never accumulate across candidates or roles. Text receipts hold
+it and its prior preview receipt, freeing the source window; previews never
+accumulate across candidates or roles. Failed preview requests retain the last
+successful image and receipt. Text receipts hold
 recipes, geometry and hashes, never base64 or hidden answers. Tool use consumes
 the agent's existing lookup/call budget. These caller-owned tools grant no shell,
 host filesystem access, corpus writes or native tool authority. A new suite must
