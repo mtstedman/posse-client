@@ -11,9 +11,9 @@ import { snapshotFiles } from "../functions/snapshots.js";
 import { validateNumericEvaluation } from "../functions/evaluation.js";
 import { campaignProgress } from "../functions/campaign-report.js";
 
-import { EXPERIMENT_CANDIDATE_TOOL as candidateTool, EXPERIMENT_PATCH_TOOL as patchTool, EXPERIMENT_READ_TOOL as readTool, EXPERIMENT_SEARCH_TOOL as searchTool, EXPERIMENT_LOOKUP_BATCH_TOOL as batchTool, EXPERIMENT_REVIEW_TOOL as reviewTool, EXPERIMENT_RUNNER_TOOLS as managerTools, EXPERIMENT_IDEA_LIMITS, EXPERIMENT_IDEA_EXHAUSTED } from "../../../catalog/experiment-runner.js";
+import { EXPERIMENT_CANDIDATE_TOOL as candidateTool, EXPERIMENT_PATCH_TOOL as patchTool, EXPERIMENT_DECLINE_TOOL as declineTool, EXPERIMENT_READ_TOOL as readTool, EXPERIMENT_SEARCH_TOOL as searchTool, EXPERIMENT_LOOKUP_BATCH_TOOL as batchTool, EXPERIMENT_REVIEW_TOOL as reviewTool, EXPERIMENT_RUNNER_TOOLS as managerTools, EXPERIMENT_IDEA_LIMITS, EXPERIMENT_IDEA_EXHAUSTED, EXPERIMENT_SOURCE_LIMITS } from "../../../catalog/experiment-runner.js";
 
-import { agentPlan, agentFindings, actionSummary, coordinatorActions, decisionTables, fileInventory, changeSummary, fileExcerpt, recordContextUsage, recordContextTokens, validateEditTargets, rememberSourceRead, sourcePacket, prefetchSource, boundedLookupBatch } from "../functions/agent-context.js";
+import { agentPlan, agentFindings, actionSummary, coordinatorActions, decisionTables, fileInventory, changeSummary, fileExcerpt, recordContextUsage, recordContextTokens, validateEditTargets, rememberSourceRead, sourcePacket, prefetchSource, boundedLookupBatch, lookupDiagnostic } from "../functions/agent-context.js";
 import { ExperimentSourceIndex } from "./ExperimentSourceIndex.js";
 
 const terminal = c => [S.GOAL, S.EXHAUSTED, S.BLOCKED, S.CANCELLED].includes(c.state);
@@ -28,7 +28,7 @@ export class ExperimentRunner {
   save(record) { record.updated_at = this.now(); this.store.put(K.RUNNERS, record.id, record); }
   status(id) {
     const r = this.load(id); if (!r) return null;
-    return { state: r.state, phase: r.phase, dispatch_mode: r.dispatch_mode || "unspecified", ...(r.dispatch_mode === "deterministic" ? { idea_model: r.setup.models?.coordinator } : {}), setup_digest: r.setup_digest, usage: r.usage, context_usage: r.context_usage || {}, last_action: r.last_action || null, budget: r.setup.budget, models: r.setup.models, started_at: r.started_at, updated_at: r.updated_at, error: r.error || null, integration_error: r.integration_error || null };
+    return { state: r.state, phase: r.phase, dispatch_mode: r.dispatch_mode || "unspecified", ...(r.dispatch_mode === "deterministic" ? { idea_model: r.setup.models?.coordinator } : {}), setup_digest: r.setup_digest, usage: r.usage, context_usage: r.context_usage || {}, last_action: r.last_action || null, last_lookup: r.last_lookup || null, budget: r.setup.budget, models: r.setup.models, started_at: r.started_at, updated_at: r.updated_at, error: r.error || null, integration_error: r.integration_error || null };
   }
   async launch({ setup, setup_digest, idempotency_key }) {
     const validation = validateExperimentSetup(setup);
@@ -110,9 +110,18 @@ export class ExperimentRunner {
     const resourceTools = evaluation?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? EXPERIMENT_CORPUS_INSPECTION_TOOLS : [];
     let images = [];
     let batchReceipt = null;
+    let lookups = 0;
     while (true) {
-      const call = await this.toolDecision(record, role, [{ role: "user", content: JSON.stringify({ ...context, ...sourcePacket(reads, batchReceipt ? { last_source_batch: batchReceipt } : {}) }) }], [...finalTools, readTool, searchTool, batchTool, ...resourceTools], signal, images);
+      const remaining = EXPERIMENT_SOURCE_LIMITS.lookupTurns - lookups;
+      const tools = remaining ? [...finalTools, readTool, searchTool, batchTool, ...resourceTools] : finalTools;
+      const call = await this.toolDecision(record, role, [{ role: "user", content: JSON.stringify({ ...context,
+        source_lookups_remaining: remaining, ...(!remaining ? { source_limit: role === "writer"
+          ? "Lookup allowance exhausted. Submit only a supported edit, or use test.decline_candidate if source evidence is insufficient. Never invent missing source."
+          : "Lookup allowance exhausted. Reject the candidate if source evidence is insufficient for a supported review." } : {}),
+        ...sourcePacket(reads, batchReceipt ? { last_source_batch: batchReceipt } : {}) }) }], tools, signal, images);
       if (![readTool.name, searchTool.name, batchTool.name].includes(call.name) && !resourceTools.some(tool => tool.name === call.name)) return call;
+      lookups++;
+      record.last_lookup = lookupDiagnostic(role, lookups, EXPERIMENT_SOURCE_LIMITS.lookupTurns, call); this.save(record);
       // Pixels accompany only the next decision (including its protocol repair),
       // rather than being copied into every subsequent prompt or source result.
       images = [];
@@ -121,6 +130,8 @@ export class ExperimentRunner {
       try {
         if (call.name === batchTool.name) {
           const batch = await this.lookupBatch(record, call.arguments, accepted, candidate, signal);
+          this.check(record, signal);
+          record.last_lookup = lookupDiagnostic(role, lookups, EXPERIMENT_SOURCE_LIMITS.lookupTurns, call, batch); this.save(record);
           batchReceipt = batch.items.map(item => ({ index: item.index, action: item.action, ok: !item.error, ...(item.error ? { error: item.error } : {}) }));
           for (const item of batch.items) rememberSourceRead(reads, { tool: item.action, request: item.request, batch_index: item.index,
             ...(item.request_omitted ? { request_omitted: true } : {}), ...(item.error ? { error: item.error } : item.result) });
@@ -129,7 +140,13 @@ export class ExperimentRunner {
         if ([readTool.name, searchTool.name].includes(call.name)) result = await this.lookup(record, call, accepted, candidate, signal);
         else if (call.name === EXPERIMENT_CORPUS_CASES_TOOL.name) result = corpusInspectionCases(evaluation, call.arguments);
         else ({ result, images } = await inspectCorpusResource(evaluation, call.arguments, { signal }));
-      } catch (error) { result = { error: error.message }; }
+      } catch (error) {
+        if (signal.aborted || ["experiment_budget", "model_usage_unknown", "owner_fenced"].includes(error.code)) throw error;
+        result = { error: error.message };
+      }
+      if (call.name === readTool.name && typeof result.content === "string") result = actionSummary({ action: readTool.name, result: { tool: call.name, request: call.arguments, ...result } }, 8000).result;
+      this.check(record, signal);
+      record.last_lookup = lookupDiagnostic(role, lookups, EXPERIMENT_SOURCE_LIMITS.lookupTurns, call, result); this.save(record);
       rememberSourceRead(reads, { tool: call.name, request: call.arguments, ...result });
     }
   }
@@ -161,8 +178,9 @@ export class ExperimentRunner {
     const prefetched = prefetchSource(c.plan, accepted.files, targets, overview);
     const context = { instructions, targets, plan: agentPlan(c.plan, targets.length ? targets : prefetched.entries), inventory: actionSummary({ action: "test.files", result: fileInventory(c.plan, accepted.files) }, 4096).result };
     const writer = await this.sourceDecision(record, "writer", { ...context, findings: agentFindings(c, "writer"),
-      edit_rule: "Use the prefetched source and anchors. Prefer test.submit_patch with small exact replacements; full-file candidates are for compatibility when a patch is unsuitable. Search/read only additional needed regions. The coordinator supplies intent, not generated code or a diff.",
-      payload_api: this.service.evaluations[c.plan.evaluation.ref]?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? { ...EXPERIMENT_CORPUS_PAYLOAD_API, corpus: publicCorpusContract(this.service.evaluations[c.plan.evaluation.ref]) } : { ...EXPERIMENT_PAYLOAD_API, templates: { [c.plan.runtime.profile]: EXPERIMENT_PAYLOAD_API.templates[c.plan.runtime.profile] } } }, [patchTool, candidateTool], accepted.files, null, signal, prefetched);
+      edit_rule: "Use the prefetched source and anchors. Prefer test.submit_patch with small exact replacements; full-file candidates are for compatibility when a patch is unsuitable. Search/read only additional needed regions. Decline if evidence is insufficient. Lead the hypothesis with one concise sentence naming the concrete change and expected effect; omit workflow recaps and claimed check results. The coordinator supplies intent, not generated code or a diff.",
+      payload_api: this.service.evaluations[c.plan.evaluation.ref]?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? { ...EXPERIMENT_CORPUS_PAYLOAD_API, corpus: publicCorpusContract(this.service.evaluations[c.plan.evaluation.ref]) } : { ...EXPERIMENT_PAYLOAD_API, templates: { [c.plan.runtime.profile]: EXPERIMENT_PAYLOAD_API.templates[c.plan.runtime.profile] } } }, [patchTool, candidateTool, declineTool], accepted.files, null, signal, prefetched);
+    if (writer.name === declineTool.name) return { staged: false, reason: writer.arguments.reason };
     const candidate = writer.name === patchTool.name ? { changes: {}, hypothesis: writer.arguments.hypothesis } : writer.arguments;
     if (writer.name === patchTool.name) for (const edit of writer.arguments.edits) {
       const source = candidate.changes[edit.path] ?? accepted.files[edit.path];

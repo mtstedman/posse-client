@@ -50,7 +50,33 @@ export function changeSummary(before, changes, maxCharacters = 16000) {
 export function fileExcerpt(files, { path, start_line = 1, line_count = 120 }) {
   if (!Object.hasOwn(files, path)) throw new Error("File is outside the declared payload.");
   const lines = files[path].split("\n"); const content = lines.slice(start_line - 1, start_line - 1 + line_count).join("\n");
-  return { path, sha256: fileDigest(files[path]), start_line, total_lines: lines.length, content: content.slice(0, 12000), truncated: content.length > 12000 };
+  const result = { path, sha256: fileDigest(files[path]), start_line, total_lines: lines.length, content, content_bytes: Buffer.byteLength(content), truncated: false };
+  return sourceContent(result, content.slice(0, 12000));
+}
+
+// Prefer complete lines when fitting a read. A huge first line may only fit
+// partially: report that line as the continuation, never silently skip its tail.
+function sourceContent(result, prefix) {
+  const cut = prefix.length < result.content.length;
+  const ranged = Number.isInteger(result.start_line) && Number.isInteger(result.total_lines);
+  let partial = result.partial_line || false;
+  if (cut) {
+    if (/[\uD800-\uDBFF]$/.test(prefix)) prefix = prefix.slice(0, -1);
+    if (ranged) {
+      const newline = prefix.lastIndexOf("\n");
+      partial = newline < 0 && prefix.length > 0;
+      if (newline >= 0) prefix = prefix.slice(0, newline);
+    }
+  }
+  const value = { ...result, content: prefix, truncated: !!result.truncated || cut };
+  if (ranged) {
+    const count = prefix.length || (!value.truncated && result.start_line <= result.total_lines) ? prefix.split("\n").length : 0;
+    value.end_line = count ? result.start_line + count - 1 : null;
+    value.partial_line = partial;
+    const next = count ? (partial ? value.end_line : value.end_line + 1) : result.start_line;
+    value.next_line = next <= result.total_lines ? next : null;
+  }
+  return value;
 }
 
 export function checkSummary(verification) {
@@ -102,15 +128,14 @@ export function actionSummary(previous, maxBytes = 12000) {
   } else if (previous.action === "test.read" && result) {
     summary.result = { ...result };
     if (Buffer.byteLength(JSON.stringify(summary)) > maxBytes) {
-      summary.result.truncated = true;
-      summary.result.content_bytes = Buffer.byteLength(result.content || "");
+      const original = { ...result, content_bytes: result.content_bytes ?? Buffer.byteLength(result.content || "") };
       let low = 0, high = (result.content || "").length;
       while (low < high) {
         const middle = Math.ceil((low + high) / 2);
-        summary.result.content = result.content.slice(0, middle);
+        summary.result = sourceContent(original, result.content.slice(0, middle));
         if (Buffer.byteLength(JSON.stringify(summary)) <= maxBytes) low = middle; else high = middle - 1;
       }
-      summary.result.content = result.content.slice(0, low);
+      summary.result = sourceContent(original, result.content.slice(0, low));
     }
   }
   return summary;
@@ -160,14 +185,27 @@ export function agentFindings(c, role = "coordinator") {
 }
 
 export function rememberSourceRead(history, entry) {
+  // Deduplication must use the bytes the next decision can actually see, not
+  // the larger raw read that sourcePacket would otherwise trim afterwards.
+  const bounded = value => value.tool === "test.read" && typeof value.content === "string" ? actionSummary({ action: "test.read", result: value }, 8000).result : value;
+  entry = bounded(entry);
+  history.entries = history.entries.map(bounded);
   const key = value => JSON.stringify([value.tool, value.request, value.request_omitted ? value.batch_index : null]);
+  let retained = entry;
   history.entries = history.entries.filter(value => {
-    if (key(value) === key(entry)) return false;
-    if (entry.tool !== "test.read" || value.tool !== "test.read" || !entry.sha256 || value.sha256 !== entry.sha256 || value.path !== entry.path || value.version !== entry.version) return true;
-    const end = item => item.start_line + item.content.split("\n").length - 1;
-    return end(value) < entry.start_line || end(entry) < value.start_line;
+    const sameSource = retained.tool === "test.read" && value.tool === "test.read" && retained.sha256 && value.sha256 === retained.sha256 && value.path === retained.path && value.version === retained.version;
+    if (sameSource) {
+      const covers = (outer, inner) => outer.start_line <= inner.start_line && inner.start_line <= outer.start_line + outer.content.split("\n").length - 1
+        && outer.content.split("\n").slice(inner.start_line - outer.start_line).join("\n").startsWith(inner.content);
+      if (covers(value, retained)) { retained = value; return false; }
+      if (covers(retained, value)) return false;
+      // Partial overlap does not imply replacement. Keep both useful tails;
+      // the shared byte window explicitly reports any actual eviction.
+      return true;
+    }
+    return key(value) !== key(entry);
   });
-  history.entries.push(entry);
+  history.entries.push(retained);
   if (history.entries.length > L.history) { history.entries.shift(); history.omitted++; }
 }
 
@@ -201,13 +239,25 @@ export function prefetchSource(plan, files, targets, overview, version = "accept
     const request = { path: target.path, version, start_line: tiny ? 1 : target.start_line, line_count: tiny ? 200 : Math.min(40, target.line_count) };
     const result = fileExcerpt(files, request);
     const entry = actionSummary({ action: "test.read", result: { tool: "test.read", request, version, ...result, prefetched: true } }, 2500).result;
-    const lines = entry.content.split("\n").length;
-    entry.next_line = entry.start_line + lines - (entry.truncated ? 1 : 0);
-    if (entry.next_line > entry.total_lines) entry.next_line = null;
     history.entries.push(entry);
   }
   // Prefetch gets at most half the source window, leaving room for requested
   // reads. Exact source remains available through the scoped test.read tool.
   while (Buffer.byteLength(JSON.stringify(history.entries)) > L.contextBytes / 2) { history.entries.pop(); history.omitted++; }
   return history;
+}
+
+export function lookupDiagnostic(role, used, limit, call, result) {
+  const calls = call.name === "test.lookup_batch" ? call.arguments.requests : [call];
+  const items = calls.map((item, index) => {
+    const value = call.name === "test.lookup_batch" ? result?.items?.[index] : { result, error: result?.error };
+    return { index, action: item.name, path: item.arguments.path, version: item.arguments.version,
+      start_line: item.arguments.start_line, line_count: item.arguments.line_count,
+      end_line: value?.result?.end_line, next_line: value?.result?.next_line, partial_line: value?.result?.partial_line,
+      truncated: value?.result?.truncated ?? value?.truncated ?? false,
+      ...(value?.error ? { error: brief(value.error, 160) } : {}) };
+  });
+  const diagnostic = { role, turns_used: used, turns_remaining: limit - used, limit, action: call.name, operations: calls.length, pending: result === undefined, items, omitted: 0 };
+  while (Buffer.byteLength(JSON.stringify(diagnostic)) > 4096 && items.length) { items.pop(); diagnostic.omitted++; }
+  return diagnostic;
 }

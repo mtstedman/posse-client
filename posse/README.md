@@ -402,11 +402,25 @@ default source packet around discovered editable-file anchors. Prefetch uses at
 most 8 KiB; only genuinely small files may be included whole. Requested source
 and prefetch share a 16 KiB serialized window, with overlapping reads deduplicated
 and omitted/truncated content identified. `test.read` retrieves further scoped
-ranges. Prefer `test.submit_patch` exact replacements; full-file candidates
+ranges. Returned `end_line` and `next_line` describe the source actually delivered
+after byte limits, not the originally requested range. Reads prefer complete
+lines; if a single line cannot fit, `partial_line` is true and `next_line` points
+to that same incomplete line. Contained reads retain a useful larger visible
+prefix; continuation ranges are compared against delivered bytes before deduplication.
+Prefer `test.submit_patch` exact replacements; full-file candidates
 remain supported for compatibility. The harness computes the diff deterministically.
 Assessors receive that compact diff, local candidate context, and review constraints,
 then return a review decision. Writer and assessor do not receive unrelated
 accepted/rejected history. Truncated changes require further reading before approval.
+Writer and assessor each have at most eight lookup turns per preparation, including
+resource inspection; a batch counts as one turn with at most eight operations.
+Afterward only final tools remain. The writer can use `test.decline_candidate`
+when evidence is insufficient, and the assessor can reject. No unsafe edit or
+approval is required to satisfy a limit. These unsuccessful preparations use the
+existing three-attempt allowance and preserve any accepted integration candidate.
+Writer hypotheses should lead with the concrete change and expected effect,
+without workflow recaps. Public `last_lookup` diagnostics expose role, turn count,
+scoped ranges and continuation/error metadata, never source bodies or a transcript.
 Public corpus interface details remain available to the writer; resource inspection
 tools and one-decision image delivery remain available to writer and assessor.
 Integration adaptation uses compact current state and recent action receipts,

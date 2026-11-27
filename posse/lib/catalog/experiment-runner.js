@@ -7,7 +7,7 @@ import { EXPERIMENT_INTEGRATION_SCHEMA } from "./experiment-integration.js";
 const object = properties => ({ type: "object", additionalProperties: false, required: Object.keys(properties), properties });
 const text = maxLength => ({ type: "string", minLength: 1, maxLength });
 const count = maximum => ({ type: "integer", minimum: 1, maximum });
-export const EXPERIMENT_SOURCE_LIMITS = Object.freeze({ searchBytes: 8192, contextBytes: 16384, batchBytes: 7500, batchItems: 8, results: 20, targets: 8, cachedFiles: 128, history: 8 });
+export const EXPERIMENT_SOURCE_LIMITS = Object.freeze({ searchBytes: 8192, contextBytes: 16384, batchBytes: 7500, batchItems: 8, lookupTurns: 8, results: 20, targets: 8, cachedFiles: 128, history: 8 });
 export const EXPERIMENT_SOURCE_FALLBACKS = Object.freeze({ UNSUPPORTED: "unsupported_language", UNAVAILABLE: "parser_unavailable", FAILED: "parser_failed", NO_SYMBOL: "no_symbol_match" });
 export const EXPERIMENT_IDEA_LIMITS = Object.freeze({ lookups: 4, failedPreparations: 3 });
 export const EXPERIMENT_IDEA_EXHAUSTED = "idea_attempts_exhausted";
@@ -39,10 +39,12 @@ export function experimentSetupContract() {
 }
 
 const toolText = { type: "string", minLength: 1, maxLength: 4000 };
-export const EXPERIMENT_CANDIDATE_TOOL = { name: "test.submit_candidate", description: "Compatibility option for edits unsuitable for targeted replacements. Return only changed declared files and their hypothesis. Prefer test.submit_patch to avoid emitting unchanged source.", parameters: object({ changes: { type: "object", additionalProperties: { type: "string" } }, hypothesis: toolText }) };
+const hypothesis = { ...toolText, description: "Lead with one concise sentence naming the concrete change and expected effect. Omit workflow recaps and claimed check results." };
+export const EXPERIMENT_CANDIDATE_TOOL = { name: "test.submit_candidate", description: "Compatibility option for edits unsuitable for targeted replacements. Return only changed declared files and their hypothesis. Prefer test.submit_patch to avoid emitting unchanged source.", parameters: object({ changes: { type: "object", additionalProperties: { type: "string" } }, hypothesis }) };
 export const EXPERIMENT_PATCH_TOOL = { name: "test.submit_patch", description: "Submit small exact replacements against the accepted files. Each before span must match exactly once, in order. Prefer this over repeating a large file.", parameters: object({
-  edits: { type: "array", minItems: 1, maxItems: 32, items: object({ path: { type: "string", minLength: 1, maxLength: 240 }, before: { type: "string", minLength: 1, maxLength: 262144 }, after: { type: "string", maxLength: 262144 } }) }, hypothesis: toolText,
+  edits: { type: "array", minItems: 1, maxItems: 32, items: object({ path: { type: "string", minLength: 1, maxLength: 240 }, before: { type: "string", minLength: 1, maxLength: 262144 }, after: { type: "string", maxLength: 262144 } }) }, hypothesis,
 }) };
+export const EXPERIMENT_DECLINE_TOOL = { name: "test.decline_candidate", description: "Decline this preparation when source evidence is insufficient or no supported improvement is available. Return a concise reason; never invent an unsafe edit to satisfy a lookup limit.", parameters: object({ reason: toolText }) };
 export const EXPERIMENT_REVIEW_TOOL = { name: "test.review_candidate", description: "Review whether the proposed general change follows the approved plan and can be tested. This does not score the candidate.", parameters: object({ approved: { type: "boolean" }, reason: toolText }) };
 export const EXPERIMENT_READ_TOOL = { name: "test.read", description: "Read a bounded range of a declared accepted or candidate payload file. Use when a diff is truncated or additional source context is needed.", parameters: object({
   path: { type: "string", minLength: 1, maxLength: 240 }, version: { enum: ["accepted", "candidate"] }, start_line: count(1000000), line_count: count(200),
