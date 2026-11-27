@@ -7,7 +7,7 @@ import { EXPERIMENT_INTEGRATION_SCHEMA } from "./experiment-integration.js";
 const object = properties => ({ type: "object", additionalProperties: false, required: Object.keys(properties), properties });
 const text = maxLength => ({ type: "string", minLength: 1, maxLength });
 const count = maximum => ({ type: "integer", minimum: 1, maximum });
-export const EXPERIMENT_SOURCE_LIMITS = Object.freeze({ searchBytes: 8192, contextBytes: 16384, batchBytes: 7500, batchItems: 8, lookupTurns: 8, results: 20, targets: 8, cachedFiles: 128, history: 8 });
+export const EXPERIMENT_SOURCE_LIMITS = Object.freeze({ searchBytes: 8192, contextBytes: 16384, batchItems: 8, lookupTurns: 8, results: 20, targets: 8, cachedFiles: 128, history: 8 });
 export const EXPERIMENT_SOURCE_FALLBACKS = Object.freeze({ UNSUPPORTED: "unsupported_language", UNAVAILABLE: "parser_unavailable", FAILED: "parser_failed", NO_SYMBOL: "no_symbol_match" });
 export const EXPERIMENT_IDEA_LIMITS = Object.freeze({ lookups: 4, failedPreparations: 3 });
 export const EXPERIMENT_IDEA_EXHAUSTED = "idea_attempts_exhausted";

@@ -144,7 +144,7 @@ export class ExperimentRunner {
         if (signal.aborted || ["experiment_budget", "model_usage_unknown", "owner_fenced"].includes(error.code)) throw error;
         result = { error: error.message };
       }
-      if (call.name === readTool.name && typeof result.content === "string") result = actionSummary({ action: readTool.name, result: { tool: call.name, request: call.arguments, ...result } }, 8000).result;
+      if (call.name === readTool.name && typeof result.content === "string") result = actionSummary({ action: readTool.name, result: { tool: call.name, request: call.arguments, ...result } }, EXPERIMENT_SOURCE_LIMITS.contextBytes).result;
       this.check(record, signal);
       record.last_lookup = lookupDiagnostic(role, lookups, EXPERIMENT_SOURCE_LIMITS.lookupTurns, call, result); this.save(record);
       rememberSourceRead(reads, { tool: call.name, request: call.arguments, ...result });
@@ -156,7 +156,7 @@ export class ExperimentRunner {
     if (call.arguments.version === "candidate" && !candidate) throw new Error("No candidate exists yet.");
     const files = call.arguments.version === "candidate" ? candidate : accepted;
     return call.name === searchTool.name ? this.sourceIndex.search(record.setup.plan, files, call.arguments, signal)
-      : { version: call.arguments.version, ...fileExcerpt(files, call.arguments), instructions: record.setup.plan.files.find(file => file.path === call.arguments.path)?.instructions };
+      : { version: call.arguments.version, ...fileExcerpt(files, call.arguments, EXPERIMENT_SOURCE_LIMITS.contextBytes), instructions: record.setup.plan.files.find(file => file.path === call.arguments.path)?.instructions };
   }
   async lookupBatch(record, { requests }, accepted, candidate, signal) {
     const items = [];
@@ -209,7 +209,7 @@ export class ExperimentRunner {
     if ([readTool.name, searchTool.name].includes(call.name)) {
       if (call.arguments.version !== "accepted") throw new Error("Coordinator may read accepted files only.");
       if (call.name === searchTool.name) return this.sourceIndex.search(record.setup.plan, this.service.campaigns.files(record.id).files, call.arguments, signal);
-      return fileExcerpt(this.service.campaigns.files(record.id).files, call.arguments);
+      return fileExcerpt(this.service.campaigns.files(record.id).files, call.arguments, EXPERIMENT_SOURCE_LIMITS.contextBytes);
     }
     if (call.name === "test.proctor") {
       const c = this.service.campaigns.load(record.id);

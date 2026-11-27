@@ -47,11 +47,11 @@ export function changeSummary(before, changes, maxCharacters = 16000) {
   });
 }
 
-export function fileExcerpt(files, { path, start_line = 1, line_count = 120 }) {
+export function fileExcerpt(files, { path, start_line = 1, line_count = 120 }, maxBytes) {
   if (!Object.hasOwn(files, path)) throw new Error("File is outside the declared payload.");
   const lines = files[path].split("\n"); const content = lines.slice(start_line - 1, start_line - 1 + line_count).join("\n");
   const result = { path, sha256: fileDigest(files[path]), start_line, total_lines: lines.length, content, content_bytes: Buffer.byteLength(content), truncated: false };
-  return sourceContent(result, content.slice(0, 12000));
+  return maxBytes ? actionSummary({ action: "test.read", result: sourceContent(result, content) }, maxBytes).result : sourceContent(result, content.slice(0, 12000));
 }
 
 // Prefer complete lines when fitting a read. A huge first line may only fit
@@ -113,7 +113,7 @@ export function actionSummary(previous, maxBytes = 12000) {
     ...(previous.action === "test.lookup_batch" ? { request: { operations: previous.arguments?.requests?.length || 0 } } : {}),
     ...(result && Object.hasOwn(result, 'staged') ? { staged: result.staged, reason: brief(result.reason || result.review, 600) } : {}),
     ...(result?.advice ? { advice: brief(result.advice, 2000) } : {}) };
-  if (previous.action === "test.lookup_batch" && result) summary.result = boundedLookupBatch(result.items, Math.min(L.batchBytes, maxBytes - 200));
+  if (previous.action === "test.lookup_batch" && result) summary.result = boundedLookupBatch(result.items, Math.min(L.contextBytes, maxBytes - 200));
   else if (previous.action === "test.files" && result?.rows) {
     summary.result = { columns: result.columns, rows: [...result.rows], omitted: 0, truncated: false };
     while (Buffer.byteLength(JSON.stringify(summary)) > maxBytes && summary.result.rows.length) {
@@ -141,14 +141,40 @@ export function actionSummary(previous, maxBytes = 12000) {
   return summary;
 }
 
-export function boundedLookupBatch(items, maxBytes = L.batchBytes) {
-  const allowance = Math.floor((maxBytes - 512) / items.length);
-  return { items: items.map((item, index) => {
-    const result = actionSummary({ action: item.action, arguments: item.request, result: item.result, error: item.error ? brief(item.error, 200) : undefined }, allowance - 64);
-    return Buffer.byteLength(JSON.stringify(result)) <= allowance - 64 ? { index, ...result, ...(item.request_omitted ? { request_omitted: true } : {}), ...(item.truncated ? { truncated: true } : {}) }
-      : { index, action: item.action, request: { version: item.request?.version }, request_omitted: true,
-        error: "Request/result metadata exceeds the batch allowance; request this item individually.", truncated: true };
-  }), byte_limit: maxBytes };
+// Complete small results release their unused allowance to larger results.
+// Nothing is clipped when the full packet fits; framing counts toward the cap.
+function fitPacket(items, maxBytes, wrap, bound) {
+  const full = wrap(items);
+  if (Buffer.byteLength(JSON.stringify(full)) <= maxBytes) return full;
+  let remaining = maxBytes - Buffer.byteLength(JSON.stringify(wrap([]))) - Math.max(0, items.length - 1);
+  const ordered = items.map((item, index) => ({ index, bytes: Buffer.byteLength(JSON.stringify(item)) })).sort((a, b) => a.bytes - b.bytes);
+  const allowances = [];
+  for (const [position, item] of ordered.entries()) {
+    const allowance = Math.min(item.bytes, Math.floor(remaining / (items.length - position)));
+    allowances[item.index] = allowance; remaining -= allowance;
+  }
+  const fitted = wrap(items.map((item, index) => {
+    if (Buffer.byteLength(JSON.stringify(item)) <= allowances[index]) return item;
+    const result = bound(item, allowances[index]);
+    if (Buffer.byteLength(JSON.stringify(result)) <= allowances[index]) return result;
+    const omitted = { index: item.index ?? item.batch_index ?? index, truncated: true, error: "Metadata omitted; request this lookup individually." };
+    if (Buffer.byteLength(JSON.stringify(omitted)) > allowances[index]) throw new Error("Source packet metadata exceeds its byte budget.");
+    return omitted;
+  }));
+  if (Buffer.byteLength(JSON.stringify(fitted)) > maxBytes) throw new Error("Source packet exceeds its byte budget.");
+  return fitted;
+}
+
+export function boundedLookupBatch(items, maxBytes = L.contextBytes) {
+  const complete = items.map((item, index) => ({ index, action: item.action, ...(item.request ? { request: item.request } : {}),
+    ...(item.error ? { error: brief(item.error, 200) } : { result: item.result }),
+    ...(item.request_omitted ? { request_omitted: true } : {}), ...(item.truncated ? { truncated: true } : {}) }));
+  return fitPacket(complete, maxBytes, rows => ({ items: rows, byte_limit: maxBytes }), (item, allowance) => {
+    const result = actionSummary({ action: item.action, arguments: item.request, result: item.result, error: item.error }, allowance - 64);
+    return Buffer.byteLength(JSON.stringify(result)) <= allowance - 64 ? { index: item.index, ...result, ...(item.request_omitted ? { request_omitted: true } : {}), ...(item.truncated ? { truncated: true } : {}) }
+      : { index: item.index, action: item.action, request: { version: item.request?.version }, request_omitted: true,
+        error: "Request/result metadata exceeds the shared allowance; request this item individually.", truncated: true };
+  });
 }
 
 // Retain useful reads, not a transcript. The latest action and the small working
@@ -187,7 +213,7 @@ export function agentFindings(c, role = "coordinator") {
 export function rememberSourceRead(history, entry) {
   // Deduplication must use the bytes the next decision can actually see, not
   // the larger raw read that sourcePacket would otherwise trim afterwards.
-  const bounded = value => value.tool === "test.read" && typeof value.content === "string" ? actionSummary({ action: "test.read", result: value }, 8000).result : value;
+  const bounded = value => value.tool === "test.read" && typeof value.content === "string" ? sourcePacket({ entries: [value], omitted: 0 }).requested_source[0] : value;
   entry = bounded(entry);
   history.entries = history.entries.map(bounded);
   const key = value => JSON.stringify([value.tool, value.request, value.request_omitted ? value.batch_index : null]);
@@ -209,24 +235,30 @@ export function rememberSourceRead(history, entry) {
   if (history.entries.length > L.history) { history.entries.shift(); history.omitted++; }
 }
 
-export function sourcePacket(history, extra = {}) {
-  const bounded = entry => {
-    if (typeof entry.content === "string") return actionSummary({ action: "test.read", result: entry }, 8000).result;
+export function sourcePacket(history, extra = {}, maxBytes = L.contextBytes) {
+  if (Buffer.byteLength(JSON.stringify(extra)) > maxBytes / 4) extra = { metadata_truncated: true,
+    last_source_batch: (extra.last_source_batch || []).slice(0, L.batchItems).map((item, index) => ({ index, action: brief(item.action, 32), ok: !!item.ok,
+      ...(item.error ? { error: "Error details omitted to fit source budget." } : {}) })) };
+  const bounded = (entry, allowance) => {
+    if (typeof entry.content === "string") {
+      const result = actionSummary({ action: "test.read", result: entry }, allowance).result;
+      if (Buffer.byteLength(JSON.stringify(result)) <= allowance) return result;
+    }
     if (Array.isArray(entry.rows)) {
       const result = { ...entry, rows: [...entry.rows] };
-      while (Buffer.byteLength(JSON.stringify(result)) > 8000 && result.rows.length) {
+      while (Buffer.byteLength(JSON.stringify(result)) > allowance && result.rows.length) {
         result.rows.pop(); result.omitted = (result.omitted || 0) + 1; result.truncated = true;
         result.next_offset = (entry.request?.offset || 0) + result.rows.length;
       }
-      return result;
+      if (Buffer.byteLength(JSON.stringify(result)) <= allowance) return result;
     }
-    return Buffer.byteLength(JSON.stringify(entry)) <= 8000 ? entry
-      : { tool: entry.tool, request: entry.request, truncated: true, error: "Result exceeds the context budget; request a narrower resource or range." };
+    return { tool: entry.tool, request: { version: entry.request?.version }, request_omitted: true, batch_index: entry.batch_index,
+      truncated: true, error: "Result metadata exceeds the shared allowance; request this item individually." };
   };
-  const packet = { ...extra, requested_source: history.entries.map(bounded), omitted_source_reads: history.omitted };
-  while (Buffer.byteLength(JSON.stringify(packet)) > L.contextBytes && packet.requested_source.length) {
-    packet.requested_source.shift(); packet.omitted_source_reads++;
-  }
+  const packet = fitPacket(history.entries, maxBytes, entries => ({ ...extra, requested_source: entries, omitted_source_reads: history.omitted }), bounded);
+  // Future containment decisions must use the spans actually delivered under
+  // this aggregate budget, including receipt/wrapper overhead.
+  history.entries = packet.requested_source;
   return packet;
 }
 
@@ -236,14 +268,13 @@ export function prefetchSource(plan, files, targets, overview, version = "accept
   const history = { entries: [], omitted: 0 };
   for (const target of selected.slice(0, L.targets)) {
     const tiny = Buffer.byteLength(files[target.path]) <= 1000;
-    const request = { path: target.path, version, start_line: tiny ? 1 : target.start_line, line_count: tiny ? 200 : Math.min(40, target.line_count) };
-    const result = fileExcerpt(files, request);
-    const entry = actionSummary({ action: "test.read", result: { tool: "test.read", request, version, ...result, prefetched: true } }, 2500).result;
-    history.entries.push(entry);
+    const request = { path: target.path, version, start_line: tiny ? 1 : target.start_line, line_count: tiny ? 200 : Math.min(200, target.line_count) };
+    const result = fileExcerpt(files, request, L.contextBytes);
+    history.entries.push({ tool: "test.read", request, version, ...result, prefetched: true });
   }
   // Prefetch gets at most half the source window, leaving room for requested
   // reads. Exact source remains available through the scoped test.read tool.
-  while (Buffer.byteLength(JSON.stringify(history.entries)) > L.contextBytes / 2) { history.entries.pop(); history.omitted++; }
+  sourcePacket(history, {}, L.contextBytes / 2);
   return history;
 }
 

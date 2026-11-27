@@ -384,8 +384,9 @@ Results include file digests, line ranges, and pagination; old digests cannot
 authorize a target against changed accepted files.
 When several independent source facts are missing, `test.lookup_batch` accepts
 up to eight `test.read`/`test.search` requests in one model turn. It preserves
-request order and per-item errors within a 7,500-byte result allowance; truncated
-items retain continuation information or request an individual lookup. A batch
+request order and per-item errors within the shared 16 KiB source window,
+including receipt metadata. Short results release unused space to larger
+results; truncated items retain continuation information or request an individual lookup. A batch
 uses one of the idea phase's four lookup turns. Editor and assessor batches share
 the ordinary deduplicated source window. This is a closed snapshot-only lookup
 tool, not general tool batching, repository Atlas access, or corpus access.
@@ -399,7 +400,8 @@ without expanding or narrowing the approved editable-file scope.
 Writers receive current accepted measurements, applicable file instructions,
 and concise prefetched source for these targets. Legacy preparation gets a small
 default source packet around discovered editable-file anchors. Prefetch uses at
-most 8 KiB; only genuinely small files may be included whole. Requested source
+most 8 KiB and includes complete targeted spans when they fit that total budget;
+only genuinely small files may be included whole. Requested source
 and prefetch share a 16 KiB serialized window, with overlapping reads deduplicated
 and omitted/truncated content identified. `test.read` retrieves further scoped
 ranges. Returned `end_line` and `next_line` describe the source actually delivered
