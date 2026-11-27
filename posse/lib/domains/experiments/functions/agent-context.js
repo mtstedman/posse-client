@@ -214,9 +214,11 @@ export function coordinatorActions(previous, reads, inventory, overview) {
 }
 
 export function validateEditTargets(plan, files, targets = []) {
+  if (targets.length && !targets.some(target => plan.files.some(file => file.path === target.path && file.mode !== "read")))
+    throw new Error("Source targets must include a declared editable file; read-only dependencies may accompany it.");
   for (const target of targets) {
     const file = plan.files.find(file => file.path === target.path);
-    if (!file || file.mode === "read") throw new Error("Edit targets must reference declared editable files.");
+    if (!file) throw new Error("Source targets must reference declared payload files.");
     if (fileDigest(files[target.path]) !== target.sha256) throw new Error("Edit target digest is stale; search or read the accepted snapshot again.");
     if (target.start_line > files[target.path].split("\n").length) throw new Error("Edit target range is outside the accepted file.");
   }

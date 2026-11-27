@@ -21,7 +21,7 @@ export const EXPERIMENT_SETUP_SCHEMA = "posse.experiment.setup.v1";
 export const EXPERIMENT_RUNNER_ROLES = Object.freeze(["coordinator", "writer", "assessor", "proctor"]);
 export const EXPERIMENT_RUNNER_STATES = Object.freeze({ RUNNING: "running", REVIEW: "awaiting_decision", COMPLETE: "completed", BUDGET: "budget_exhausted", INTERRUPTED: "interrupted", ERROR: "error", CANCELLED: "cancelled" });
 export const EXPERIMENT_NUMERIC_SCORERS = Object.freeze(["absolute_error", "squared_error", "exact_match"]);
-export const EXPERIMENT_SANDBOX_LIMITS = Object.freeze({ cpus: 2, memoryMB: 2048, wallSeconds: 600, cases: 1000, payloadBytes: 262144, evaluationBytes: 1048576 });
+export const EXPERIMENT_SANDBOX_LIMITS = Object.freeze({ cpus: 2, memoryMB: 2048, wallSeconds: 1800, cases: 1000, payloadBytes: 262144, evaluationBytes: 1048576 });
 export const EXPERIMENT_PAYLOAD_API = Object.freeze({
   protocol: "jsonl.numeric.v1", input: { case_id: "opaque case identifier", input: "JSON value" },
   output: { case_id: "same case identifier", prediction: "finite number" },

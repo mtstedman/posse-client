@@ -609,7 +609,7 @@ tool, not general tool batching, repository Atlas access, or corpus access.
 edit brief, not replacement code or a generated diff. Targets guide the writer
 without expanding or narrowing the approved editable-file scope.
 `test.propose_batch` requires these structured targets for every queued proposal;
-file locations written only in its prose do not produce targeted prefetch.
+file locations written only in its prose do not produce targeted prefetch. Targets must include an editable file, but may also include declared read-only dependencies such as a frozen test contract. Prefetch does not make those files writable.
 
 Writers receive current accepted measurements, applicable file instructions,
 and concise prefetched source for these targets. Legacy preparation gets a small
@@ -795,7 +795,10 @@ The backend requires Linux Docker with cgroup v2, effective CPU/memory/pid
 controls, seccomp and a user systemd manager. The container has a read-only
 root and payload mount, no network, dropped capabilities, no privilege gain,
 non-root UID, bounded tmpfs/output, and no owner socket, scorer or labels.
-Owner caps are 2 CPUs, 2 GiB and 600 seconds per execution, one active sandbox.
+Owner caps are 2 CPUs, 2 GiB and 1,800 seconds per execution, one active sandbox.
+The plan default remains 600 seconds. Set `plan.resources.wall_seconds` explicitly
+when a slower quality experiment needs more time to finish its full corpus; this
+does not change scoring, CPU/memory limits, or the separate runner wall budget.
 One runner campaign is active or awaiting review at a time. A systemd deadline
 removes the container even if the Node owner dies. Missing
 capabilities fail closed; there is no unsandboxed fallback. This boundary
