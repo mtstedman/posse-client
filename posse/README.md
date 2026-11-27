@@ -597,7 +597,9 @@ Explicit edit targets reserve up to 4 KiB for complete anchors within the existi
 16 KiB cap, so auxiliary reads cannot evict those anchors. Oversized targets are
 not silently clipped into pinned evidence. Lookup attempts still consume their
 turn allowance, including blocked duplicates; use the retained source and notes.
-Prefer `test.submit_patch` exact replacements; full-file candidates
+Prefer `test.submit_patch` exact replacements. An empty `before` string fills an
+empty declared file, including a new helper, in the same call as ordinary edits.
+It cannot insert into a nonempty or undeclared file; file scope still applies. Full-file candidates
 remain supported for compatibility. The harness computes the diff deterministically.
 Assessors receive complete replacement hunks with coordinates in both snapshots,
 prefetched context around each changed region, and review constraints,
