@@ -80,7 +80,7 @@ export class ExperimentCampaigns {
     });
   }
   // Private owner callback: deliberately not exposed as an operator/agent API.
-  complete(id, runID, { metrics, evidence_digest }) {
+  complete(id, runID, { metrics, evidence_digest, field_summary }) {
     return this.store.transaction(() => {
       const c = this.load(id);
       if (c.state !== S.RUNNING || c.active_run?.id !== runID) throw new Error("Run is no longer active.");
@@ -88,7 +88,7 @@ export class ExperimentCampaigns {
         || c.plan.metrics.some(m => !Object.hasOwn(metrics, m.id) || !Number.isFinite(metrics[m.id]))) throw new Error("Complete owner-scored evidence is required.");
       const run = c.active_run; c.active_run = null;
       if (run.baseline) {
-        c.starting_baseline = { ...c.starting_baseline, metrics, evidence_digest, run_id: runID };
+        c.starting_baseline = { ...c.starting_baseline, metrics, evidence_digest, run_id: runID, ...(field_summary ? { field_summary } : {}) };
         c.current_baseline = structuredClone(c.starting_baseline);
         const assessment = assessExperimentImprovement(c.plan, metrics, metrics);
         if (assessment.tradeoff?.valid === false) {
@@ -97,6 +97,7 @@ export class ExperimentCampaigns {
         } else c.state = assessment.goal_reached ? S.GOAL : S.READY;
       } else {
         const row = c.iterations.at(-1);
+        if (field_summary) row.field_summary = field_summary;
         row.status = "completed"; row.metrics = metrics; row.evidence_digest = evidence_digest; row.run_id = runID;
         row.assessment = assessExperimentImprovement(c.plan, c.current_baseline.metrics, metrics, c.starting_baseline.metrics);
         c.state = S.REVIEW;
@@ -121,7 +122,7 @@ export class ExperimentCampaigns {
     if (decision === "accept") {
       if (!row.assessment.guardrails_passed) throw new Error("Cannot accept a candidate that violates guardrails.");
       this.snapshot(row.snapshot_digest);
-      c.current_baseline = { snapshot_digest: row.snapshot_digest, metrics: row.metrics, evidence_digest: row.evidence_digest, run_id: row.run_id, iteration: row.number };
+      c.current_baseline = { snapshot_digest: row.snapshot_digest, metrics: row.metrics, evidence_digest: row.evidence_digest, run_id: row.run_id, iteration: row.number, ...(row.field_summary ? { field_summary: row.field_summary } : {}) };
     }
     row.decision = { value: decision, actor, reason, at: this.now() };
     c.state = decision === "accept" && row.assessment.goal_reached ? S.GOAL : c.iterations.length >= c.plan.max_iterations ? S.EXHAUSTED : S.READY;

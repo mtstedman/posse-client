@@ -14,7 +14,7 @@ export function validateCorpusContract(contract) {
   if (Buffer.byteLength(JSON.stringify(contract)) > 16000) throw new Error('Corpus contract exceeds 16 KiB.');
   const seen = new Set();
   for (const field of contract.fields) {
-    if (!object(field) || !identifier(field.id) || field.id === 'score' || field.id === EXPERIMENT_LATENCY_METRIC || seen.has(field.id) || !K.includes(field.kind) || !finite(field.weight) || field.weight <= 0 || field.weight > 1000000
+    if (!object(field) || !identifier(field.id) || field.id === 'score' || field.id === EXPERIMENT_LATENCY_METRIC || seen.has(field.id) || !K.includes(field.kind) || !finite(field.weight) || field.weight < 0 || field.weight > 1000000
       || !Array.isArray(field.path) || !field.path.length || field.path.length > 8 || field.path.some(p => typeof p !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(p))) throw new Error('Invalid scoring field.');
     const allowed = ['id', 'path', 'kind', 'weight', 'depends_on', 'tolerance', 'partial_range', 'iou_threshold', 'attributes'];
     if (Object.keys(field).some(k => !allowed.includes(k))) throw new Error('Unknown scoring option.');
@@ -32,6 +32,7 @@ export function validateCorpusContract(contract) {
     } else if (field.attributes !== undefined || field.iou_threshold !== undefined) throw new Error('Object matching options only apply to object fields.');
     seen.add(field.id);
   }
+  if (!contract.fields.some(field => field.weight > 0)) throw new Error('Scoring contract needs a positive-weight field; zero weight is diagnostic only.');
   return contract;
 }
 
@@ -94,19 +95,26 @@ function fieldScore(field, expected, prediction) {
 }
 
 function scoreFields(fields, expected, prediction, allowUnknownAttributes = false) {
-  const values = {}; let total = 0, weight = 0;
+  const values = {}, diagnostics = {}; let total = 0, weight = 0;
   for (const field of fields) {
     const answer = read(expected, field.path);
-    if (answer === undefined) continue; // Explicitly unknown: not a wrong prediction.
-    const scored = fieldScore(field, answer, read(prediction, field.path));
+    if (answer === undefined) { diagnostics[field.id] = 'unknown'; continue; }
+    if (object(answer) && answer.not_applicable === true && Object.keys(answer).length === 1) {
+      diagnostics[field.id] = 'not_applicable'; continue;
+    }
+    const received = read(prediction, field.path);
+    const scored = fieldScore(field, answer, received);
     values[field.id] = field.depends_on?.some(id => values[id] !== 1) ? 0 : scored;
+    diagnostics[field.id] = values[field.id] === 1 ? 'correct'
+      : received === undefined || received === null || received === '' ? 'missing'
+      : values[field.id] > 0 ? 'partial' : 'incorrect';
     total += values[field.id] * field.weight; weight += field.weight;
   }
   if (!weight) {
-    if (allowUnknownAttributes) return { score: 1, values }; // The matched box is known; its attributes are not.
+    if (allowUnknownAttributes) return { score: 1, values, diagnostics }; // The matched box is known; its attributes are not.
     throw new Error('Answer key has no scoreable fields.');
   }
-  return { score: total / weight, values };
+  return { score: total / weight, values, diagnostics };
 }
 
 export function scoreCorpusAnswer(contract, expected, prediction) {

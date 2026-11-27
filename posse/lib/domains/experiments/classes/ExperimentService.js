@@ -95,8 +95,9 @@ export class ExperimentService {
         this.assertOwner();
         const snapshot = progress.snapshot();
         if (snapshot.completed !== evaluation.cases.length) throw new Error("incomplete_evidence");
-        if (evaluation.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA) this.campaigns.store.put(K.CASE_RESULTS, run.id, corpusCaseReport(evaluation, observations, { campaignID: c.id, runID: run.id }));
-        this.campaigns.complete(c.id, run.id, { metrics: Object.fromEntries(snapshot.metrics.map(m => [m.id, m.current])), evidence_digest: result.evidence_digest });
+        const caseReport = evaluation.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? corpusCaseReport(evaluation, observations, { campaignID: c.id, runID: run.id }) : null;
+        if (caseReport) this.campaigns.store.put(K.CASE_RESULTS, run.id, caseReport);
+        this.campaigns.complete(c.id, run.id, { metrics: Object.fromEntries(snapshot.metrics.map(m => [m.id, m.current])), evidence_digest: result.evidence_digest, field_summary: caseReport?.field_summary });
       } catch (error) {
         // Guest diagnostics must not leak private host paths or become policy.
         if (!error.cleanupUnconfirmed) {

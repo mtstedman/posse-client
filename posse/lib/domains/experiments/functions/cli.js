@@ -1,3 +1,4 @@
+import { experimentSkillInventory } from './skills.js';
 import { experimentBudget } from './budget.js';
 import { runCorpusCli } from "./corpus-cli.js";
 import { experimentInitContract, EXPERIMENT_WORKSPACE_ACTIONS } from "../../../catalog/experiment-workspace.js";
@@ -10,6 +11,7 @@ import { experimentSetupContract, validateExperimentSetup } from "./setup.js";
 
 export async function runExperimentCli(argv = [], { input = process.stdin, print = value => console.log(value), request = ownerRequest, initialize = initializeExperiment, workspace = workspaceExperimentCommand } = {}) {
   const [action = "help", ...rest] = argv;
+  if (action === "skills" && !rest.length) { print(JSON.stringify({ skills: experimentSkillInventory(), attach: "Role-scoped map: setup.skills:{writer:[image-manipulation]} in init/launch, skills:{setup:[image-manipulation]} in setup-prepare, or setup.attach_skill with an explicit role." })); return 0; }
   if (action === "corpus") return runCorpusCli(rest, { input, print });
   if (rest.length) {
     if (rest.length !== 1 || !EXPERIMENT_WORKSPACE_ACTIONS.includes(action) || rest[0].startsWith("-")) throw new Error(EXPERIMENT_USAGE);

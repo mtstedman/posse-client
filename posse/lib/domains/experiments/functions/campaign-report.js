@@ -13,10 +13,11 @@ export function campaignReport(c) {
       values: Object.fromEntries(c.plan.metrics.map(metric => [metric.id, c.active_run.progress?.metrics.find(item => item.id === metric.id)?.current ?? null])) } : null,
     current_baseline_snapshot: c.current_baseline.snapshot_digest,
     metrics: c.plan.metrics.map(metric => ({ ...metric, baseline: c.starting_baseline.metrics?.[metric.id] ?? null, current_baseline: c.current_baseline.metrics?.[metric.id] ?? null })),
+    field_baselines: { starting: c.starting_baseline.field_summary ?? null, accepted: c.current_baseline.field_summary ?? null },
     decision_tables: decisionTables(c, c.iterations.length || 1),
     iterations: c.iterations.map(row => {
       const live = c.active_run && !c.active_run.baseline && row.status === "running" ? c.active_run.progress : null;
-      return { number: row.number, status: row.status, snapshot_digest: row.snapshot_digest,
+      return { number: row.number, status: row.status, ...(row.field_summary ? { field_summary: row.field_summary } : {}), snapshot_digest: row.snapshot_digest,
         decision: row.decision?.value ?? (row.status === "completed" ? "pending" : "none"), iteration_passed: row.assessment?.iteration_passed ?? null, goal_reached: row.assessment?.goal_reached ?? null,
         ...(row.assessment?.tradeoff ? { acceptance_reason: row.assessment.reason, tradeoff: row.assessment.tradeoff } : {}),
         percent_complete: live?.percent_complete ?? (row.status === "completed" ? 100 : null),

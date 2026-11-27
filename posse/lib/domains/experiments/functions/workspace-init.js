@@ -73,7 +73,7 @@ export async function initializeExperiment(request, { cwd = process.cwd(), git =
     if (Object.hasOwn(request, 'corpus') && experimentDigest(request.corpus) !== experimentDigest(artifact.template.corpus)) throw new Error('Setup artifact binds a different corpus revision. Prepare a compatible artifact.');
     if (Object.hasOwn(request, 'evaluation') || Object.hasOwn(request, 'runtime_path')) throw new Error('Artifact initialization uses its verified corpus and runtime.');
     const overrides = request.setup || {};
-    if (Object.keys(overrides).some(k => !['budget', 'models', 'prompt', 'guidelines', 'plan'].includes(k)) || Object.keys(overrides.plan || {}).some(k => !['max_iterations', 'acceptance'].includes(k))) throw new Error('Artifact setup overrides are limited to run budget/models/instructions and iteration/acceptance policy.');
+    if (Object.keys(overrides).some(k => !['budget', 'models', 'prompt', 'guidelines', 'plan', 'skills'].includes(k)) || Object.keys(overrides.plan || {}).some(k => !['max_iterations', 'acceptance'].includes(k))) throw new Error('Artifact setup overrides are limited to run budget/models/instructions, role-scoped skills and iteration/acceptance policy.');
     if (['mapping', 'checks', 'prepare'].some(k => Object.hasOwn(request, k)) || (Object.hasOwn(request, 'image') && request.image !== artifact.template.image)) throw new Error('Prepare a new artifact to change adapter bindings, checks or runtime.');
     request = { ...artifact.template, ...request, setup: { ...artifact.template.setup, ...overrides, plan: { ...artifact.template.setup.plan, ...overrides.plan } } };
   }
@@ -131,7 +131,7 @@ export async function initializeExperiment(request, { cwd = process.cwd(), git =
   const worktree = path.join(path.dirname(repo), 'posse-workbranch', path.basename(repo), `experiment-${request.name}-${identity.slice(0, 8)}`);
   const setup = { ...supplied, schema: EXPERIMENT_SETUP_SCHEMA, prompt: supplied.prompt || plan.objective,
     guidelines: supplied.guidelines || 'Preserve the public interface. Use general improvements; do not infer or special-case hidden evaluation answers.',
-    plan, files, models: { ...structuredClone(D.models), ...supplied.models }, budget: budgetDefaults(supplied.budget),
+    plan, files, ...(supplied.skills ? { skills: supplied.skills } : {}), models: { ...structuredClone(D.models), ...supplied.models }, budget: budgetDefaults(supplied.budget),
     integration: { strategy: 'direct', repo_path: repo, worktree_path: worktree, branch: `experiment/${request.name}-${identity.slice(0, 8)}`,
       trunk_branch: trunk, base_commit: base, commit_message: `Apply accepted experiment ${request.name}`, mapping, files: scope,
       checks: request.checks, prepare: request.prepare || [], budget: { ...D.integration_budget } } };

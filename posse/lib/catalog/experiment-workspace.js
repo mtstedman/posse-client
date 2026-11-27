@@ -18,5 +18,5 @@ export function experimentInitContract() {
       metrics: [{ id: 'error', unit: 'units', role: 'goal', direction: 'lower', aggregation: 'mean', target: 0.01 }],
     } }, evaluation: { schema: EXPERIMENT_NUMERIC_SCHEMA, cases: [{ id: 'case-1', input: 1.2, expected: 1 }], scorers: { error: 'absolute_error' } },
     checks: [{ program: 'node', args: ['--test'], cwd: '.', timeout_seconds: 120 }] },
-    note: 'Supply representative evaluation cases, objective, metrics, file scope, and checks. Files default to pinned Git contents at the path after work/. Inline read-only adapters may be supplied in setup.files. Initialization prepares and validates without model calls; launch starts the prepared experiment.' };
+    note: 'Supply representative evaluation cases, objective, metrics, file scope, and checks. Files default to pinned Git contents at the path after work/. Inline read-only adapters may be supplied in setup.files. Optional setup.skills maps specific roles (setup, idea, writer, assessor) to built-in skill IDs; discover them with experiment skills. Initialization prepares and validates without model calls; launch starts the prepared experiment.' };
 }

@@ -587,7 +587,7 @@ Prefer `test.submit_patch` exact replacements; full-file candidates
 remain supported for compatibility. The harness computes the diff deterministically.
 Assessors receive that compact diff, local candidate context, and review constraints,
 then return a review decision. Writer and assessor do not receive unrelated
-accepted/rejected history. Truncated changes require further reading before approval.
+raw source or narrative change history. All improvement roles receive measured starting/accepted baselines and a compact table of every run status and numeric result; identical result profiles are shared. The dispatcher captures a missing baseline deterministically before the first idea call. Failed or unmeasured runs have null results, never fabricated zeros. Truncated changes require further reading before approval.
 Writer and assessor each have at most twelve lookup turns per preparation, including
 resource inspection; a batch counts as one turn with at most eight operations.
 With three, two, and one lookup turns remaining, a concise nudge asks them to
@@ -2867,3 +2867,55 @@ Caller-owned `posse agent dispatch` requests accept optional `reasoning_effort` 
 Operator tests of Invoke agent tools (`posse tools test` and Bossy activation tests) also run without usage cutoffs. Disconnecting the operator request cancels that test and its delegated work; an interrupted test does not publish a passing entry.
 
 Press Ctrl+C to cancel a CLI run and its delegated work, or run `posse agent stop <session-id>` from another terminal. Bossy provides Stop / Ctrl+X. Cancellation revokes the active turn and cancels its child tool runs. An external stop is observed by a quiet provider on the next owner heartbeat (within 30 seconds); Ctrl+C aborts the local provider immediately. Provider inactivity detection, individual script execution timeouts, grants, scope and write approvals remain enforced. Active agent work has no total elapsed-time cutoff.
+
+
+Corpus field diagnostics support zero-weight fields: these are scored but do not
+change the weighted composite or its acceptance policy. Every contract needs at
+least one positive-weight field. An answer `{ "not_applicable": true }` excludes
+that field for that case; an omitted answer is unknown, not automatically correct.
+Known fields distinguish correct, partial, incorrect and missing predictions.
+Case reports and campaign baselines/iterations retain an owner-computed
+`field_summary` with counts, mean score, accuracy over applicable known answers,
+and accuracy when returned. These summaries reach idea, writer and reviewer
+contexts without answer strings, case labels, raw predictions or images. Numeric
+values are rounded to six significant digits only in agent context; stored results
+and acceptance calculations retain full precision. Diagnostic fields with incomplete
+answer coverage need not be selected as plan metrics to appear in these summaries.
+
+### Optional experiment skills
+
+`posse experiment skills` lists built-in suites. Attach them to specific agent
+roles in a specific experiment with `setup.skills`, for example:
+
+```json
+{"skills":{"writer":["image-manipulation"]}}
+```
+
+The example belongs inside `setup` for init/launch, or at the top level of a
+`setup-prepare` request. Supported roles are `setup` (the builder), `idea`, `writer`,
+and `assessor`. There is no implicit all-agent binding. The builder discovers
+suites through `setup.skills` and attaches one with
+`setup.attach_skill({"id":"image-manipulation","role":"writer"})`. That call
+attaches only to future writers; target `setup` to give the builder itself the
+suite. Attachments persist in the immutable setup artifact and setup digest.
+Explicit bindings supplied when reusing an artifact replace its inherited role
+map. Changing diagnostic tool bindings alone reuses adapter/runtime validation.
+
+The packaged [image-manipulation skill](skills/image-manipulation/SKILL.md) provides
+short, role-local instructions plus `image.tools` and `image.transform`. Discover
+operation schemas once; transform up to four named recipes in one call. Operations
+include crop, resize, grayscale, Gaussian blur, contrast normalization, fixed/Otsu
+and adaptive thresholds, inversion, morphology, Sobel edges, perspective correction
+and convex-quad masking. PNG decoding is built in; JPEG/WebP use the existing
+bounded ImageMagick/ffmpeg decoder. No package installation is required on hosts
+that already support those image previews.
+
+Resources are selected only by pinned corpus case and alias, or by an artifact
+from the same agent session. Derived PNGs are bounded, immutable and temporary;
+previews travel as image blocks only on the following decision. Text receipts hold
+recipes, geometry and hashes, never base64 or hidden answers. Tool use consumes
+the agent's existing lookup/call budget. These caller-owned tools grant no shell,
+host filesystem access, corpus writes or native tool authority. A new suite must
+be registered in the catalog and explicitly dispatched; a skill file alone cannot
+add executable capabilities. Product code and tests still own measured changes:
+diagnostic previews never replace frozen benchmark inputs.

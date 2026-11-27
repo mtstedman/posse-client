@@ -25,5 +25,5 @@ export function validateExperimentSetup(setup) {
   }
   if (Buffer.byteLength(JSON.stringify(setup) || "") > 524288) errors.push("Setup exceeds 512 KiB.");
   return { ok: errors.length === 0, setup_digest: errors.length ? null : experimentDigest(setup), errors,
-    summary: errors.length ? null : { objective: setup.plan.objective, max_iterations: setup.plan.max_iterations, acceptance: setup.plan.acceptance || { mode: "human" }, models: setup.models, budget: setup.budget, integration: setup.integration || null, metrics: setup.plan.metrics, files: setup.plan.files.map(file => file.path) } };
+    summary: errors.length ? null : { objective: setup.plan.objective, max_iterations: setup.plan.max_iterations, acceptance: setup.plan.acceptance || { mode: "human" }, models: setup.models, budget: setup.budget, skills: setup.skills || {}, integration: setup.integration || null, metrics: setup.plan.metrics, files: setup.plan.files.map(file => file.path) } };
 }

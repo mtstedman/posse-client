@@ -207,15 +207,40 @@ export function validateEditTargets(plan, files, targets = []) {
   return targets;
 }
 
-// Current state for an edit/review, without polling bookkeeping or unrelated
-// hypotheses. Only the coordinator gets the experiment decision history.
+// Every improvement pass sees the measured baseline and all run outcomes. Reuse
+// identical profiles, so unchanged field results occupy one numeric row set.
 export function agentFindings(c, role = "coordinator") {
-  const metrics = { columns: ["id", "target", "accepted", ...(role === "coordinator" ? ["starting", "latest"] : [])],
-    rows: c.plan.metrics.map(m => [m.id, m.target ?? null, c.current_baseline.metrics?.[m.id] ?? null,
-      ...(role === "coordinator" ? [c.starting_baseline.metrics?.[m.id] ?? null, c.iterations.at(-1)?.metrics?.[m.id] ?? null] : [])]) };
-  if (role !== "coordinator") return { metrics };
+  const ids = c.plan.metrics.map(metric => metric.id);
+  const profiles = [], seen = new Map(), fieldProfiles = [], fieldSeen = new Map();
+  const rounded = value => typeof value === "number" ? Number(value.toPrecision(6)) : value;
+  const profile = record => {
+    if (!record?.metrics) return null;
+    let fields;
+    if (record.field_summary) {
+      const rows = record.field_summary.rows.map(row => row.map(rounded)), fieldKey = JSON.stringify(rows);
+      if (!fieldSeen.has(fieldKey)) { fieldSeen.set(fieldKey, fieldProfiles.length); fieldProfiles.push(rows); }
+      fields = fieldSeen.get(fieldKey);
+    }
+    const value = { metrics: ids.map(id => rounded(record.metrics[id] ?? null)), ...(fields !== undefined ? { fields } : {}) };
+    const key = JSON.stringify(value);
+    if (!seen.has(key)) { seen.set(key, profiles.length); profiles.push(value); }
+    return seen.get(key);
+  };
+  const baseline = profile(c.starting_baseline), accepted = profile(c.current_baseline);
+  const rows = c.iterations.map(row => [row.number, row.status, row.decision?.value ?? null, profile(row),
+    brief(row.failure_reason || row.assessment?.reason, 120) || null]);
+  const fieldColumns = c.starting_baseline.field_summary?.columns || c.iterations.find(row => row.field_summary)?.field_summary.columns;
+  const result = {
+    baseline_status: baseline === null ? "not_measured" : "measured",
+    metrics: { columns: ["id", "direction", "aggregation", "role", "target"],
+      rows: c.plan.metrics.map(m => [m.id, m.direction, m.aggregation, m.role, m.target ?? null]) },
+    results: { metric_columns: ids, ...(fieldColumns ? { field_columns: fieldColumns, field_profiles: fieldProfiles } : {}), profiles,
+      starting_baseline: baseline, accepted_baseline: accepted,
+      runs: { columns: ["iteration", "status", "decision", "profile", "reason"], rows } },
+  };
+  if (role !== "coordinator") return result;
   const latest = c.iterations.at(-1);
-  return { state: c.state, iterations_remaining: c.plan.max_iterations - c.iterations.length, metrics,
+  return { ...result, state: c.state, iterations_remaining: c.plan.max_iterations - c.iterations.length,
     latest_decision: latest ? { iteration: latest.number, decision: latest.decision?.value ?? null, reason: latest.assessment?.reason ?? latest.failure_reason ?? null,
       utility_gain: latest.assessment?.tradeoff?.utility_gain ?? null } : null };
 }

@@ -1,3 +1,4 @@
+import { validateExperimentSkills } from '../functions/skills.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SETUP_AGENT_OPERATIONS as O, SETUP_AGENT_OBJECT as K, SETUP_AGENT_STATES as S, SETUP_AGENT_DEFAULTS as D, SETUP_AGENT_REQUEST } from '../../../catalog/experiment-setup-agent.js';
@@ -28,7 +29,7 @@ export class ExperimentSetupService {
   status(id) {
     const r = this.store.get(K, id); if (!r) throw new Error('Unknown setup preparation.');
     return { id: r.id, state: r.state, repo_path: r.repo, objective: r.objective, base_commit: r.base_commit || null, artifact: r.artifact || null,
-      baseline_required: r.state === S.READY,
+      baseline_required: r.state === S.READY, skills: r.skills || {},
       selection: r.selection || null, reuse: r.reuse || null, child: r.child || null, usage: r.usage, combined_usage: this.combinedUsage(r), budget: r.config,
       pending_call: r.pending_call, validation_attempts: r.validation_attempts, last_action: r.last_action || null, error: r.error || null,
       runtime: this.runtimeSummary(r.runtime), environment: r.environment || null, install: r.install || null,
@@ -57,7 +58,7 @@ export class ExperimentSetupService {
     this.guard();
     const record = { id: randomUUID(), repo: corpus.repo, objective: args.objective, request_key: args.idempotency_key, digest, state: S.RUNNING,
       config: { ...D, ...args.budget, model: args.model || D.model, reasoning_effort: args.reasoning_effort || D.reasoning_effort },
-      usage: { model_calls: 0, tokens: 0, spend_usd: 0 }, pending_call: false, validation_attempts: 0 };
+      skills: validateExperimentSkills(args.skills || {}), skills_explicit: args.skills !== undefined, usage: { model_calls: 0, tokens: 0, spend_usd: 0 }, pending_call: false, validation_attempts: 0 };
     record.deadline_at = this.now() + record.config.wall_seconds * 1000;
     this.save(record);
     const controller = new AbortController(), task = { controller, promise: null }; this.active.set(record.id, task);
@@ -149,6 +150,9 @@ export class ExperimentSetupService {
         if (record.environment) record.environment.state = 'reused';
       }
     }
+    const skills = validateExperimentSkills(record.skills_explicit ? record.skills : artifact.template.setup.skills || {});
+    record.skills = skills;
+    const skillsChanged = experimentDigest(skills) !== experimentDigest(artifact.template.setup.skills || {});
     const runtimeChanged = Boolean(runtime && (runtime.image !== artifact.validation.image || runtime.recipe_digest !== artifact.runtime?.recipe_digest));
     const files = await setupTemplateFiles(artifact.template, source), sourceChanged = experimentDigest(files) !== artifact.validation.source_digest;
     const corpusChanged = selected.revision !== artifact.template.corpus.revision;
@@ -156,10 +160,17 @@ export class ExperimentSetupService {
     record.reuse = { artifact: artifactId, reason, deterministic: true, source_changed: sourceChanged, corpus_changed: corpusChanged, runtime_changed: runtimeChanged,
       reused_components: ['adapter', ...(runtimeChanged ? [] : ['runtime']), 'checks', ...(sourceChanged || runtimeChanged ? [] : ['source_boundary']), ...(corpusChanged ? ['existing_verified_cases'] : ['corpus'])] };
     if (!sourceChanged && !corpusChanged && !runtimeChanged && record.objective === artifact.template.setup.plan.objective) {
-      record.artifact = artifactId; record.state = S.READY; this.save(record);
-      return { ready: true, artifact: artifactId, validation_reused: true, reuse: record.reuse };
+      if (skillsChanged) {
+        const updated = structuredClone(artifact); delete updated.artifact; delete updated.schema;
+        updated.template.setup.skills = skills;
+        const saved = await artifacts.save(updated, { guard: () => this.guard(signal) });
+        record.artifact = saved.artifact;
+      } else record.artifact = artifactId;
+      record.state = S.READY; this.save(record);
+      return { ready: true, artifact: record.artifact, validation_reused: true, reuse: record.reuse };
     }
     const template = structuredClone(artifact.template); delete template.corpus;
+    template.setup.skills = skills;
     if (runtime) template.image = runtime.image;
     const materialized = await materializeSetupTemplate(template, { source, corpus, selected, objective: record.objective });
     const oldCases = new Set(prior.entries.map(e => e.case_id));

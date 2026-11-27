@@ -1,3 +1,4 @@
+import { experimentSkillInventory, experimentSkillContext, experimentSkillTools, experimentSkillSession, validateExperimentSkills } from '../functions/skills.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,11 +28,23 @@ export class ExperimentSetupAgent {
     }
     this.evaluation = await this.corpora.evaluation(corpus, [{ id: 'score', role: 'goal', direction: 'higher', aggregation: 'mean', unit: 'score' }]);
     this.selected = corpus;
+    this.skillSession?.clear(); this.skillSession = experimentSkillSession(this.record.skills, this.evaluation, 'setup');
     return { ready: true, ...publicCorpusContract(this.evaluation) };
   }
   async execute(call, signal) {
     const args = call.arguments;
     this.jobs.guard(signal);
+    if (call.name === 'setup.skills') return experimentSkillInventory(this.record.skills);
+    if (call.name === 'setup.attach_skill') {
+      this.record.skills = validateExperimentSkills({ ...this.record.skills, [args.role]: [...new Set([...(this.record.skills?.[args.role] || []), args.id])] });
+      this.record.skills_explicit = true;
+      if (!this.skillSession) this.skillSession = experimentSkillSession(this.record.skills, this.evaluation, 'setup');
+      this.jobs.save(this.record);
+      return { attached: this.record.skills, tools: experimentSkillTools(this.record.skills, 'setup').map(tool => tool.name) };
+    }
+    if (experimentSkillTools(this.record.skills, 'setup').some(tool => tool.name === call.name)) {
+      const viewed = await this.skillSession.execute(call, signal); this.images = viewed.images; return viewed.result;
+    }
     if (call.name === 'setup.install_deps') {
       if (this.request.image) throw new Error('The request pins an existing runtime image. Omit request.image in a new setup request to provision dependencies.');
       const { notes: _notes, ...recipe } = args;
@@ -90,7 +103,10 @@ export class ExperimentSetupAgent {
         return this.jobs.reuse(this.record, args.artifact, this.selected, this.source, signal, args.reason, this.request.image, this.record.runtime?.recipe);
       }
       if (this.record.validation_attempts >= L.repairs) throw new Error('Adapter validation attempt allowance exhausted. State the concrete blocker.');
-      const template = args.template;
+      const template = structuredClone(args.template);
+      template.setup.skills = validateExperimentSkills({ ...(template.setup.skills || {}), ...(this.record.skills || {}) });
+      this.record.skills = template.setup.skills;
+      if (!this.skillSession) this.skillSession = experimentSkillSession(this.record.skills, this.evaluation, 'setup');
       this.record.validation_attempts++; this.jobs.save(this.record);
       const materialized = await materializeSetupTemplate(template, { source: this.source, corpus: this.corpora, selected: this.selected, objective: this.request.objective });
       this.jobs.guard(signal);
@@ -109,7 +125,7 @@ export class ExperimentSetupAgent {
     throw new Error('Unknown setup tool.');
   }
   async run(record, request, signal, source) {
-    this.record = record; this.request = request; this.images = []; this.batchReceipt = null;
+    this.record = record; this.request = request; this.skillSession = experimentSkillSession(record.skills, null, 'setup'); this.images = []; this.batchReceipt = null;
     this.corpora = await this.jobs.service.corpora.open(record.repo);
     this.source = source || await this.jobs.source(record.repo).open(); this.artifacts = this.jobs.artifacts(record.repo);
     record.base_commit = this.source.base;
@@ -125,8 +141,9 @@ export class ExperimentSetupAgent {
         const usage = this.jobs.combinedUsage(record), budget = record.config;
         if (usage.model_calls >= budget.model_calls || usage.tokens >= budget.tokens || usage.spend_usd >= budget.spend_usd) { record.state = S.BUDGET; record.error = 'Setup model budget exhausted.'; break; }
         const remaining = budget.model_calls - usage.model_calls;
-        const tools = remaining === 1 ? TOOLS.filter(t => ['setup.submit', 'setup.reuse', 'setup.blocked'].includes(t.name)) : TOOLS;
+        const tools = remaining === 1 ? TOOLS.filter(t => ['setup.submit', 'setup.reuse', 'setup.blocked'].includes(t.name)) : [...TOOLS, ...experimentSkillTools(record.skills, 'setup')];
         const context = { objective: request.objective, base_commit: record.base_commit, inventory, anchors: prefetched.overview, unavailable_prefetch: prefetched.unavailable,
+          available_skills: experimentSkillInventory(record.skills), skills: experimentSkillContext(record.skills, 'setup'),
           available_artifacts: artifacts, corpus_options: options, selected_corpus: this.evaluation ? publicCorpusContract(this.evaluation) : null,
           payload_api: EXPERIMENT_CORPUS_PAYLOAD_API, template_example: { setup: { plan: { objective: request.objective, entrypoint: 'work/adapter.mjs',
             files: [{ path: 'work/adapter.mjs', mode: 'read', instructions: 'Frozen JSONL adapter.' }, { path: 'work/src/algorithm.mjs', mode: 'modify', instructions: 'Preserve the public interface; improve the general algorithm.' }],
@@ -166,6 +183,6 @@ export class ExperimentSetupAgent {
         }
         this.jobs.save(record);
       }
-    } finally { await fs.rm(directory, { recursive: true, force: true }); }
+    } finally { this.skillSession?.clear(); await fs.rm(directory, { recursive: true, force: true }); }
   }
 }
