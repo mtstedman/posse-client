@@ -263,6 +263,9 @@ export function agentFindings(c, role = "coordinator") {
 
 export function rememberSourceRead(history, entry) {
   if (entry.source_reuse) history.reuse = { path: entry.path, version: entry.version, start_line: entry.start_line, ...entry.source_reuse };
+  // A blocked duplicate adds no evidence and must not evict a dependency or
+  // consume the fresh-result allowance merely by being requested again.
+  if (entry.source_reuse?.blocked) return;
   // Deduplication must use the bytes the next decision can actually see, not
   // the larger raw read that sourcePacket would otherwise trim afterwards.
   const bounded = value => value.tool === "test.read" && typeof value.content === "string" ? sourcePacket({ entries: [value], omitted: 0 }).requested_source[0] : value;
@@ -287,7 +290,13 @@ export function rememberSourceRead(history, entry) {
   });
   history.entries.push(retained);
   history.fresh = Math.min(history.entries.length, (history.fresh || 0) + 1);
-  if (history.entries.length > L.history) { history.entries.shift(); history.omitted++; }
+  // Source retention is bounded by delivered bytes, not an arbitrary count of
+  // fragments. Eight small range continuations can otherwise evict a complete
+  // dependency even when all of them fit comfortably in the packet.
+  const auxiliary = history.entries.filter(value => value.tool !== "test.read");
+  if (auxiliary.length > L.history) {
+    history.entries.splice(history.entries.indexOf(auxiliary[0]), 1); history.omitted++;
+  }
 }
 
 export function sourcePacket(history, extra = {}, maxBytes = L.contextBytes) {

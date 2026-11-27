@@ -6,7 +6,7 @@ import { corpusInspectionCases, inspectCorpusResource } from '../functions/corpu
 import { EXPERIMENT_CORPUS_INSPECTION_TOOLS, EXPERIMENT_CORPUS_CASES_TOOL } from '../../../catalog/experiment-inspection.js';
 import { EXPERIMENT_CORPUS_EVALUATION_SCHEMA, EXPERIMENT_CORPUS_PAYLOAD_API } from '../../../catalog/experiment-corpus.js';
 import { EXPERIMENT_OBJECTS as K, EXPERIMENT_STATES as S, EXPERIMENT_RUNNER_STATES as R, EXPERIMENT_PAYLOAD_API } from "../../../catalog/experiments.js";
-import { AGENT_DISPATCH_PROTOCOL } from "../../../catalog/agent.js";
+import { AGENT_DISPATCH_PROTOCOL, AGENT_DISPATCH_PROTOCOL_ERROR } from "../../../catalog/agent.js";
 import { dispatchAgentTurn } from "../../agents/functions/dispatch-cli.js";
 import { validateToolArguments } from "../../../shared/tools/functions/schema-validation.js";
 import { validateExperimentSetup } from "../functions/setup.js";
@@ -98,16 +98,25 @@ export class ExperimentRunner {
     // A decision-only provider can return prose about unavailable native tools.
     // Repair that response in the same delegated conversation, without making the
     // coordinator rediscover the files and reissue the whole preparation action.
-    let message = await this.decision(record, role, messages, tools, signal, images);
-    try { return this.checkedCall(message, tools); }
+    let message, failure;
+    try { message = await this.decision(record, role, messages, tools, signal, images); }
     catch (error) {
-      const correction = `Your response did not request a valid tool: ${String(error.message).slice(0, 1000)} These are caller-executed JSON tools, even when no native tools are exposed. Return exactly one request using one of: ${tools.map(tool => tool.name).join(", ")}. Match its declared argument schema. Do not claim execution or give a final answer.`;
-      message = await this.decision(record, role, [...messages,
-        { role: "assistant", content: String(message?.content || "").slice(0, 4000) },
-        { role: "user", content: correction }], tools, signal, images);
-      return this.checkedCall(message, tools);
+      // The dispatch boundary has executed no tool and decision() has already
+      // charged this response. Repair it just like an invalid returned call.
+      if (error.code !== AGENT_DISPATCH_PROTOCOL_ERROR || record.error === "model_usage_unknown") throw error;
+      failure = error;
     }
+    if (!failure) {
+      try { return this.checkedCall(message, tools); }
+      catch (error) { failure = error; }
+    }
+    const correction = `Your response did not request a valid tool: ${String(failure.message).slice(0, 1000)} These are caller-executed JSON tools, even when no native tools are exposed. Return exactly one request using one of: ${tools.map(tool => tool.name).join(", ")}. Match its declared argument schema. Emit only that JSON request, without commentary or a second copy. Do not claim execution or give a final answer.`;
+    message = await this.decision(record, role, [...messages,
+      ...(message ? [{ role: "assistant", content: String(message.content || "").slice(0, 4000) }] : []),
+      { role: "user", content: correction }], tools, signal, images);
+    return this.checkedCall(message, tools);
   }
+
   async sourceDecision(record, role, context, finalTools, accepted, candidate, signal, reads = { entries: [], omitted: 0 }) {
     const evaluation = this.service.evaluations[record.setup.plan.evaluation.ref];
     const resourceTools = evaluation?.schema === EXPERIMENT_CORPUS_EVALUATION_SCHEMA ? EXPERIMENT_CORPUS_INSPECTION_TOOLS : [];

@@ -586,6 +586,10 @@ prefix; continuation ranges are compared against delivered bytes before deduplic
 Setup, idea, writer, and assessor reads use role-local snapshot admission: a fully
 covered range is blocked before extraction, and partial overlap reads only its
 uncovered lines. `source_reuse` reports blocked reads and reused line counts.
+Overlapping reads start their delivered content at the first uncovered line,
+so a retained prefix cannot consume the continuation's byte allowance again.
+Blocked duplicates do not refresh or evict source. Small source fragments are
+retained by the shared byte cap, without an additional eight-fragment cutoff.
 Coverage requires the same path, version and content digest; search hits,
 incomplete lines and evicted source never suppress a later read. Idea source now
 uses the same window rather than repeating source in recent-action history.
@@ -607,6 +611,10 @@ With three, two, and one lookup turns remaining, a concise nudge asks them to
 identify the exact remaining uncertainty, batch final independent reads, and
 converge on a supported patch or review decision, or state a concrete reason to
 decline or reject. The idea phase retains its four-turn lookup allowance.
+A malformed provider tool response receives one local correction with the same
+source and candidate context, just like an invalid returned tool request. Both
+calls count against the budget; unknown usage and provider failures still stop
+normally. No tool executes from a malformed response.
 Afterward only final tools remain. The writer can use `test.decline_candidate`
 when evidence is insufficient, and the assessor can reject. No unsafe edit or
 approval is required to satisfy a limit. These unsuccessful preparations use the

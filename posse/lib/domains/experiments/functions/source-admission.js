@@ -38,13 +38,17 @@ export async function admitSnapshotRead(history, files, args, read) {
     }
     if (result.truncated) break;
   }
-  const lines = []; let next = first;
+  // A retained prefix must not consume the next result's byte allowance again.
+  // Otherwise a large overlapping request can repeatedly clip before its newly
+  // read tail, even though admission correctly avoided duplicate extraction.
+  const deliveredFirst = ranges.length ? ranges[0][0] : first;
+  const lines = []; let next = deliveredFirst;
   while (next <= last && visible.has(next)) lines.push(visible.get(next++));
   const partialLine = partial?.line === next;
   if (partialLine) lines.push(partial.text);
-  const content = lines.join('\n'), end = lines.length ? first + lines.length - 1 : null;
-  return { path: args.path, version: args.version, sha256, start_line: first, total_lines: total,
-    content, content_bytes: Buffer.byteLength(files[args.path].split('\n').slice(first - 1, last).join('\n')), returned_bytes: Buffer.byteLength(content),
+  const content = lines.join('\n'), end = lines.length ? deliveredFirst + lines.length - 1 : null;
+  return { path: args.path, version: args.version, sha256, start_line: deliveredFirst, total_lines: total,
+    content, content_bytes: Buffer.byteLength(files[args.path].split('\n').slice(deliveredFirst - 1, last).join('\n')), returned_bytes: Buffer.byteLength(content),
     end_line: end, partial_line: partialLine, truncated: next <= last,
     next_line: next <= total ? next : null,
     source_reuse: { blocked: ranges.length === 0, reused_lines: reused, read_ranges: ranges,
