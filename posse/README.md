@@ -354,17 +354,61 @@ posse experiment stop < campaign.json
 
 ### Compact agent context
 
-Agents receive separate **accepted** and **rejected** tables with column names
+The harness deterministically schedules baseline measurement, an idea brief,
+editing, assessment, and candidate measurement. There is no paid dispatcher.
+For compatibility, the idea phase uses the existing `models.coordinator`
+configuration; runtime phase and context telemetry call it `idea`. Its final
+`test.prepare` result is a hypothesis/edit brief, not a request to choose the
+next harness operation. It can make at most four source-lookup turns, then must
+return its brief and delegate deeper source discovery to the editor. A malformed
+response gets one local correction; three consecutive failed brief/preparation
+attempts end with `idea_attempts_exhausted`. Any already accepted improvement can
+still proceed through the configured integration path. Baseline-only work does
+not trigger integration. The ordinary model, token, spend, and time budgets
+remain hard limits on starting further model calls.
+New runner records identify their dispatch mode; historical records without that
+field report `unspecified` and do not retroactively claim an idea-model role.
+
+The idea phase receives separate **accepted** and **rejected** tables with column names
 once and one row per decision. Each row includes the change and measurements;
-rejected rows also include the reason. Agent context retains the latest eight
+rejected rows also include the reason. Idea context retains the latest three
 rows per table and reports how many older rows were omitted. The campaign
 report retains the full tables and its existing iteration history for charts.
 
-Writers receive editable source within a 24 KiB allowance and an inventory of
-other files; `test.read` retrieves bounded source ranges when needed. Writers
-can submit exact replacement patches. Assessors receive changed spans and can
-read accepted or candidate source rather than receiving both complete snapshots.
-Truncated spans are explicit and require further reading before approval.
+The idea phase also receives a concise overview of snapshot-specific source
+anchors. `test.search` discovers symbols using Atlas supplied-buffer parsing,
+with an explicit bounded literal-search fallback when native parsing is
+unavailable, the language is unsupported, or no declaration matches. It searches
+only declared snapshot bytes, never the host repository or corpus answers.
+Results include file digests, line ranges, and pagination; old digests cannot
+authorize a target against changed accepted files.
+When several independent source facts are missing, `test.lookup_batch` accepts
+up to eight `test.read`/`test.search` requests in one model turn. It preserves
+request order and per-item errors within a 7,500-byte result allowance; truncated
+items retain continuation information or request an individual lookup. A batch
+uses one of the idea phase's four lookup turns. Editor and assessor batches share
+the ordinary deduplicated source window. This is a closed snapshot-only lookup
+tool, not general tool batching, repository Atlas access, or corpus access.
+
+`test.prepare` still accepts `instructions` alone. It also accepts optional
+`targets`: up to eight objects with `path`, `sha256`, `start_line`, `line_count`
+(at most 200), and a short `change` description. The idea model supplies this
+edit brief, not replacement code or a generated diff. Targets guide the writer
+without expanding or narrowing the approved editable-file scope.
+
+Writers receive current accepted measurements, applicable file instructions,
+and concise prefetched source for these targets. Legacy preparation gets a small
+default source packet around discovered editable-file anchors. Prefetch uses at
+most 8 KiB; only genuinely small files may be included whole. Requested source
+and prefetch share a 16 KiB serialized window, with overlapping reads deduplicated
+and omitted/truncated content identified. `test.read` retrieves further scoped
+ranges. Prefer `test.submit_patch` exact replacements; full-file candidates
+remain supported for compatibility. The harness computes the diff deterministically.
+Assessors receive that compact diff, local candidate context, and review constraints,
+then return a review decision. Writer and assessor do not receive unrelated
+accepted/rejected history. Truncated changes require further reading before approval.
+Public corpus interface details remain available to the writer; resource inspection
+tools and one-decision image delivery remain available to writer and assessor.
 Integration adaptation uses compact current state and recent action receipts,
 not an accumulating transcript of source reads, writes, and successful logs.
 Successful checks return short receipts; failures include bounded diagnostics,
@@ -373,6 +417,9 @@ and `integration.check_log` retrieves the stored log on demand. Operators can us
 or `trunk`, and `check` is a zero-based index). Reports include
 per-role request-byte totals/peaks and reported input/output token counts;
 request bytes measure context size, not billable tokens.
+Cached-input token totals appear only when the provider supplies that statistic.
+Each dispatch remains a self-contained decision with bounded context; the harness
+does not assume a provider remembers earlier requests.
 
 ### Integrating accepted code into trunk
 
