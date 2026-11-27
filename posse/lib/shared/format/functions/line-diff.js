@@ -73,6 +73,31 @@ function editScript(a, b, maxEditDistance) {
   return ops.reverse();
 }
 
+// Exact replacement hunks, with one-based coordinates in both snapshots.
+// Preserve the final empty line so newline-only changes remain reviewable.
+export function lineChangeHunks(before, after, maxEditDistance = DEFAULT_MAX_EDIT_DISTANCE) {
+  if (before === after) return [];
+  const a = before.split("\n"), b = after.split("\n");
+  let prefix = 0, suffix = 0;
+  while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix++;
+  while (suffix < a.length - prefix && suffix < b.length - prefix
+    && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix++;
+  const ops = editScript(a.slice(prefix, a.length - suffix), b.slice(prefix, b.length - suffix), maxEditDistance);
+  if (!ops) return null;
+  const hunks = [];
+  let ai = prefix, bi = prefix, current = null;
+  for (const op of ops) {
+    if (op === "=") { current = null; ai++; bi++; continue; }
+    if (!current) {
+      current = { before_start_line: ai + 1, start_line: bi + 1, removed_lines: 0, added_lines: 0, removed: [], added: [] };
+      hunks.push(current);
+    }
+    if (op === "-") { current.removed.push(a[ai++]); current.removed_lines++; }
+    else { current.added.push(b[bi++]); current.added_lines++; }
+  }
+  return hunks.map(hunk => ({ ...hunk, removed: hunk.removed.join("\n"), added: hunk.added.join("\n") }));
+}
+
 /**
  * Unified diff of `before` -> `after` for one path, or "" when equal. Returns
  * null when the files differ too much to diff within maxEditDistance.

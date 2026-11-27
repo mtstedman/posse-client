@@ -16,7 +16,7 @@ import { campaignProgress } from "../functions/campaign-report.js";
 
 import { EXPERIMENT_CANDIDATE_TOOL as candidateTool, EXPERIMENT_PATCH_TOOL as patchTool, EXPERIMENT_DECLINE_TOOL as declineTool, EXPERIMENT_READ_TOOL as readTool, EXPERIMENT_SEARCH_TOOL as searchTool, EXPERIMENT_LOOKUP_BATCH_TOOL as batchTool, EXPERIMENT_REVIEW_TOOL as reviewTool, EXPERIMENT_RUNNER_TOOLS as managerTools, EXPERIMENT_PROPOSALS_TOOL as proposalsTool, EXPERIMENT_IDEA_LIMITS, EXPERIMENT_IDEA_EXHAUSTED, EXPERIMENT_SOURCE_LIMITS } from "../../../catalog/experiment-runner.js";
 
-import { agentPlan, agentFindings, actionSummary, coordinatorActions, decisionTables, fileInventory, changeSummary, fileExcerpt, recordContextUsage, recordContextTokens, validateEditTargets, rememberSourceRead, sourcePacket, prefetchSource, boundedLookupBatch, lookupDiagnostic } from "../functions/agent-context.js";
+import { agentPlan, agentFindings, actionSummary, coordinatorActions, decisionTables, fileInventory, changeSummary, reviewSourceTargets, fileExcerpt, recordContextUsage, recordContextTokens, validateEditTargets, rememberSourceRead, sourcePacket, prefetchSource, boundedLookupBatch, lookupDiagnostic } from "../functions/agent-context.js";
 import { ExperimentSourceIndex } from "./ExperimentSourceIndex.js";
 
 const terminal = c => [S.GOAL, S.EXHAUSTED, S.BLOCKED, S.CANCELLED].includes(c.state);
@@ -210,9 +210,9 @@ export class ExperimentRunner {
     snapshotFiles(c.plan, candidate.changes, accepted.files);
     const changes = changeSummary(accepted.files, candidate.changes, 8000), candidateFiles = { ...accepted.files, ...candidate.changes };
     const candidateOverview = await this.sourceIndex.overview(c.plan, candidateFiles, signal);
-    const reviewTargets = changes.map(change => ({ path: change.path, start_line: Math.max(1, change.start_line - 3), line_count: Math.min(40, change.added_lines + 6) }));
+    const reviewTargets = reviewSourceTargets(changes);
     const assessed = await this.sourceDecision(record, "assessor", { ...context, findings: agentFindings(c, "assessor"), plan: agentPlan(c.plan, changes), candidate: { hypothesis: candidate.hypothesis, changes },
-      review_rule: "Review only the proposed change, its local context and declared constraints. The harness computes the diff from editor replacements. Read additional ranges when needed; inspect truncated changes before approving. Return a review decision, not replacement code." }, [reviewTool], accepted.files, candidateFiles, signal, prefetchSource(c.plan, candidateFiles, reviewTargets, candidateOverview, "candidate"));
+      review_rule: "Review only the proposed change, its local context and declared constraints. The harness supplies complete replacement hunks with accepted and candidate line coordinates. A truncated hunk omits its code entirely; read its exact ranges before approving. Use retained verified dependencies and read only missing source. Return a review decision, not replacement code." }, [reviewTool], accepted.files, candidateFiles, signal, prefetchSource(c.plan, candidateFiles, reviewTargets, candidateOverview, "candidate"));
     const review = assessed.arguments;
     if (!review.approved) return { staged: false, reason: review.reason };
     this.check(record, signal);

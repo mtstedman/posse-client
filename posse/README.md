@@ -595,8 +595,11 @@ not silently clipped into pinned evidence. Lookup attempts still consume their
 turn allowance, including blocked duplicates; use the retained source and notes.
 Prefer `test.submit_patch` exact replacements; full-file candidates
 remain supported for compatibility. The harness computes the diff deterministically.
-Assessors receive that compact diff, local candidate context, and review constraints,
-then return a review decision. Writer and assessor do not receive unrelated
+Assessors receive complete replacement hunks with coordinates in both snapshots,
+prefetched context around each changed region, and review constraints,
+then return a review decision. Oversized hunks omit their code entirely and retain
+exact ranges for follow-up reads. Complete dependency reads are retained whole
+when space allows, instead of repeatedly clipping every older read. Writer and assessor do not receive unrelated
 raw source or narrative change history. All improvement roles receive measured starting/accepted baselines and a compact table of every run status and numeric result; identical result profiles are shared. The dispatcher captures a missing baseline deterministically before the first idea call. Failed or unmeasured runs have null results, never fabricated zeros. Truncated changes require further reading before approval.
 Writer and assessor each have at most twelve lookup turns per preparation, including
 resource inspection; a batch counts as one turn with at most eight operations.

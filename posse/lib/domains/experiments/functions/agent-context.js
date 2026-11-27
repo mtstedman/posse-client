@@ -1,3 +1,4 @@
+import { lineChangeHunks } from "../../../shared/format/functions/line-diff.js";
 import { fileDigest } from "./snapshots.js";
 import { EXPERIMENT_SOURCE_LIMITS as L } from "../../../catalog/experiment-runner.js";
 
@@ -29,22 +30,37 @@ export function editableFiles(plan, files, maxBytes = 24000) {
   return result;
 }
 
-// A linear, bounded replacement span avoids sending two complete file copies.
-// Multiple distant edits can share a span; readers can request exact ranges.
-export function changeSummary(before, changes, maxCharacters = 16000) {
-  let remaining = maxCharacters;
-  return Object.entries(changes).filter(([file, after]) => before[file] !== after).map(([file, after]) => {
-    const old = (before[file] || "").split("\n"), next = after.split("\n");
-    let start = 0, end = 0;
-    while (start < Math.min(old.length, next.length) && old[start] === next[start]) start++;
-    while (end < Math.min(old.length, next.length) - start && old[old.length - 1 - end] === next[next.length - 1 - end]) end++;
-    const removed = old.slice(start, old.length - end).join("\n"), added = next.slice(start, next.length - end).join("\n");
-    const allowance = Math.max(0, Math.floor(remaining / 2));
-    const result = { path: file, before_sha256: fileDigest(before[file] || ""), after_sha256: fileDigest(after), start_line: start + 1,
-      removed_lines: old.length - start - end, added_lines: next.length - start - end,
-      removed: removed.slice(0, allowance), added: added.slice(0, allowance), truncated: removed.length > allowance || added.length > allowance };
-    remaining -= result.removed.length + result.added.length; return result;
+// Send complete replacement hunks, never the unchanged span between edits.
+// Oversized hunks keep exact coordinates for scoped reads instead of clipped code.
+export function changeSummary(before, changes, maxBytes = 16000) {
+  let remaining = maxBytes;
+  return Object.entries(changes).filter(([file, after]) => before[file] !== after).flatMap(([file, after]) => {
+    const prior = before[file] || "";
+    const identity = { path: file, before_sha256: fileDigest(prior), after_sha256: fileDigest(after) };
+    const hunks = lineChangeHunks(prior, after) || [{ before_start_line: 1, start_line: 1,
+      removed_lines: prior.split("\n").length, added_lines: after.split("\n").length,
+      removed: prior, added: after }];
+    return hunks.map(hunk => {
+      const bytes = Buffer.byteLength(JSON.stringify([hunk.removed, hunk.added]));
+      const complete = bytes <= remaining;
+      if (complete) remaining -= bytes;
+      return { ...identity, ...hunk,
+        removed: complete ? hunk.removed : "", added: complete ? hunk.added : "", truncated: !complete };
+    });
   });
+}
+
+export function reviewSourceTargets(changes) {
+  const targets = [];
+  for (const change of changes) {
+    const start = Math.max(1, change.start_line - 3);
+    const end = change.start_line + Math.max(1, change.added_lines) + 2;
+    const previous = targets.at(-1);
+    if (previous?.path === change.path && start <= previous.start_line + previous.line_count
+      && end - previous.start_line < 200) previous.line_count = Math.max(previous.line_count, end - previous.start_line + 1);
+    else targets.push({ path: change.path, start_line: start, line_count: Math.min(200, end - start + 1) });
+  }
+  return targets;
 }
 
 export function fileExcerpt(files, { path, start_line = 1, line_count = 120 }, maxBytes = L.contextBytes) {
@@ -315,11 +331,19 @@ export function sourcePacket(history, extra = {}, maxBytes = L.contextBytes) {
     const fresh = history.entries.slice(-freshCount), older = history.entries.slice(0, -freshCount);
     const freshPacket = fitPacket(fresh, maxBytes - 32, wrap, bounded);
     // Older source may use spare room, but cannot shorten a newly requested span.
-    const spare = maxBytes - Buffer.byteLength(JSON.stringify(freshPacket));
-    while (older.length && spare < older.length * 512) { older.shift(); history.omitted++; }
-    if (older.length) {
-      packet = fitPacket(older, maxBytes, entries => wrap([...entries, ...freshPacket.requested_source]), bounded);
-    } else packet = wrap(freshPacket.requested_source);
+    const retained = [];
+    for (const entry of older.reverse()) {
+      const next = [entry, ...retained, ...freshPacket.requested_source];
+      // Keep verified dependencies intact; evict whole reads instead of turning
+      // every older read into a shortened prefix that must be fetched again.
+      if (Buffer.byteLength(JSON.stringify(wrap(next))) + 32 <= maxBytes) retained.unshift(entry);
+      else if (entry.truncated) {
+        const spare = maxBytes - Buffer.byteLength(JSON.stringify(wrap([...retained, ...freshPacket.requested_source]))) - 32;
+        if (spare >= 512) retained.unshift(bounded(entry, spare));
+        else history.omitted++;
+      } else history.omitted++;
+    }
+    packet = wrap([...retained, ...freshPacket.requested_source]);
   } else packet = fitPacket(history.entries, maxBytes, wrap, bounded);
   if (Buffer.byteLength(JSON.stringify(packet)) > maxBytes) throw new Error("Source packet exceeds its byte budget.");
   history.fresh = 0;
